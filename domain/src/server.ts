@@ -1,0 +1,96 @@
+/**
+ * server.ts —— MCP stdio server 装配：注册五个工具并连接 stdio transport。
+ * 被 core 包经 MCP stdio spawn 调用；工具实现见 tools.ts。
+ */
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { z } from 'zod';
+import {
+  listStructure,
+  readChapter,
+  searchContent,
+  wordCount,
+  writeChapter,
+} from './tools.js';
+
+const server = new McpServer({
+  name: 'domain',
+  version: '0.1.0',
+});
+
+/** 工具结果统一序列化为 JSON 文本。 */
+function jsonResult(data: unknown) {
+  return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+}
+
+server.registerTool(
+  'list_structure',
+  {
+    title: '列出作品结构树',
+    description:
+      '返回 workDir/manuscript 下的卷/章/场树：卷=子目录，章=.md 文件（frontmatter+正文），场=章内 ### 三级标题。结构永远从文件内容派生。',
+    inputSchema: { workDir: z.string().describe('作品文件夹的绝对路径') },
+  },
+  async ({ workDir }) => jsonResult(listStructure(workDir)),
+);
+
+server.registerTool(
+  'read_chapter',
+  {
+    title: '读取一章',
+    description:
+      '读取 workDir 内 relPath 指向的文件，返回原文 content（含 frontmatter）与解析出的 frontmatter。relPath 必须解析后仍在 workDir 内。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      relPath: z.string().describe('相对 workDir 的文件路径，如 manuscript/卷一/第一章.md'),
+    },
+  },
+  async ({ workDir, relPath }) => jsonResult(readChapter(workDir, relPath)),
+);
+
+server.registerTool(
+  'write_chapter',
+  {
+    title: '原子写入一章',
+    description:
+      '把 content 原子写入 workDir 内 relPath（同目录临时文件+rename），父目录自动创建；只允许 .md 后缀。返回 { ok, bytes }。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      relPath: z.string().describe('相对 workDir 的目标路径，必须以 .md 结尾'),
+      content: z.string().describe('章文件完整内容（可含 frontmatter）'),
+    },
+  },
+  async ({ workDir, relPath, content }) => jsonResult(writeChapter(workDir, relPath, content)),
+);
+
+server.registerTool(
+  'search_content',
+  {
+    title: '搜索正文',
+    description:
+      '在 manuscript/**/*.md 内做大小写不敏感子串匹配，返回 { relPath, line, excerpt }（excerpt 前后各 30 字截断），默认最多 20 条。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      query: z.string().describe('要搜索的子串（大小写不敏感）'),
+      limit: z.number().int().positive().default(20).describe('最多返回条数，默认 20'),
+    },
+  },
+  async ({ workDir, query, limit }) => jsonResult(searchContent(workDir, query, limit)),
+);
+
+server.registerTool(
+  'word_count',
+  {
+    title: '统计字数',
+    description:
+      '统计字数（口径：非空白字符，中文写作惯例，不含 frontmatter）。给 relPath 只算该章；不给则汇总全 manuscript 并附每章明细。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      relPath: z.string().optional().describe('可选：相对 workDir 的章文件路径'),
+    },
+  },
+  async ({ workDir, relPath }) => jsonResult(wordCount(workDir, relPath)),
+);
+
+// 挂起等待 stdio 上的 MCP 请求
+await server.connect(new StdioServerTransport());

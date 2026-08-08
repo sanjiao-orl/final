@@ -1,0 +1,24 @@
+{
+  "name": "domain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "小说写作工作台的 MCP 领域服务（stdio，被 core 经 MCP spawn 调用）",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "check": "tsc --noEmit -p .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "yaml": "^2.7.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.9.3",
+    "vitest": "^3.0.5"
+  }
+}
