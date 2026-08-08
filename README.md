@@ -8,10 +8,11 @@
 npm install
 
 # 配置模型(三要素缺一不可,已写入用户级环境变量,新开终端即生效)
-#   LLM_BASE_URL  https://opencode.ai/zen/v1(OpenCode Zen,复用 OPENCODE_API_KEY)
-#   LLM_API_KEY   OpenCode Zen key
-#   LLM_MODEL     deepseek-v4-flash-free(Zen 免费档;付费模型余额不足会 402,需到 opencode.ai 充值后改用)
-#   LLM_MODEL_CHEAP  (可选)后台档模型,缺省回退 LLM_MODEL
+#   LLM_BASE_URL  https://opencode.ai/zen/go/v1(OpenCode Go 订阅,复用 OPENCODE_API_KEY;key 存放处见 AGENTS.md)
+#   LLM_API_KEY   OpenCode key
+#   LLM_MODEL     deepseek-v4-pro(写作档)
+#   LLM_MODEL_CHEAP  deepseek-v4-flash(后台档,缺省回退 LLM_MODEL)
+# 注:裸 /zen/v1 端点付费模型余额不足会 402;/zen/go/v1 为 Go 订阅模型池,可用模型以 GET /models 为准
 
 npm run dev:core        # 起 sidecar 核心(打印 port/token,写 core-runtime.local.json)
 # 浏览器打开 http://127.0.0.1:<port>/dev → 裸联调页(对话/流式/工具/多会话)
