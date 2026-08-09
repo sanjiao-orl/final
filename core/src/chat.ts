@@ -2,7 +2,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { stepCountIs, streamText, type LanguageModel, type ToolSet } from 'ai';
 import { z } from 'zod';
-import type { SessionRow, SessionStore } from './session-store.js';
+import type { MessageRow, SessionRow, SessionStore } from './session-store.js';
 import { sse, startSse, writeJson } from './http.js';
 
 export const chatBodySchema = z.object({
@@ -36,6 +36,45 @@ function systemPrompt(workDir: string | undefined): string {
 
 /** 多轮工具调用的步数上限。 */
 const MAX_STEPS = 8;
+
+/** 跨对话记忆：回放给模型的历史消息条数上限（含当前用户消息）。 */
+const MAX_REPLAY_MESSAGES = 20;
+
+/** 跨对话记忆：回放历史的总字符预算，超限从最旧处截断。 */
+const MAX_REPLAY_CHARS = 25_000;
+
+/**
+ * 跨对话记忆：把会话历史回放成 messages（替代单轮 prompt: text）。
+ * 已知限制：assistant 的工具调用结果不重放——AI SDK 要求 tool-call 与 tool-result 成对，
+ * 而历史只存了 assistant 侧的 toolCalls，回放会校验失败；纯工具轮（无文本）也一并跳过。
+ * 预算：最多最近 MAX_REPLAY_MESSAGES 条、合计 MAX_REPLAY_CHARS 字符，从最新往回取；
+ * 当前用户消息刚落库，必在回放内且位于末尾。相邻同 role（纯工具轮被跳过/预算截断造成）
+ * 需自合并——实测 AI SDK 不合并，而部分 provider 拒绝连续同角色消息。
+ */
+function buildReplayMessages(
+  rows: MessageRow[]
+): { role: 'user' | 'assistant'; content: string }[] {
+  const picked: { role: 'user' | 'assistant'; content: string }[] = [];
+  let total = 0;
+  for (let i = rows.length - 1; i >= 0 && picked.length < MAX_REPLAY_MESSAGES; i--) {
+    const row = rows[i]!;
+    if (row.role === 'assistant' && row.content.trim() === '') continue;
+    if (picked.length > 0 && total + row.content.length > MAX_REPLAY_CHARS) break;
+    total += row.content.length;
+    picked.push({ role: row.role, content: row.content });
+  }
+  picked.reverse();
+  // 截断后若首条是 assistant（其对应的 user 引导已被裁掉），丢掉。
+  if (picked[0]?.role === 'assistant') picked.shift();
+  // 相邻同 role 合并为一条，保证 user/assistant 交替。
+  const merged: { role: 'user' | 'assistant'; content: string }[] = [];
+  for (const m of picked) {
+    const last = merged[merged.length - 1];
+    if (last && last.role === m.role) last.content += '\n' + m.content;
+    else merged.push({ role: m.role, content: m.content });
+  }
+  return merged;
+}
 
 /**
  * 处理一次 /chat 请求。校验、会话解析、用户消息落库在 SSE 之前完成（失败返回 JSON 错误）；
@@ -83,7 +122,7 @@ export async function handleChatRequest(
     const options: Parameters<typeof streamText>[0] = {
       model,
       system: systemPrompt(parsed.data.workDir),
-      prompt: text,
+      messages: buildReplayMessages(deps.store.listMessages(sessionId)),
       stopWhen: stepCountIs(MAX_STEPS),
       abortSignal: abort.signal,
     };

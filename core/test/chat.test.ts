@@ -21,6 +21,12 @@ function postChat(baseUrl: string, token: string, body: unknown): Promise<Respon
   });
 }
 
+/** mock 模型收到的 prompt 消息 content 可能是 string 或 AI SDK 规范化的 content-part 数组，统一取文本。 */
+function promptText(m: { content: unknown }): string {
+  if (typeof m.content === 'string') return m.content;
+  return (m.content as { text?: string }[]).map((p) => p.text ?? '').join('');
+}
+
 describe('/chat SSE 管道', () => {
   it('文本流：text-delta → done，用户与 assistant 消息落库，title 取首条用户消息前 20 字', async () => {
     const s = await startTestServer({ modelForTier: () => stepModel([textResult(['你好，', '世界！'])]) });
@@ -210,6 +216,95 @@ describe('/chat SSE 管道', () => {
         await fetch(`${s.baseUrl}/sessions?scope=`, { headers: { Authorization: `Bearer ${s.token}` } })
       ).json() as { sessions: { id: string }[] };
       expect(unscoped.sessions.map((x) => x.id)).toEqual([sessionId2]);
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('多轮会话回放：续聊时模型收到完整历史（首轮 user/assistant 都在，顺序正序）', async () => {
+    const model = stepModel([textResult(['第一轮回复']), textResult(['第二轮回复'])]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const res1 = await postChat(s.baseUrl, s.token, { text: '第一轮问题' });
+      const ev1 = await readSse(res1);
+      const sessionId = ev1.at(-1)!.data.sessionId as string;
+
+      const res2 = await postChat(s.baseUrl, s.token, { sessionId, text: '第二轮问题' });
+      const ev2 = await readSse(res2);
+      expect(ev2.at(-1)!.event).toBe('done');
+
+      const second = model.doStreamCalls[1]!.prompt.filter((m) => m.role !== 'system');
+      expect(second.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
+      expect(second.map((m) => promptText(m))).toEqual(['第一轮问题', '第一轮回复', '第二轮问题']);
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('回放跳过纯工具轮（空文本 assistant），相邻 user 合并为一条', async () => {
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const sid = s.store.createSession('回放').id;
+      s.store.addMessage(sid, { role: 'user', content: '第一问' });
+      // 纯工具轮：无文本，只有 toolCalls（工具结果不重放，整条跳过）
+      s.store.addMessage(sid, {
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'tc-1', name: 'word_count', args: { relPath: 'ch01.md' } }],
+      });
+      s.store.addMessage(sid, { role: 'user', content: '追问' });
+
+      const res = await postChat(s.baseUrl, s.token, { sessionId: sid, text: '最新问题' });
+      const evs = await readSse(res);
+      expect(evs.at(-1)!.event).toBe('done');
+
+      const prompt = model.doStreamCalls[0]!.prompt.filter((m) => m.role !== 'system');
+      expect(prompt.map((m) => m.role)).toEqual(['user']); // 空 assistant 跳过后相邻 user 合并成一条
+      expect(promptText(prompt[0]!)).toBe('第一问\n追问\n最新问题');
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('回放条数预算：历史超过 20 条时只回放最近片段，当前消息必在末尾', async () => {
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const sid = s.store.createSession('预算').id;
+      for (let i = 0; i < 30; i++) {
+        s.store.addMessage(sid, { role: 'user', content: `第${i}条问题` });
+        s.store.addMessage(sid, { role: 'assistant', content: `第${i}条回答` });
+      }
+      const res = await postChat(s.baseUrl, s.token, { sessionId: sid, text: '最新问题' });
+      const evs = await readSse(res);
+      expect(evs.at(-1)!.event).toBe('done');
+
+      const prompt = model.doStreamCalls[0]!.prompt.filter((m) => m.role !== 'system');
+      expect(prompt.length).toBe(19); // 61 条截到最近 20 条，首条 assistant 无 user 引导被裁 → 19
+      expect(promptText(prompt.at(-1)!)).toBe('最新问题');
+      expect(prompt.slice(0, 5).map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant', 'user']);
+      expect(prompt.every((m, i) => (i % 2 === 0 ? m.role === 'user' : m.role === 'assistant'))).toBe(true); // 严格交替
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('回放字符预算：历史超 25k 字符只回放最近片段，截断后从 user 开始', async () => {
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const sid = s.store.createSession('预算').id;
+      s.store.addMessage(sid, { role: 'user', content: 'A'.repeat(20_000) });
+      s.store.addMessage(sid, { role: 'assistant', content: 'B'.repeat(20_000) });
+      // 从最新往回：assistant 20k ≤ 25k 保留；user 20k 会超预算被截；回放 [assistant, user] 首条 assistant 被裁
+      const res = await postChat(s.baseUrl, s.token, { sessionId: sid, text: '最新问题' });
+      const evs = await readSse(res);
+      expect(evs.at(-1)!.event).toBe('done');
+
+      const prompt = model.doStreamCalls[0]!.prompt.filter((m) => m.role !== 'system');
+      expect(prompt.map((m) => m.role)).toEqual(['user']);
+      expect(promptText(prompt[0]!)).toBe('最新问题');
     } finally {
       await s.close();
     }
