@@ -7,12 +7,14 @@ import { MockLanguageModelV3, MockLanguageModelV4 } from 'ai/test';
 import type { LanguageModelV3StreamPart, LanguageModelV3StreamResult, LanguageModelV4StreamPart } from '@ai-sdk/provider';
 import type { ChatDeps } from '../src/chat.js';
 import { createAppServer } from '../src/server.js';
+import { CandidateStore } from '../src/candidate-store.js';
 import { SessionStore } from '../src/session-store.js';
 
 export interface TestServer {
   baseUrl: string;
   token: string;
   store: SessionStore;
+  candidates: CandidateStore;
   close: () => Promise<void>;
 }
 
@@ -21,7 +23,9 @@ export async function startTestServer(overrides: {
   tools?: ChatDeps['tools'];
 } = {}): Promise<TestServer> {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'novel-core-test-'));
-  const store = new SessionStore(path.join(dir, 'sessions.sqlite'));
+  const dbPath = path.join(dir, 'sessions.sqlite');
+  const store = new SessionStore(dbPath);
+  const candidates = new CandidateStore(dbPath);
   const token = randomUUID();
   const chat: ChatDeps = {
     store,
@@ -32,7 +36,14 @@ export async function startTestServer(overrides: {
       }),
     tools: overrides.tools,
   };
-  const server = createAppServer({ token, store, chat, version: 'test' });
+  const server = createAppServer({
+    token,
+    store,
+    chat,
+    candidates,
+    rewrite: { modelForTier: chat.modelForTier },
+    version: 'test',
+  });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : 0;
@@ -40,10 +51,12 @@ export async function startTestServer(overrides: {
     baseUrl: `http://127.0.0.1:${port}`,
     token,
     store,
+    candidates,
     close: async () => {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       store.close();
+      candidates.close();
     },
   };
 }

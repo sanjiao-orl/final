@@ -7,6 +7,8 @@ import { DatabaseSync } from 'node:sqlite';
 export interface SessionRow {
   id: string;
   title: string;
+  /** 讨论归属：'' = 无归属讨论；否则为章 relPath（章节内讨论）。创建后不变。 */
+  scope: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -26,13 +28,17 @@ export interface NewMessage {
   toolCalls?: unknown[];
 }
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS sessions (
+/** sessions 表 DDL（candidates 外键依赖它，CandidateStore 建表前需确保存在）。 */
+export const SESSIONS_TABLE_DDL = `CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL DEFAULT '',
+  scope TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
-);
+);`;
+
+const SCHEMA = `
+${SESSIONS_TABLE_DDL}
 CREATE TABLE IF NOT EXISTS messages (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -47,6 +53,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_session_created ON messages(session_id, 
 interface DbSessionRow {
   id: string;
   title: string;
+  scope: string;
   created_at: string;
   updated_at: string;
 }
@@ -68,29 +75,42 @@ export class SessionStore {
     const db = new DatabaseSync(dbPath);
     db.exec('PRAGMA foreign_keys = ON;');
     db.exec(SCHEMA);
+    // 旧库迁移：第 2 周的 sessions 表没有 scope 列，缺则补上（默认 ''=无归属）。
+    const cols = db.prepare('PRAGMA table_info(sessions)').all() as unknown as { name: string }[];
+    if (!cols.some((c) => c.name === 'scope')) {
+      db.exec("ALTER TABLE sessions ADD COLUMN scope TEXT NOT NULL DEFAULT ''");
+    }
     this.db = db;
   }
 
-  createSession(title: string): SessionRow {
+  createSession(title: string, scope = ''): SessionRow {
     const now = new Date().toISOString();
     const id = randomUUID();
     this.db
-      .prepare('INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)')
-      .run(id, title, now, now);
-    return { id, title, createdAt: now, updatedAt: now };
+      .prepare('INSERT INTO sessions (id, title, scope, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+      .run(id, title, scope, now, now);
+    return { id, title, scope, createdAt: now, updatedAt: now };
   }
 
   getSession(id: string): SessionRow | undefined {
     const row = this.db
-      .prepare('SELECT id, title, created_at, updated_at FROM sessions WHERE id = ?')
+      .prepare('SELECT id, title, scope, created_at, updated_at FROM sessions WHERE id = ?')
       .get(id) as DbSessionRow | undefined;
     return row ? mapSession(row) : undefined;
   }
 
-  /** 会话列表，按最近更新倒序。 */
-  listSessions(): SessionRow[] {
+  /** 会话列表，按最近更新倒序；scope 传入时按归属精确过滤（''=只看无归属讨论）。 */
+  listSessions(scope?: string): SessionRow[] {
+    if (scope !== undefined) {
+      const rows = this.db
+        .prepare(
+          'SELECT id, title, scope, created_at, updated_at FROM sessions WHERE scope = ? ORDER BY updated_at DESC, id DESC'
+        )
+        .all(scope) as unknown as DbSessionRow[];
+      return rows.map(mapSession);
+    }
     const rows = this.db
-      .prepare('SELECT id, title, created_at, updated_at FROM sessions ORDER BY updated_at DESC, id DESC')
+      .prepare('SELECT id, title, scope, created_at, updated_at FROM sessions ORDER BY updated_at DESC, id DESC')
       .all() as unknown as DbSessionRow[];
     return rows.map(mapSession);
   }
@@ -122,7 +142,13 @@ export class SessionStore {
 }
 
 function mapSession(row: DbSessionRow): SessionRow {
-  return { id: row.id, title: row.title, createdAt: row.created_at, updatedAt: row.updated_at };
+  return {
+    id: row.id,
+    title: row.title,
+    scope: row.scope,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 function mapMessage(row: DbMessageRow): MessageRow {

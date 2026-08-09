@@ -6,3 +6,5 @@ dist/
 .DS_Store
 Thumbs.db
 shell/src-tauri/target/
+.novel/
+.playwright-mcp/

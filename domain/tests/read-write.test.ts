@@ -24,6 +24,8 @@ describe('read_chapter', () => {
     expect(readChapter(work, 'manuscript/裸章.md')).toEqual({
       content: '只有正文。',
       frontmatter: {},
+      frontmatterRaw: '',
+      body: '只有正文。',
     });
   });
 

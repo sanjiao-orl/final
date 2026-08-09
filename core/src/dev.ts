@@ -154,7 +154,8 @@ function send() {
   appendBubble('user', text);
   var assistantEl = appendBubble('assistant', '');
   state.toolLines = {};
-  var body = JSON.stringify({ sessionId: state.sessionId, text: text });
+  // sessionId 为 null 时不下发该字段（服务端 schema 的 optional 不接受 null）
+  var body = JSON.stringify(state.sessionId ? { sessionId: state.sessionId, text: text } : { text: text });
 
   fetch('/chat', {
     method: 'POST',

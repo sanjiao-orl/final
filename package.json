@@ -10,6 +10,7 @@
   "scripts": {
     "dev:core": "npm run dev -w core",
     "dev:domain": "npm run dev -w domain",
+    "dev:shell": "npm run dev -w shell",
     "test": "npm test --workspaces --if-present",
     "check": "npm run check --workspaces --if-present",
     "build": "npm run build --workspaces --if-present"

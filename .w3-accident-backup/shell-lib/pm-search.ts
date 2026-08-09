@@ -1,0 +1,88 @@
+/**
+ * pm-search.ts —— ProseMirror 文档纯文本定位：把扁平文档（段落/标题块）拼成单串文本搜索，
+ * 再把命中偏移映射回 PM 位置。候选锚定（original ↔ 正文范围）全靠它。
+ *
+ * 拼接约定：块间恰好一个 '\n'；hard_break 渲染为 '\n'（leafText）。
+ * 选区捕获必须用同一约定：captureSelection = doc.textBetween(from, to, '\n', '\n')。
+ */
+import type { Node as PMNode } from '@tiptap/pm/model';
+
+export interface TextRange {
+  from: number;
+  to: number;
+}
+
+interface Block {
+  /** 块文本在 PM 文档中的起始位置（节点起始 pos + 1）。 */
+  start: number;
+  /** 块内文本（hard_break 已渲染为 '\n'）。 */
+  text: string;
+}
+
+/** 扁平文档假设：只取 textblock（paragraph/heading），不深入嵌套容器。 */
+function textBlocks(doc: PMNode): Block[] {
+  const blocks: Block[] = [];
+  doc.descendants((node, pos) => {
+    if (node.isTextblock) {
+      blocks.push({ start: pos + 1, text: node.textBetween(0, node.content.size, '', '\n') });
+      return false;
+    }
+    return true;
+  });
+  return blocks;
+}
+
+/** 整文档纯文本（与 captureSelection 同约定）。 */
+export function docText(doc: PMNode): string {
+  return textBlocks(doc)
+    .map((b) => b.text)
+    .join('\n');
+}
+
+/** 捕获选区文本（创建候选时的 original）。 */
+export function captureSelection(doc: PMNode, from: number, to: number): string {
+  return doc.textBetween(from, to, '\n', '\n');
+}
+
+/**
+ * 全文搜索 needle，返回全部命中的 PM 范围（可能 0/1/N 个）。
+ * 块间 '\n' 占拼接串 1 字符，对应 PM 里块间隙整体（2 个位置：前块闭合+后块开启）。
+ */
+export function findTextRanges(doc: PMNode, needle: string): TextRange[] {
+  if (!needle) return [];
+  const blocks = textBlocks(doc);
+  const s = blocks.map((b) => b.text).join('\n');
+  const ranges: TextRange[] = [];
+
+  /** 拼接串偏移 → PM 位置。 */
+  const posAt = (offset: number): number => {
+    let rest = offset;
+    for (const b of blocks) {
+      if (rest <= b.text.length) return b.start + rest;
+      rest -= b.text.length + 1; // 文本 + 块间分隔符
+    }
+    // 恰落在文末
+    const last = blocks[blocks.length - 1];
+    return last ? last.start + last.text.length : 0;
+  };
+
+  let idx = 0;
+  for (;;) {
+    const hit = s.indexOf(needle, idx);
+    if (hit < 0) break;
+    ranges.push({ from: posAt(hit), to: posAt(hit + needle.length) });
+    idx = hit + 1;
+  }
+  return ranges;
+}
+
+/** 唯一命中判定：恰好一个命中返回范围，否则给原因。 */
+export function locateUnique(
+  doc: PMNode,
+  needle: string
+): { ok: true; range: TextRange } | { ok: false; reason: 'not-found' | 'ambiguous' } {
+  const ranges = findTextRanges(doc, needle);
+  if (ranges.length === 0) return { ok: false, reason: 'not-found' };
+  if (ranges.length > 1) return { ok: false, reason: 'ambiguous' };
+  return { ok: true, range: ranges[0]! };
+}

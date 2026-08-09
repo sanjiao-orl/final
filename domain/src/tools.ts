@@ -4,6 +4,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { frontmatterEnd, parseFrontmatter } from './frontmatter.js';
 import {
   assertWorkDir,
@@ -145,16 +146,27 @@ export interface ReadChapterResult {
   /** 文件原文（含 frontmatter），与 write_chapter 的 content 可往返。 */
   content: string;
   frontmatter: ReturnType<typeof parseFrontmatter>;
+  /** frontmatter 原始文本块（含 --- 围栏与结尾换行），原样回拼可字节级保留未知字段；无 frontmatter 为空串。 */
+  frontmatterRaw: string;
+  /** 去掉 frontmatter 后的正文原文。 */
+  body: string;
 }
 
 /** read_chapter：读取 workDir 内任意文件原文并解析 frontmatter；文件缺失抛错。 */
 export function readChapter(workDir: string, relPath: string): ReadChapterResult {
   const abs = resolveInside(workDir, relPath);
   const content = fs.readFileSync(abs, 'utf8');
-  return { content, frontmatter: parseFrontmatter(content) };
+  const fmEnd = frontmatterEnd(content);
+  return {
+    content,
+    frontmatter: parseFrontmatter(content),
+    frontmatterRaw: content.slice(0, fmEnd),
+    body: content.slice(fmEnd),
+  };
 }
 
-/** write_chapter：仅允许 .md 后缀，原子写（tmp + rename），父目录自动创建。 */
+/** write_chapter：仅允许 .md 后缀，原子写（tmp + rename），父目录自动创建。
+ *  覆盖已存在且内容有变化的文件前，先把旧内容滚动快照进 .novel/history/（安全阀）。 */
 export function writeChapter(
   workDir: string,
   relPath: string,
@@ -164,6 +176,7 @@ export function writeChapter(
     throw new Error(`write_chapter 只允许 .md 文件: ${relPath}`);
   }
   const abs = resolveInside(workDir, relPath);
+  snapshotBeforeWrite(workDir, relPath, abs, content);
   return atomicWrite(abs, content);
 }
 
@@ -242,4 +255,113 @@ export function wordCount(workDir: string, relPath?: string): WordCountResult {
     total: items.reduce((sum, x) => sum + x.wordCount, 0),
     files: items,
   };
+}
+
+// ---------- 安全阀：快照 / 软删 / 导出 ----------
+
+/** 每章保留的滚动快照份数（安全阀口径：保存时快照旧版本）。 */
+export const SNAPSHOT_KEEP = 20;
+
+/** 本地时间戳（毫秒级）+ 随机后缀，避免同刻碰撞；字典序即时间序。 */
+function stamp(): string {
+  const d = new Date();
+  const p = (n: number, w = 2): string => String(n).padStart(w, '0');
+  const base =
+    `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}` +
+    `-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}${p(d.getMilliseconds(), 3)}`;
+  return `${base}-${randomBytes(2).toString('hex')}`;
+}
+
+/** relPath 拍平成目录安全的一段（分隔符与盘符冒号替换为 __）。 */
+function flattenRel(relPath: string): string {
+  return relPath.replace(/[:/\\]+/g, '__').replace(/\.md$/i, '');
+}
+
+/** .novel 内部子目录的绝对路径（自动创建）。 */
+function novelSubDir(workDir: string, sub: 'history' | 'trash'): string {
+  const dir = path.join(assertWorkDir(workDir), '.novel', sub);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/**
+ * 覆盖写之前快照旧内容到 .novel/history/<拍平的章路径>/<时间戳>.md。
+ * 仅当旧文件存在且内容有变化时快照；随后按时间序裁到最近 SNAPSHOT_KEEP 份。
+ */
+function snapshotBeforeWrite(workDir: string, relPath: string, abs: string, next: string): void {
+  let prev: string;
+  try {
+    prev = fs.readFileSync(abs, 'utf8');
+  } catch {
+    return; // 新文件无旧版可快照
+  }
+  if (prev === next) return; // 内容未变不产生重复快照
+  const dir = path.join(novelSubDir(workDir, 'history'), flattenRel(relPath));
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `${stamp()}.md`), prev, 'utf8');
+  // 滚动裁剪：文件名以时间戳开头，字典序即时间序
+  const names = fs.readdirSync(dir).filter((n) => n.endsWith('.md')).sort();
+  for (const stale of names.slice(0, Math.max(0, names.length - SNAPSHOT_KEEP))) {
+    fs.rmSync(path.join(dir, stale), { force: true });
+  }
+}
+
+export interface DeleteChapterResult {
+  ok: true;
+  /** 软删后相对 workDir 的 trash 路径（正斜杠）。 */
+  trashPath: string;
+}
+
+/**
+ * delete_chapter：软删——把 manuscript 下的 .md 移进 .novel/trash/（时间戳防重名），
+ * 永不物理删除；只允许 manuscript/ 内的 .md，拒绝删 .novel 内部与其他文件。
+ */
+export function deleteChapter(workDir: string, relPath: string): DeleteChapterResult {
+  const posix = toPosix(relPath);
+  if (!posix.startsWith('manuscript/') || !posix.toLowerCase().endsWith('.md')) {
+    throw new Error(`delete_chapter 只允许 manuscript/ 内的 .md 文件: ${relPath}`);
+  }
+  const abs = resolveInside(workDir, relPath); // 越界在此抛错
+  const stampName = `${flattenRel(posix)}-${stamp()}.md`;
+  const target = path.join(novelSubDir(workDir, 'trash'), stampName);
+  fs.renameSync(abs, target); // 文件不存在时抛错；同卷 rename 原子移动
+  return { ok: true, trashPath: toPosix(path.join('.novel', 'trash', stampName)) };
+}
+
+export interface ExportTxtResult {
+  ok: true;
+  /** 导出文件相对 workDir 的路径（正斜杠）。 */
+  path: string;
+  chapters: number;
+  bytes: number;
+}
+
+/**
+ * export_txt：全稿导出为可直接投出的 txt——按结构树顺序（卷→章），
+ * 去 frontmatter、场景标题去掉 ### 标记；章为最小结构（题名+正文），卷名独占一行。
+ * 固定写到 workDir 根目录 全稿-<时间戳>.txt（原子写）。
+ */
+export function exportTxt(workDir: string): ExportTxtResult {
+  const volumes = listStructure(workDir);
+  const blocks: string[] = [];
+  let chapters = 0;
+  for (const vol of volumes) {
+    if (vol.title !== ROOT_VOLUME_TITLE) blocks.push(vol.title);
+    for (const ch of vol.children) {
+      const { body } = readChapter(workDir, ch.relPath);
+      const text = body
+        .split(/\r?\n/)
+        .map((line) => line.replace(SCENE_RE, '$1')) // 场景标题去 ###
+        .join('\n')
+        .replace(/\r\n/g, '\n')
+        .trim();
+      blocks.push(`${ch.title}\n\n${text}`);
+      chapters += 1;
+    }
+  }
+  const content = blocks.join('\n\n\n') + '\n';
+  const name = `全稿-${stamp()}.txt`;
+  const abs = resolveInside(workDir, name);
+  const { bytes } = atomicWrite(abs, content);
+  return { ok: true, path: name, chapters, bytes };
 }

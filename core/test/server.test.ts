@@ -21,6 +21,7 @@ describe('core HTTP 服务', () => {
         ['GET', '/sessions'],
         ['GET', '/sessions/某个id'],
         ['POST', '/chat'],
+        ['POST', '/tools/list_structure'],
       ];
       for (const [method, path] of cases) {
         const res = await fetch(`${s.baseUrl}${path}`, { method });
@@ -40,6 +41,9 @@ describe('core HTTP 服务', () => {
       expect(html).toContain('novel core /dev');
       expect(html).toContain('/chat');
       expect(html).toContain(s.token);
+      // 回归：新会话 sessionId 为 null 时不得下发该字段（服务端 optional 不接受 null）
+      expect(html).not.toContain('JSON.stringify({ sessionId: state.sessionId, text: text })');
+      expect(html).toContain('state.sessionId ? { sessionId: state.sessionId, text: text } : { text: text }');
     } finally {
       await s.close();
     }

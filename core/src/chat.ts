@@ -9,6 +9,10 @@ export const chatBodySchema = z.object({
   sessionId: z.string().uuid().optional(),
   text: z.string().min(1).max(20_000),
   tier: z.enum(['writing', 'background']).optional(),
+  /** 壳当前打开的作品文件夹绝对路径：拼进系统提示，让模型调工具时直接用。 */
+  workDir: z.string().min(1).optional(),
+  /** 新建会话的讨论归属：'' = 无归属；章 relPath = 章节内讨论。已存在的会话忽略此字段。 */
+  scope: z.string().max(500).optional(),
 });
 export type ChatBody = z.infer<typeof chatBodySchema>;
 
@@ -23,6 +27,12 @@ export interface ChatDeps {
 const SYSTEM_PROMPT =
   '你是小说写作工作台的本地写作助手。回答精炼、贴合网文创作场景；' +
   '涉及作品结构、章节内容时优先调用提供的领域工具去读取真实文件，不要凭记忆编造正文。';
+
+/** 壳传入当前作品文件夹时，拼进系统提示：调领域工具一律用这个 workDir。 */
+function systemPrompt(workDir: string | undefined): string {
+  if (!workDir) return SYSTEM_PROMPT;
+  return `${SYSTEM_PROMPT}\n当前打开的作品文件夹：${workDir}。调用领域工具时 workDir 参数一律使用这个路径。`;
+}
 
 /** 多轮工具调用的步数上限。 */
 const MAX_STEPS = 8;
@@ -45,7 +55,7 @@ export async function handleChatRequest(
   const { text } = parsed.data;
   const tier = parsed.data.tier ?? 'writing';
 
-  // 会话解析：缺省新建，title 取首条用户消息前 20 字。
+  // 会话解析：缺省新建，title 取首条用户消息前 20 字，scope 记讨论归属（已有会话沿用原归属）。
   let session: SessionRow | undefined;
   if (parsed.data.sessionId) {
     session = deps.store.getSession(parsed.data.sessionId);
@@ -54,7 +64,7 @@ export async function handleChatRequest(
       return;
     }
   } else {
-    session = deps.store.createSession(text.trim().slice(0, 20));
+    session = deps.store.createSession(text.trim().slice(0, 20), parsed.data.scope ?? '');
   }
   // 两个分支后 session 必非空
   const sessionId = session.id;
@@ -72,7 +82,7 @@ export async function handleChatRequest(
     const model = deps.modelForTier(tier);
     const options: Parameters<typeof streamText>[0] = {
       model,
-      system: SYSTEM_PROMPT,
+      system: systemPrompt(parsed.data.workDir),
       prompt: text,
       stopWhen: stepCountIs(MAX_STEPS),
       abortSignal: abort.signal,

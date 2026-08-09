@@ -6,6 +6,7 @@ import type { Server } from 'node:http';
 import { createModelForTier, getNovelDir, getRuntimeFilePath, loadLlmConfig, VERSION, type Tier } from './config.js';
 import { connectDomainMcp } from './mcp.js';
 import { createAppServer } from './server.js';
+import { CandidateStore } from './candidate-store.js';
 import { SessionStore } from './session-store.js';
 
 interface CliArgs {
@@ -38,18 +39,24 @@ async function main(): Promise<void> {
 
   // 配置缺失（LLM 环境变量）在启动即抛错，不静默降级。
   const llm = loadLlmConfig();
-  const store = new SessionStore(path.join(getNovelDir(), 'sessions.sqlite'));
+  const dbPath = path.join(getNovelDir(), 'sessions.sqlite');
+  const store = new SessionStore(dbPath);
+  const candidates = new CandidateStore(dbPath); // 与 sessions 同库（FK 到 sessions）
   const mcp = await connectDomainMcp(); // 连不上为 null（已 warn），聊天走无工具模式
 
   const token = randomUUID();
   const server = createAppServer({
     token,
     store,
+    candidates,
     version: VERSION,
     chat: {
       store,
       modelForTier: (tier: Tier) => createModelForTier(llm, tier),
       tools: mcp?.tools,
+    },
+    rewrite: {
+      modelForTier: (tier: Tier) => createModelForTier(llm, tier),
     },
   });
 
@@ -78,6 +85,11 @@ async function main(): Promise<void> {
     }
     try {
       store.close();
+    } catch {
+      // 忽略关闭失败
+    }
+    try {
+      candidates.close();
     } catch {
       // 忽略关闭失败
     }

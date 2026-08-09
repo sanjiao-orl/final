@@ -2,6 +2,7 @@
 import { mkdtempSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 import { SessionStore } from '../src/session-store.js';
 
@@ -84,6 +85,54 @@ describe('SessionStore', () => {
     const store = new SessionStore(path.join(dir, 'sessions.sqlite'));
     try {
       expect(store.listSessions()).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('scope：创建时记归属，listSessions(scope) 精确过滤', () => {
+    const store = new SessionStore(tmpDbPath());
+    try {
+      const work = store.createSession('无归属讨论');
+      const ch = store.createSession('本章讨论', '第一卷/第一章.md');
+      expect(work.scope).toBe('');
+      expect(ch.scope).toBe('第一卷/第一章.md');
+      expect(store.getSession(ch.id)?.scope).toBe('第一卷/第一章.md');
+
+      expect(store.listSessions()).toHaveLength(2);
+      expect(store.listSessions('').map((s) => s.id)).toEqual([work.id]);
+      expect(store.listSessions('第一卷/第一章.md').map((s) => s.id)).toEqual([ch.id]);
+      expect(store.listSessions('别的章.md')).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('旧库迁移：第 2 周的 sessions 表（无 scope 列）打开后自动补列，老数据 scope 为空', () => {
+    const dbPath = tmpDbPath();
+    // 手工建一张第 2 周 schema 的旧库并塞一条会话
+    const raw = new DatabaseSync(dbPath);
+    raw.exec(`
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+    raw
+      .prepare('INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)')
+      .run('old-1', '旧会话', '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z');
+    raw.close();
+
+    const store = new SessionStore(dbPath);
+    try {
+      const old = store.getSession('old-1');
+      expect(old).toBeDefined();
+      expect(old!.scope).toBe(''); // 老数据归为无归属讨论
+      // 迁移后新功能正常
+      const ch = store.createSession('本章', 'ch.md');
+      expect(store.listSessions('ch.md').map((s) => s.id)).toEqual([ch.id]);
     } finally {
       store.close();
     }

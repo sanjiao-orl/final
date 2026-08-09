@@ -6,6 +6,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import {
+  deleteChapter,
+  exportTxt,
   listStructure,
   readChapter,
   searchContent,
@@ -90,6 +92,31 @@ server.registerTool(
     },
   },
   async ({ workDir, relPath }) => jsonResult(wordCount(workDir, relPath)),
+);
+
+server.registerTool(
+  'delete_chapter',
+  {
+    title: '软删一章',
+    description:
+      '安全阀：把 manuscript/ 内的 .md 移进 .novel/trash/（时间戳防重名），永不物理删除。返回 { ok, trashPath }；从 trash 移回原路径即找回。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      relPath: z.string().describe('相对 workDir 的章文件路径，必须是 manuscript/ 内的 .md'),
+    },
+  },
+  async ({ workDir, relPath }) => jsonResult(deleteChapter(workDir, relPath)),
+);
+
+server.registerTool(
+  'export_txt',
+  {
+    title: '全稿导出 txt',
+    description:
+      '安全阀：按结构树顺序（卷→章）合并全稿为一个可直接投出的 txt——去 frontmatter、场景标题去 ### 标记。固定写到 workDir 根目录 全稿-<时间戳>.txt，返回 { ok, path, chapters, bytes }。',
+    inputSchema: { workDir: z.string().describe('作品文件夹的绝对路径') },
+  },
+  async ({ workDir }) => jsonResult(exportTxt(workDir)),
 );
 
 // 挂起等待 stdio 上的 MCP 请求

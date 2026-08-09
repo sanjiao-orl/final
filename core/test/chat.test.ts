@@ -127,6 +127,21 @@ describe('/chat SSE 管道', () => {
     }
   });
 
+  it('带 workDir：系统提示拼入作品路径，模型调工具可直接使用', async () => {
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '查字数', workDir: 'C:\\works\\demo' });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      const first = model.doStreamCalls[0] as { prompt: Array<{ role: string; content: unknown }> };
+      const sys = first.prompt.find((m) => m.role === 'system');
+      expect(JSON.stringify(sys?.content)).toContain('C:\\\\works\\\\demo');
+    } finally {
+      await s.close();
+    }
+  });
+
   it('客户端断连：中止 LLM 请求，不落库 assistant 消息（用户消息已落库）', async () => {
     let aborted = false;
     const s = await startTestServer({ modelForTier: () => hangingModel(() => (aborted = true)) });
@@ -159,6 +174,42 @@ describe('/chat SSE 管道', () => {
       expect(aborted).toBe(true); // abortSignal 送达模型调用 = LLM 请求被中止
       const messages = s.store.listMessages(s.store.listSessions()[0]!.id);
       expect(messages.map((m) => m.role)).toEqual(['user']); // 只有用户消息
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('scope：新建会话记讨论归属，GET /sessions?scope= 过滤；已有会话续聊不改归属', async () => {
+    const s = await startTestServer({ modelForTier: () => stepModel([textResult(['嗯。'])]) });
+    try {
+      // 章节内讨论：带 scope 建会话
+      const res = await postChat(s.baseUrl, s.token, { text: '这段怎么改', scope: '第一卷/第一章.md' });
+      const events = await readSse(res);
+      const sessionId = events.at(-1)?.data.sessionId as string;
+      expect(s.store.getSession(sessionId)?.scope).toBe('第一卷/第一章.md');
+
+      // 无归属讨论：不带 scope 建会话
+      const res2 = await postChat(s.baseUrl, s.token, { text: '全书基调怎么想' });
+      const events2 = await readSse(res2);
+      const sessionId2 = events2.at(-1)?.data.sessionId as string;
+      expect(s.store.getSession(sessionId2)?.scope).toBe('');
+
+      // 已有会话续聊时带不同 scope，不改归属
+      const res3 = await postChat(s.baseUrl, s.token, { sessionId, text: '再想想', scope: '' });
+      await readSse(res3);
+      expect(s.store.getSession(sessionId)?.scope).toBe('第一卷/第一章.md');
+
+      // ?scope= 过滤
+      const scoped = await (
+        await fetch(`${s.baseUrl}/sessions?scope=${encodeURIComponent('第一卷/第一章.md')}`, {
+          headers: { Authorization: `Bearer ${s.token}` },
+        })
+      ).json() as { sessions: { id: string }[] };
+      expect(scoped.sessions.map((x) => x.id)).toEqual([sessionId]);
+      const unscoped = await (
+        await fetch(`${s.baseUrl}/sessions?scope=`, { headers: { Authorization: `Bearer ${s.token}` } })
+      ).json() as { sessions: { id: string }[] };
+      expect(unscoped.sessions.map((x) => x.id)).toEqual([sessionId2]);
     } finally {
       await s.close();
     }

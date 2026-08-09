@@ -24,12 +24,12 @@ node core/scripts/e2e.mjs   # 真实 LLM e2e(key 在场才跑)
 
 - `core/` — sidecar 核心:HTTP+SSE server、AI SDK v7、MCP client、node:sqlite 会话持久化
 - `domain/` — MCP 领域服务:结构树(卷/章/场,标题派生)、章节读写(原子写)、搜索、字数统计
-- `shell/` — Tauri 壳(第 2 周动工,当前为空)
+- `shell/` — Tauri 2 + Svelte 5 + TipTap 壳(三栏布局/专注模式/安全阀四件;第 3 周接入 AI 面板+暂存抽屉)
 - `.demo-work/` — 演示作品(测试文本,随时可删)
-- `docs/` — 需求基线(01-产品定义)、旧项目诊断(00)、决策记录(decisions/0001-0004)、路线图(roadmap)
+- `docs/` — 需求基线(01-产品定义)、旧项目诊断(00)、决策记录(decisions/0001-0005)、路线图(roadmap)、审核手册
 - `scripts/check-env.ps1` — 检查 LLM_* 环境变量是否配置
 
 ## 验收口径
 
-- `npm run check` / `npm test`(50 用例)
+- `npm run check` / `npm test`(107 用例:core 46 + domain 37 + shell 24)
 - 每周出口 = 作者用本仓真实写作;不以测试绿为验收
