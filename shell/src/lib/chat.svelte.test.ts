@@ -1,0 +1,197 @@
+// chat.svelte.ts 单测：双讨论存区切换、会话恢复、send 流式链路（含切存区不回写、纯工具轮清理）。
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ChatStreamHandlers, CoreClient } from './core.js';
+import { ChatStore } from './chat.svelte.js';
+import { work } from './work.svelte.js';
+
+beforeEach(() => {
+  // work 是模块单例，重置被 chat 引用的字段，避免测试间泄漏
+  work.workDir = '';
+  work.error = null;
+  work.notice = null;
+  work.current = null;
+});
+
+function streamClient(overrides: Record<string, unknown> = {}): CoreClient {
+  return {
+    listSessions: vi.fn().mockResolvedValue({ sessions: [] }),
+    sessionMessages: vi.fn().mockResolvedValue({ sessionId: 's', messages: [] }),
+    chatStream: vi.fn().mockResolvedValue(undefined),
+    ...overrides,
+  } as unknown as CoreClient;
+}
+
+describe('ChatStore', () => {
+  it('send：user + assistant 占位落 messages，delta 追加、工具行状态、done 回写 sessionId 并刷会话列表', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_body: unknown, h: ChatStreamHandlers) => {
+      h.onDelta('你好');
+      h.onToolCall?.({ id: 't1', name: 'word_count', args: { relPath: 'ch01.md' } });
+      h.onToolResult?.({ id: 't1', name: 'word_count', result: { count: 42 } });
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const listSessions = vi.fn().mockResolvedValue({ sessions: [] });
+    const client = streamClient({ chatStream, listSessions });
+    const chat = new ChatStore();
+    chat.init(client);
+    work.workDir = 'C:/works/demo';
+
+    await chat.send('帮我看看');
+    expect(chat.messages[0]).toEqual({ role: 'user', content: '帮我看看' });
+    expect(chat.messages[1]).toEqual({
+      role: 'assistant',
+      content: '你好',
+      tools: [{ id: 't1', name: 'word_count', done: true }],
+    });
+    expect(chat.sessionId).toBe('s1');
+    expect(chat.streaming).toBe(false);
+    expect(chatStream).toHaveBeenCalledWith(
+      { text: '帮我看看', workDir: 'C:/works/demo', scope: '' },
+      expect.anything(),
+    );
+    expect(listSessions).toHaveBeenCalled(); // onDone 后刷会话列表
+  });
+
+  it('send：已有 sessionId 时续聊请求带 sessionId', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_body: unknown, h: ChatStreamHandlers) => {
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const client = streamClient({ chatStream });
+    const chat = new ChatStore();
+    chat.init(client);
+    chat.sessionId = 's1';
+    await chat.send('继续');
+    expect(chatStream).toHaveBeenCalledWith({ sessionId: 's1', text: '继续', workDir: '' }, expect.anything());
+  });
+
+  it('send：空文本或流式进行中不发请求', async () => {
+    const chatStream = vi.fn();
+    const client = streamClient({ chatStream });
+    const chat = new ChatStore();
+    chat.init(client);
+    await chat.send('   ');
+    expect(chatStream).not.toHaveBeenCalled();
+    chat.streaming = true;
+    await chat.send('发不出去');
+    expect(chatStream).not.toHaveBeenCalled();
+    expect(chat.messages).toEqual([]);
+  });
+
+  it('send：请求抛错 → error 消息；服务端 onError → 服务端错误消息', async () => {
+    const throwClient = streamClient({
+      chatStream: vi.fn().mockImplementation(() => {
+        throw new Error('网络断开');
+      }),
+    });
+    const chat = new ChatStore();
+    chat.init(throwClient);
+    await chat.send('x');
+    expect(chat.messages.at(-1)).toEqual({ role: 'error', content: '请求失败：网络断开' });
+    expect(chat.streaming).toBe(false);
+
+    const errClient = streamClient({
+      chatStream: vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+        h.onError?.(new Error('服务端炸了'));
+      }),
+    });
+    const chat2 = new ChatStore();
+    chat2.init(errClient);
+    await chat2.send('x');
+    expect(chat2.messages.at(-1)).toEqual({ role: 'error', content: '服务端错误：服务端炸了' });
+  });
+
+  it('send：纯工具轮（无文本无工具行）→ assistant 占位被移除', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const client = streamClient({ chatStream });
+    const chat = new ChatStore();
+    chat.init(client);
+    await chat.send('调用工具');
+    expect(chat.messages.map((m) => m.role)).toEqual(['user']);
+  });
+
+  it('send：流式期间切换存区 → done 不回写 sessionId（服务端会话已落库，现场不污染）', async () => {
+    let h!: ChatStreamHandlers;
+    let resolveStream!: () => void;
+    const chatStream = vi.fn().mockImplementation((_b: unknown, handlers: ChatStreamHandlers) => {
+      h = handlers;
+      return new Promise<void>((r) => {
+        resolveStream = r;
+      });
+    });
+    const client = streamClient({ chatStream });
+    const chat = new ChatStore();
+    chat.init(client);
+    chat.scope = '章节A.md';
+    const p = chat.send('问题');
+    chat.scope = '章节B.md'; // 流式期间切走
+    h.onDone?.({ sessionId: 's2', messageId: 'm2' });
+    resolveStream();
+    await p;
+    expect(chat.sessionId).toBeNull(); // 不回写新存区
+  });
+
+  it('setScope：清现场、按归属拉会话列表、自动打开最近会话', async () => {
+    const session = { id: 's1', title: '最近的讨论', scope: '章节A.md', updatedAt: '2026-08-01T00:00:00Z' };
+    const listSessions = vi.fn().mockResolvedValue({ sessions: [session] });
+    const sessionMessages = vi.fn().mockResolvedValue({
+      sessionId: 's1',
+      messages: [{ id: 'm1', role: 'user', content: '旧消息' }],
+    });
+    const client = streamClient({ listSessions, sessionMessages });
+    const chat = new ChatStore();
+    chat.init(client);
+    await chat.setScope('章节A.md');
+    expect(listSessions).toHaveBeenCalledWith('章节A.md');
+    expect(chat.sessionId).toBe('s1');
+    expect(chat.messages[0]?.content).toBe('旧消息');
+  });
+
+  it('openSession：toolCalls 映射为 done 工具行；读取失败 → error 消息', async () => {
+    const okClient = streamClient({
+      sessionMessages: vi.fn().mockResolvedValue({
+        sessionId: 's1',
+        messages: [
+          { id: 'm1', role: 'user', content: '查字数' },
+          {
+            id: 'm2',
+            role: 'assistant',
+            content: '共 42 字。',
+            toolCalls: [{ id: 'tc-1', name: 'word_count', args: { relPath: 'ch01.md' } }],
+          },
+        ],
+      }),
+    });
+    const chat = new ChatStore();
+    chat.init(okClient);
+    await chat.openSession('s1');
+    expect(chat.messages[1]).toEqual({
+      role: 'assistant',
+      content: '共 42 字。',
+      tools: [{ id: 'tc-1', name: 'word_count', done: true }],
+    });
+
+    const failClient = streamClient({ sessionMessages: vi.fn().mockRejectedValue(new Error('404')) });
+    const chat2 = new ChatStore();
+    chat2.init(failClient);
+    await chat2.openSession('s1');
+    expect(chat2.messages[0]).toEqual({ role: 'error', content: '会话读取失败：404' });
+  });
+
+  it('loadSessions 失败不挡主链路：sessions 置空', async () => {
+    const client = streamClient({ listSessions: vi.fn().mockRejectedValue(new Error('core 挂了')) });
+    const chat = new ChatStore();
+    chat.init(client);
+    await chat.loadSessions();
+    expect(chat.sessions).toEqual([]);
+  });
+
+  it('newSession：清空现场', async () => {
+    const chat = new ChatStore();
+    chat.sessionId = 's1';
+    chat.messages = [{ role: 'user', content: 'x' }];
+    chat.newSession();
+    expect(chat.sessionId).toBeNull();
+    expect(chat.messages).toEqual([]);
+  });
+});
