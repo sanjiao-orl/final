@@ -127,19 +127,22 @@
     // to 恰在行尾时 coordsAtPos(to) 返回下一行顶部,取 to-1(选区内最后字符所在行)
     const end = editor.view.coordsAtPos(Math.max(from, to - 1));
     const srect = scroller.getBoundingClientRect();
-    const barH = 38; // 浮动条估算高度
+    // 浮动条几何全在 theme.ts layout 里：barH 估算高度、gap 相对行顶偏移、行高 lineHeight 与排版对齐
+    const barH = layout.selBarHeight;
     const startTop = start.top - srect.top + scroller.scrollTop;
     const endTop = end.top - srect.top + scroller.scrollTop;
     // 主路径：浮动条 [行顶-8, 行顶+30] 恰好卡在行间隙（行高≈30、字形区 [+6.5, +23.5]），
     // 只覆盖选区行自身（高亮无感），与相邻行字形零重叠。
-    const below = endTop - 8;
-    const above = startTop - barH - 8; // 兜底：贴选区首行上方
+    const below = endTop - layout.selBarGap;
+    const above = startTop - barH - layout.selBarGap; // 兜底：贴选区首行上方
     const viewBottom = scroller.scrollTop + scroller.clientHeight;
     const top =
-      below + barH <= viewBottom ? Math.max(4, below) : Math.max(4, above);
+      below + barH <= viewBottom
+        ? Math.max(layout.selBarMinGap, below)
+        : Math.max(layout.selBarMinGap, above);
     selBar = {
       top,
-      left: Math.max(8, start.left - srect.left),
+      left: Math.max(layout.selBarMinLeft, start.left - srect.left),
       from,
       to,
       chars: text.trim().length,
@@ -270,6 +273,8 @@
     padding: 28px 36px 45vh; /* 底部留白让末行也能上提到 42% */
   }
   .prose {
+    /* 行高 17px × 1.75 ≈ 29.75 ≈ 30px：选区浮动条按 layout.lineHeight=30 卡行间隙定位，
+       改字号/行高需同步 shell/src/theme.ts 的 layout.lineHeight 与 selBar 系列。 */
     font-family: var(--body-font);
     font-size: var(--body-size);
     line-height: var(--body-leading);

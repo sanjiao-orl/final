@@ -193,7 +193,10 @@ export interface SearchHit {
 
 const EXCERPT_CONTEXT = 30;
 
-/** search_content：大小写不敏感子串匹配，只搜 manuscript/** /*.md，最多 limit 条。 */
+/**
+ * search_content：大小写不敏感子串匹配，只搜 manuscript/** /*.md，最多 limit 条。
+ * 口径（0004 定稿）：只搜正文——frontmatter 是结构元数据不参与搜索；命中行号按文件实际行号（含 fm 行）。
+ */
 export function searchContent(workDir: string, query: string, limit = 20): SearchHit[] {
   const q = query.toLowerCase();
   if (q === '') return [];
@@ -207,7 +210,10 @@ export function searchContent(workDir: string, query: string, limit = 20): Searc
     } catch {
       continue; // 读取失败的文件跳过
     }
-    const lines = content.split(/\r?\n/);
+    const fmLen = frontmatterEnd(content);
+    // 正文首行在文件中的行号（无 fm 时为 1；fm 块含闭合行、末尾换行）
+    const bodyStartLine = content.slice(0, fmLen).split(/\r?\n/).length;
+    const lines = content.slice(fmLen).split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i] ?? '';
       const idx = line.toLowerCase().indexOf(q);
@@ -216,7 +222,7 @@ export function searchContent(workDir: string, query: string, limit = 20): Searc
       const end = Math.min(line.length, idx + query.length + EXCERPT_CONTEXT);
       const excerpt =
         (start > 0 ? '…' : '') + line.slice(start, end) + (end < line.length ? '…' : '');
-      hits.push({ relPath: toPosix(path.join('manuscript', f.rel)), line: i + 1, excerpt });
+      hits.push({ relPath: toPosix(path.join('manuscript', f.rel)), line: bodyStartLine + i, excerpt });
       if (hits.length >= lim) return hits;
     }
   }

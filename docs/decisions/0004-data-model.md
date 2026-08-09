@@ -27,7 +27,7 @@ domain 包 = **MCP stdio 服务**，core 以 MCP client spawn（缺省 `npx tsx 
 - 路径守卫：`../` 与绝对路径逃逸一律拒绝；
 - 原子写：tmp+rename，写一半不留残文件；
 - 依赖组合锁定 **zod@4 + @modelcontextprotocol/sdk@1.30**——zod 3.25 会让 tsc OOM，勿回退；
-- 已知口径待定：`search_content` 目前连 frontmatter 一起搜，碰结构模块时顺手定口径。
+- 已知口径（2026-08-09 定稿）：`search_content` 只搜正文（frontmatter 是结构元数据不参与搜索），命中行号按文件实际行号（含 fm 行）。
 
 ## 落选
 

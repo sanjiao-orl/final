@@ -69,6 +69,16 @@ export const layout = {
   rightWidth: '360px',
   /** 打字机滚动：光标锁定在滚动视口的 42% 高度处。 */
   typewriterRatio: 0.42,
+  /** 正文行高（px）：排版 17px × 1.75 ≈ 29.75 取整，与 .prose line-height 对齐（Editor 浮动条定位基准）。 */
+  lineHeight: 30,
+  /** 选区浮动条估算高度（px），浮动条定位用。 */
+  selBarHeight: 38,
+  /** 浮动条相对行顶的垂直偏移（px）：主路径卡在 [行顶-8, 行顶+30] 行间隙，只覆盖选区行自身。 */
+  selBarGap: 8,
+  /** 浮动条贴视口边距（px，垂直）。 */
+  selBarMinGap: 4,
+  /** 浮动条贴视口边距（px，水平）。 */
+  selBarMinLeft: 8,
 };
 
 export type ThemeMode = keyof typeof palette;

@@ -54,4 +54,18 @@ describe('search_content', () => {
     expect(searchContent(makeWorkDir(), '目标词')).toEqual([]);
     expect(searchContent(makeWorkDir(), '')).toEqual([]);
   });
+
+  it('frontmatter 不参与搜索；正文命中行号按文件实际行号（含 fm 行）', () => {
+    const work = makeWorkDir();
+    writeTree(work, {
+      'manuscript/卷一/第一章.md': '---\ntitle: 第七章的标题\n---\n夜的第七章。\n第二行也有第七章。',
+    });
+
+    const hits = searchContent(work, '第七章');
+    // title 里的命中不算，正文两处命中，行号 = fm 3 行之后的 4/5
+    expect(hits).toEqual([
+      { relPath: 'manuscript/卷一/第一章.md', line: 4, excerpt: '夜的第七章。' },
+      { relPath: 'manuscript/卷一/第一章.md', line: 5, excerpt: '第二行也有第七章。' },
+    ]);
+  });
 });
