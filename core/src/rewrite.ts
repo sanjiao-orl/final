@@ -23,6 +23,12 @@ const SYSTEM_PROMPT =
   '保持网文连载的叙事文体与原文人称、视角、事实不变；原文是多段的，输出保持同样的段落数与换行；' +
   '指令为空时只做文字润色（疏通语句、增强画面感），不改变情节与细节。';
 
+/** 改写输出护栏：绝对长度上限（字符）。 */
+const MAX_OUTPUT_CHARS = 20_000;
+/** 改写输出护栏：结果/原文长度比的下限与上限（低于下限疑似未完成，高于上限疑似注水）。 */
+const OUTPUT_RATIO_MIN = 0.2;
+const OUTPUT_RATIO_MAX = 3;
+
 /** 处理一次 /rewrite 请求。校验失败返回 JSON 错误；之后进入 SSE 流（text-delta / done / error）。 */
 export async function handleRewriteRequest(
   body: unknown,
@@ -71,6 +77,13 @@ export async function handleRewriteRequest(
       res.end();
       return;
     }
+    // 输出护栏：改写结果异常（超长/过短/注水）不进暂存区，显式 error 让壳走失败红条。
+    const guard = guardRewrite(finalText, original);
+    if (guard) {
+      sse(res, 'error', { message: guard });
+      res.end();
+      return;
+    }
     sse(res, 'done', { text: finalText });
     res.end();
   } catch (err) {
@@ -85,4 +98,19 @@ export async function handleRewriteRequest(
     req.off('close', onClose);
     res.off('close', onClose);
   }
+}
+
+/** 改写结果护栏：通过返回 null，违规返回给人看的错误消息。 */
+export function guardRewrite(result: string, original: string): string | null {
+  if (result.length > MAX_OUTPUT_CHARS) {
+    return `改写结果超长（${result.length} 字符，上限 ${MAX_OUTPUT_CHARS}），已拒绝`;
+  }
+  const ratio = result.length / Math.max(original.trim().length, 1);
+  if (ratio < OUTPUT_RATIO_MIN) {
+    return `改写结果过短（${result.length} 字符 vs 原文 ${original.trim().length}，不足 20%），疑似未完成改写，已拒绝`;
+  }
+  if (ratio > OUTPUT_RATIO_MAX) {
+    return `改写结果过长（${result.length} 字符 vs 原文 ${original.trim().length}，超过 3 倍），疑似注水，已拒绝`;
+  }
+  return null;
 }

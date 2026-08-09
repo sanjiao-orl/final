@@ -73,6 +73,54 @@ describe('/rewrite SSE 改写管道', () => {
       await s.close();
     }
   });
+
+  it('输出护栏：超长（>20k 字符）→ SSE error，不进 done', async () => {
+    const s = await startTestServer({ modelForTier: () => stepModel([textResult(['x'.repeat(20_001)])]) });
+    try {
+      const res = await postRewrite(s.baseUrl, s.token, { original: '原。', instruction: '' });
+      const events = await readSse(res);
+      expect(events.at(-1)?.event).toBe('error');
+      expect(String(events.at(-1)?.data.message)).toContain('超长');
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('输出护栏：过短（不足原文 20%）→ SSE error，疑似未完成', async () => {
+    const s = await startTestServer({ modelForTier: () => stepModel([textResult(['短'])]) });
+    try {
+      const res = await postRewrite(s.baseUrl, s.token, { original: '原'.repeat(50), instruction: '' });
+      const events = await readSse(res);
+      expect(events.at(-1)?.event).toBe('error');
+      expect(String(events.at(-1)?.data.message)).toContain('过短');
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('输出护栏：过长（超过原文 3 倍）→ SSE error，疑似注水', async () => {
+    const s = await startTestServer({ modelForTier: () => stepModel([textResult(['七字扩写文七字扩写文'])]) });
+    try {
+      const res = await postRewrite(s.baseUrl, s.token, { original: '原文', instruction: '' });
+      const events = await readSse(res);
+      expect(events.at(-1)?.event).toBe('error');
+      expect(String(events.at(-1)?.data.message)).toContain('过长');
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('输出护栏：比例在 0.2~3 区间内正常出 done（流式文本仍实时转发）', async () => {
+    const s = await startTestServer({ modelForTier: () => stepModel([textResult(['改后文本。'])]) });
+    try {
+      const res = await postRewrite(s.baseUrl, s.token, { original: '原。', instruction: '' });
+      const events = await readSse(res);
+      expect(events.map((e) => e.event)).toEqual(['text-delta', 'done']);
+      expect(events.at(-1)?.data.text).toBe('改后文本。');
+    } finally {
+      await s.close();
+    }
+  });
 });
 
 describe('/candidates REST', () => {
