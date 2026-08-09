@@ -1,6 +1,6 @@
 <script lang="ts">
   // 组合根：启动连 core（Tauri core_info / 浏览器 query 参数），三栏布局，全局快捷键。
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { connectCore } from './lib/core.js';
   import { work } from './lib/work.svelte.js';
   import { chat } from './lib/chat.svelte.js';
