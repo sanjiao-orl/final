@@ -1,0 +1,1 @@
+{"action":"evaluate","args":{"code":"document.getElementById('proto-panel').style.display='none'; 'collapsed'"},"session":"shell-proto-review"}

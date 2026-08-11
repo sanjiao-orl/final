@@ -15,6 +15,11 @@
 
   let booted = $state(false);
   let bootError = $state<string | null>(null);
+  let autosaveTimer: ReturnType<typeof setInterval> | undefined;
+
+  onDestroy(() => {
+    if (autosaveTimer !== undefined) clearInterval(autosaveTimer);
+  });
 
   onMount(async () => {
     try {
@@ -27,10 +32,9 @@
       await candidates.load();
       booted = true;
       // 自动保存低频兜底（决策 0006：无开关）：每 60s 有脏改动才落盘，失败走显式红条；saveCurrent 自带 saving 互斥
-      const autosave = setInterval(() => {
+      autosaveTimer = setInterval(() => {
         if (work.dirty) void work.saveCurrent();
       }, 60_000);
-      onDestroy(() => clearInterval(autosave));
     } catch (err) {
       bootError = err instanceof Error ? err.message : String(err);
     }

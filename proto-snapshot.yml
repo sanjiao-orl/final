@@ -1,0 +1,335 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]: 长安夜行录
+      - generic "第一卷·风起 / 第三章·雨夜来客" [ref=e6]:
+        - text: 第一卷 · 第三章·雨夜来客
+        - generic "未保存" [ref=e7]
+      - button "保存" [ref=e9] [cursor=pointer]
+      - button "导出" [ref=e13] [cursor=pointer]
+      - button "快照" [ref=e16] [cursor=pointer]
+      - button "ask 模式" [ref=e20] [cursor=pointer]
+      - button "暂存 2" [ref=e22] [cursor=pointer]:
+        - text: 暂存
+        - generic [ref=e25]: "2"
+      - button "打字机" [ref=e26] [cursor=pointer]
+      - button "明暗" [ref=e29] [cursor=pointer]
+      - button "专注 (F8)" [ref=e32] [cursor=pointer]
+      - button "AI" [ref=e35] [cursor=pointer]
+      - button "设置(新增)" [ref=e38] [cursor=pointer]
+    - generic [ref=e42]:
+      - complementary [ref=e43]:
+        - generic [ref=e44]:
+          - generic [ref=e45]: 结 构
+          - button "新建章(A1:自动续编号 + frontmatter 模板)" [ref=e46] [cursor=pointer]
+          - button "新建卷(A1)" [ref=e50] [cursor=pointer]
+        - textbox "搜索卷 / 章 / 场(B9)" [ref=e55]
+        - generic [ref=e56]:
+          - generic [ref=e57]:
+            - generic [ref=e58]:
+              - generic [ref=e68]: 第一卷 · 风起
+              - generic [ref=e69]: 7 章 · 2.1 万字
+            - generic [ref=e70]:
+              - generic [ref=e71] [cursor=pointer]:
+                - generic [ref=e80]: 第一章·朱雀大街
+                - generic [ref=e81]: 3,862
+              - generic [ref=e84] [cursor=pointer]:
+                - generic [ref=e93]: 第二章·不良帅
+                - generic [ref=e94]: 4,107
+              - generic [ref=e97] [cursor=pointer]:
+                - generic [ref=e106]: 第三章·雨夜来客
+                - generic [ref=e107]: 3,214/4,000
+              - generic [ref=e110]:
+                - generic [ref=e111] [cursor=pointer]: 雨夜归府
+                - generic [ref=e112] [cursor=pointer]: 廊下密信
+                - generic [ref=e113] [cursor=pointer]: 更鼓三声
+                - generic [ref=e114] [cursor=pointer]: 灯下验伤
+              - generic [ref=e115] [cursor=pointer]:
+                - generic [ref=e124]: 第四章·鬼市
+                - generic [ref=e125]: 1,533/4,000
+              - generic [ref=e128] [cursor=pointer]:
+                - generic [ref=e137]: 第五章·上元灯
+                - generic [ref=e138]: 968/4,000
+              - generic [ref=e141]: 卷内拖拽重排(A3):落位后自动从第 1 章起重编号,标题不动;跨卷移动不支持
+              - generic [ref=e142] [cursor=pointer]:
+                - generic [ref=e151]: 第六章·金吾卫
+                - generic [ref=e152]: 0/4,000
+          - generic [ref=e155]:
+            - generic [ref=e165]: 第二卷 · 潮涌
+            - generic [ref=e166]: 2 章 · 5,212 字
+        - generic [ref=e167]: 回收站 · 1 章(软删)
+      - generic [ref=e171]:
+        - generic [ref=e173]:
+          - generic [ref=e174]:
+            - heading "第三章 · 雨夜来客" [level=1] [ref=e175]
+            - generic [ref=e176]:
+              - generic [ref=e177]: 打磨
+              - generic [ref=e179]: POV · 沈不言
+              - generic [ref=e180]: 雨夜
+              - generic [ref=e181]: 悬念
+              - generic [ref=e182]: 3,214 / 4,000 字(B5)
+          - generic [ref=e186]:
+            - heading "雨夜归府" [level=3] [ref=e187]
+            - paragraph [ref=e188]: 雨是从申时末开始落的,起先只是坊墙根下几点湿痕,待到沈不言打马进了朱雀门,已经是满城的凉意。他把斗笠压得很低,雨水顺着竹骨一道道往下淌,在马鞍前积成小小的一汪。
+            - paragraph [ref=e189]: 门房老周提着灯笼迎出来,光晕在雨里散成一团昏黄。"郎君可算回来了,"他接过缰绳,声音压得极低,"半个时辰前,有人往府里递了东西。"
+            - paragraph [ref=e190]: 沈不言解斗笠的手顿了一顿。"什么人?"
+            - paragraph [ref=e191]:
+              - text: "\"没看清脸,只说了一句,'沈家欠的债,该还了。'\"老周的声音有些发颤,灯笼跟着晃了晃。\"没看清脸。\"老周喉头滚动了一下,灯笼在他手里晃出细碎的光,\"那人就站在雨里,说了一句——沈家欠的债,该还了。\""
+              - generic [ref=e192]:
+                - button "✓" [ref=e193] [cursor=pointer]
+                - button "×" [ref=e194] [cursor=pointer]
+            - heading "廊下密信" [level=3] [ref=e195]
+            - paragraph [ref=e196]: 东西是一封信,没有落款,封皮被雨水浸得发皱,边角却用蜡封得严严实实。沈不言没有急着拆,他把信放在廊下的石栏上,自己退开三步,先看。
+            - paragraph [ref=e197]: 蜡是新的,红色,印纹是一朵半开的莲。长安城里用莲纹封蜡的人家不多,他掰着指头数,数到第三家的时候,指尖忽然凉了下去。
+            - paragraph [ref=e198]: 更鼓声从远远的坊墙外传来,一声,两声。雨还在下,打在廊瓦上,密得像谁在暗处快步地走路。
+            - paragraph [ref=e199]: 他想起父亲临终前那一夜,也是这样的雨。老人攥着他的手,说的最后一句话不是交代家产,不是叮嘱仕途,而是——"莲花开的时候,不要回长安。"
+            - paragraph [ref=e200]: 那时他只当是病人的呓语。父亲葬在城南的祖茔,下葬那日天高云淡,何来莲花。
+            - paragraph [ref=e201]: 可此刻,一朵半开的莲,正在他眼前的蜡封里,被廊灯照得血红。
+            - heading "更鼓三声" [level=3] [ref=e202]
+            - paragraph [ref=e203]: 第三声更鼓迟迟没有落下来。
+            - paragraph [ref=e204]: 沈不言猛地抬头。长安宵禁,更鼓从不错时,错时的只有一种可能——打更的人,已经不在原地了。他反手按住廊柱后那柄并不该出现在廊下的横刀,听见自己的心跳,一下,一下,撞在雨声的缝隙里。
+            - paragraph [ref=e205]: "\"出来。\"他说。"
+            - paragraph [ref=e206]: 雨幕深处,有人轻轻地笑了。
+        - generic: 打字机 42%
+        - generic [ref=e207]:
+          - generic [ref=e208]:
+            - generic [ref=e209]: 改写候选
+            - generic [ref=e210]:
+              - button "候选 一" [ref=e211] [cursor=pointer]
+              - button "候选 二" [ref=e212] [cursor=pointer]
+              - button "候选 三" [ref=e213] [cursor=pointer]
+            - button "关闭浮层 (Esc)" [ref=e214] [cursor=pointer]
+          - generic [ref=e217]:
+            - generic [ref=e218]: 原 文
+            - generic [ref=e219]: 蜡是新的,红色,印纹是一朵半开的莲。长安城里用莲纹封蜡的人家不多,他掰着指头数,数到第三家的时候,指尖忽然凉了下去。
+          - generic [ref=e220]:
+            - generic [ref=e221] [cursor=pointer]:
+              - generic [ref=e222]: 候选一 · 收紧节奏
+              - generic [ref=e225]: 蜡是新的,红色,印纹半开的一朵莲。长安用得起莲纹封蜡的,不出三家。他数到第三家,指尖已经凉了。
+            - generic [ref=e226] [cursor=pointer]:
+              - generic [ref=e227]: 候选二 · 加重悬疑
+              - generic [ref=e230]: 蜡色如新,红得刺目。印纹是一朵半开的莲——他认得这个纹样,也正因为认得,才久久没有伸手。长安城里用莲纹封蜡的人家,一只手数得过来;而这一只手里,有一家,三年前就该死绝了。
+          - generic [ref=e231]:
+            - textbox "继续下指令打磨,可多轮(B1)" [ref=e232]: 再压一点节奏,保留'指尖凉了'这个落点
+            - button "打磨" [ref=e233] [cursor=pointer]
+            - button "插入其后" [ref=e234] [cursor=pointer]
+            - button "替换原文" [ref=e235] [cursor=pointer]
+        - generic [ref=e236]:
+          - generic [ref=e237]:
+            - generic [ref=e238]:
+              - text: 暂存区
+              - generic [ref=e239]: "2"
+            - generic "B4:采纳前自动快照" [ref=e240]: 采纳前自动快照,可一键还原
+            - generic [ref=e244]:
+              - generic [ref=e245] [cursor=pointer]:
+                - checkbox "全选" [checked] [ref=e246]
+                - text: 全选
+              - button "采纳" [ref=e247] [cursor=pointer]
+              - button "整改" [ref=e248] [cursor=pointer]
+              - button "丢弃" [ref=e249] [cursor=pointer]
+          - generic [ref=e250]:
+            - generic [ref=e251]:
+              - generic [ref=e252]:
+                - checkbox [checked] [ref=e253]
+                - generic [ref=e254]: 第三章·雨夜来客
+                - generic [ref=e255]: 为何采纳(B8):"收紧雨夜氛围,去掉解释性对话"
+                - generic [ref=e256]: 13:41 · 会话「雨夜场景打磨」
+              - generic [ref=e257]:
+                - generic [ref=e258]:
+                  - generic [ref=e259]: 原 文
+                  - generic [ref=e260]: "\"没看清脸,只说了一句,'沈家欠的债,该还了。'\"老周的声音有些发颤,灯笼跟着晃了晃。"
+                - generic [ref=e263]:
+                  - generic [ref=e264]: 候 选
+                  - generic [ref=e265]: "\"没看清脸。\"老周喉头滚动了一下,灯笼在他手里晃出细碎的光,\"那人就站在雨里,说了一句——沈家欠的债,该还了。\""
+                - generic [ref=e266]:
+                  - button "采纳" [ref=e267] [cursor=pointer]
+                  - button "丢弃" [ref=e268] [cursor=pointer]
+            - generic [ref=e269]:
+              - generic [ref=e270]:
+                - checkbox [checked] [ref=e271]
+                - generic [ref=e272]: 第三章·雨夜来客
+                - generic [ref=e273]: 为何采纳(B8):"补一段父亲临终的回忆,给莲纹封蜡一个钩子"
+                - generic [ref=e274]: 13:38 · 会话「雨夜场景打磨」
+              - generic [ref=e275]:
+                - generic [ref=e276]:
+                  - generic [ref=e277]: 原 文
+                  - generic [ref=e278]: (此处原本直接拆信,节奏过快,缺少伏笔)
+                - generic [ref=e281]:
+                  - generic [ref=e282]: 候 选(新增段)
+                  - generic [ref=e283]: 他想起父亲临终前那一夜,也是这样的雨。老人攥着他的手,说的最后一句话不是交代家产,不是叮嘱仕途,而是——"莲花开的时候,不要回长安。"
+                - generic [ref=e284]:
+                  - button "采纳" [ref=e285] [cursor=pointer]
+                  - button "丢弃" [ref=e286] [cursor=pointer]
+      - complementary [ref=e287]:
+        - generic [ref=e288]:
+          - generic [ref=e289]:
+            - generic [ref=e290]: 挂 载
+            - generic [ref=e291]:
+              - button "无归属" [ref=e292] [cursor=pointer]
+              - button "本章" [ref=e293] [cursor=pointer]
+              - button "第一卷" [ref=e294] [cursor=pointer]
+              - button "作品" [ref=e295] [cursor=pointer]
+          - generic [ref=e296]:
+            - generic "双击重命名(B7)" [ref=e297]: 雨夜场景打磨
+            - generic [ref=e298]:
+              - button "搜索会话(B7)" [ref=e299] [cursor=pointer]
+              - button "归档(B7)" [ref=e303] [cursor=pointer]
+              - button "新建会话(可挂载任意层级)" [ref=e306] [cursor=pointer]
+        - generic [ref=e309]:
+          - generic [ref=e310]: 第三章"廊下密信"这场节奏有点拖,帮我把拆信前的铺垫收紧,再给莲纹封蜡埋个钩子。
+          - generic [ref=e312]:
+            - generic [ref=e313]: AI · 本章挂载(章 id 关联,重排改名不失效 · B7)
+            - paragraph [ref=e315]: 先读一遍本章和相关前文,确认"莲纹"已有的铺垫。
+          - generic [ref=e316]:
+            - generic [ref=e317] [cursor=pointer]:
+              - generic [ref=e320]: read_chapter
+              - generic [ref=e321]: 第一卷/第三章·雨夜来客.md
+              - generic [ref=e322]: ✓ 0.4s
+            - generic [ref=e323]:
+              - generic [ref=e324]:
+                - generic [ref=e325]: 参 数
+                - generic [ref=e326]: "path: \"第一卷·风起/第三章·雨夜来客.md\""
+              - generic [ref=e327]:
+                - generic [ref=e328]: 结 果
+                - generic [ref=e329]: "3,214 字 · 4 场 · frontmatter: 打磨 / POV 沈不言"
+              - generic [ref=e330]: 雨是从申时末开始落的,起先只是坊墙根下几点湿痕,待到沈不言打马进了朱雀门,已经是满城的凉意……(就地审阅,B3)
+          - generic [ref=e332] [cursor=pointer]:
+            - generic [ref=e335]: search_content
+            - generic [ref=e336]: "query: \"莲\" · 全作品"
+            - generic [ref=e337]: ✓ 命中 3 处
+          - generic [ref=e339] [cursor=pointer]:
+            - generic [ref=e342]: word_count
+            - generic [ref=e343]: 统计改写区间字数…
+            - generic [ref=e344]: 调用中
+          - generic [ref=e347]:
+            - paragraph [ref=e348]: 前文只有第二章提过一句"白莲绸庄",钩子很轻。两个改法都避开了直给解释:第一条收紧对话,第二条把钩子换成父亲临终的一句话,让莲纹从"纹样"变成"旧债"。
+            - paragraph [ref=e349]: 按「小改就地、大改进暂存」(B1),这次动了两段,已送暂存区裁决。
+          - generic [ref=e350]: 产出 2 条改写候选 → 已送暂存区,点击前往裁决
+          - generic [ref=e354]:
+            - generic [ref=e355] [cursor=pointer]:
+              - generic [ref=e358]: write_chapter
+              - generic [ref=e359]: AI 直调写入(危险操作)
+              - generic [ref=e360]: 挂起待审批
+            - generic [ref=e362]:
+              - generic [ref=e363]:
+                - generic [ref=e364]: 说 明
+                - generic [ref=e365]: ask 模式下,AI 直接写章需人工放行(B6);走暂存采纳路径不弹此卡
+              - generic [ref=e366]:
+                - button "查看审批卡" [ref=e367] [cursor=pointer]
+                - button "拒绝" [ref=e368] [cursor=pointer]
+        - generic [ref=e370]:
+          - textbox "对本章下指令…(挂载:第三章·雨夜来客)" [ref=e371]
+          - generic [ref=e372]:
+            - generic [ref=e373]: Enter 发送 · Shift+Enter 换行
+            - button "发送" [ref=e374] [cursor=pointer]
+  - generic:
+    - generic:
+      - generic:
+        - generic: 审批 · 危险操作
+        - generic: ask 模式挂起
+      - generic:
+        - text: AI 请求绕过暂存区,直接改写当前章。这是写操作,且不经人工裁决路径。
+        - generic:
+          - generic: write_chapter
+          - generic: 第一卷·风起/第三章·雨夜来客.md · 整章覆写
+        - generic:
+          - generic:
+            - generic: 当 前
+            - generic: 3,214 字
+          - generic:
+            - generic: 覆写后
+            - generic: 3,389 字 +175
+          - generic:
+            - generic: 快 照
+            - generic: 放行前自动快照(B4)
+      - generic:
+        - button "拒绝"
+        - button "允许一次"
+        - button "允许,本会话不再询问"
+      - generic:
+        - text: 审批模式(B6)
+        - generic:
+          - generic: ask
+          - generic: auto
+          - generic: yolo
+  - generic:
+    - generic:
+      - generic:
+        - generic: 设置
+        - button
+      - generic:
+        - generic:
+          - generic: 审批模式(B6)
+          - generic:
+            - generic:
+              - generic:
+                - generic: ask · 逐项询问
+                - generic: AI 直调写/删/导出前一律弹审批卡;暂存采纳路径不弹(已有人的裁决)。默认。
+            - generic:
+              - generic:
+                - generic: auto · 同类放行
+                - generic: 本会话内同工具同目标放行一次后不再询问,换目标仍询问。
+            - generic:
+              - generic:
+                - generic: yolo · 完全放手
+                - generic: 全部自动放行。所有写入仍强制事前快照(B4 不受模式影响)。
+        - generic:
+          - generic: 外 观
+          - generic:
+            - generic: 主题
+            - generic:
+              - button "纸 · 明"
+              - button "墨 · 暗"
+          - generic:
+            - generic: 正文字号
+            - generic: 改字号将同步打字机定位与浮动条几何(theme.ts 注释约束)
+            - generic:
+              - button "15"
+              - button "17"
+              - button "19"
+          - generic:
+            - generic: 打字机滚动(光标锁 42%)
+            - generic:
+              - checkbox [checked]
+        - generic:
+          - generic: 保 存 与 快 照
+          - generic:
+            - generic: 自动保存间隔
+            - combobox:
+              - option "30 秒"
+              - option "60 秒" [selected]
+              - option "120 秒"
+          - generic:
+            - generic: 采纳/危险操作前自动快照(B4)
+            - generic:
+              - checkbox [checked]
+        - generic:
+          - generic: 暂 存 与 裁 决
+          - generic:
+            - generic: 小改就地浮层,大改进暂存(B1)
+            - generic:
+              - checkbox [checked]
+          - generic:
+            - generic: 采纳留痕:显示"为何采纳"(B8)
+            - generic:
+              - checkbox [checked]
+        - generic: 设置项清单为设计方提案(开放项 2),默认值遵循「默认否、可配」原则——默认全部关闭/最保守,逐项经作者确认后定稿。
+  - generic:
+    - text: 已采纳 1 条候选,写入第三章
+    - generic: 快照 13:42:07
+    - button "一键还原"
+  - generic [ref=e377]:
+    - generic [ref=e378]:
+      - generic [ref=e379]: 原 型 演 示
+      - generic [ref=e380]:
+        - button "明 / 暗" [ref=e381] [cursor=pointer]
+        - button "专注 F8" [ref=e382] [cursor=pointer]
+        - button "AI 面板" [ref=e383] [cursor=pointer]
+        - button "暂存抽屉" [ref=e384] [cursor=pointer]
+        - button "选区浮层" [ref=e385] [cursor=pointer]
+        - button "审批卡" [ref=e386] [cursor=pointer]
+        - button "设置面板" [ref=e387] [cursor=pointer]
+        - button "快照提示" [ref=e388] [cursor=pointer]
+        - button "设计标注" [ref=e389] [cursor=pointer]
+        - button "打字机线" [ref=e390] [cursor=pointer]
+    - button "演 示" [ref=e391] [cursor=pointer]

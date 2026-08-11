@@ -1,0 +1,1 @@
+{"action":"evaluate","args":{"code":"(async()=>{const a=document.getElementById('app');a.classList.remove('show-approval');a.classList.add('show-settings');await new Promise(r=>setTimeout(r,600));return getComputedStyle(document.getElementById('settings-overlay')).opacity})()"},"session":"shell-proto-review"}

@@ -1,0 +1,1 @@
+{"action":"evaluate","args":{"code":"(()=>{const app=document.getElementById('app');app.classList.add('show-approval');const ov=document.getElementById('approval-overlay');const cs=getComputedStyle(ov);return JSON.stringify({cls:app.className,op:cs.opacity,disp:cs.display,z:cs.zIndex})})()"},"session":"shell-proto-review"}

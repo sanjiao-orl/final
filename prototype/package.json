@@ -1,0 +1,9 @@
+{
+  "name": "shell-redesign-prototype",
+  "private": true,
+  "version": "0.1.0",
+  "description": "壳重设计 · 高保真静态原型",
+  "scripts": {
+    "dev": "node server.js"
+  }
+}
