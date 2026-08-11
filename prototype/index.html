@@ -30,6 +30,7 @@
 
   --tree-w: 260px;
   --right-w: 360px;
+  --rail-w: 48px;
   --toolbar-h: 42px;
 
   /* 派生语义色(同色温/饱和阶梯,由主 tokens 派生,不新造) */
@@ -591,17 +592,72 @@ input, textarea, select { font-family: var(--ui-font); color: var(--ink); }
 .stg-empty .hint { font-size: 11px; opacity: 0.75; }
 
 /* ============================================================
-   右栏 · AI 面板 360px
+   右栏 · AI 窄条 48px(v2:默认收起,点击图标展开)
    ============================================================ */
-#ai {
-  width: var(--right-w); flex: none;
-  display: flex; flex-direction: column;
+#ai-rail {
+  width: var(--rail-w); flex: none;
+  display: flex; flex-direction: column; align-items: center;
+  gap: 5px; padding: 10px 0 12px;
   background: var(--panel);
   border-left: 1px solid var(--line);
+  user-select: none;
   transition: margin-right var(--t-fold);
-  overflow: hidden;
 }
-#app.hide-ai #ai, #app.focus #ai { margin-right: calc(-1 * var(--right-w)); }
+#app.focus #ai-rail { margin-right: calc(-1 * var(--rail-w)); }
+.rail-logo {
+  width: 34px; height: 30px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--accent); margin-bottom: 8px;
+}
+.rail-logo svg { width: 18px; height: 18px; }
+.rail-btn {
+  position: relative;
+  width: 36px; height: 36px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 8px;
+  color: var(--muted);
+  transition: background var(--t-hover), color var(--t-hover);
+}
+.rail-btn svg { width: 18px; height: 18px; }
+.rail-btn:hover { background: color-mix(in srgb, var(--muted) 10%, transparent); color: var(--ink); }
+.rail-btn.on { background: var(--accent-soft); color: var(--accent); }
+#app.show-settings #ai-rail [data-act="settings"] { background: var(--accent-soft); color: var(--accent); }
+/* hover 提示(向左弹出,不遮挡正文视线) */
+.rail-btn .rail-tip {
+  position: absolute; left: calc(100% + 10px); top: 50%;
+  transform: translateY(-50%) translateX(-3px);
+  background: #1E1C18; color: #EDE9E0;
+  font-size: 11px; line-height: 1; letter-spacing: 0.04em;
+  padding: 7px 10px; border-radius: 6px;
+  white-space: nowrap;
+  opacity: 0; pointer-events: none;
+  transition: opacity var(--t-hover), transform var(--t-hover);
+  z-index: 120;
+  box-shadow: var(--shadow-pop);
+}
+.rail-btn:hover .rail-tip { opacity: 1; transform: translateY(-50%) translateX(0); }
+.rail-spacer { flex: 1; }
+
+/* ============================================================
+   右栏 · AI 面板 360px(展开形态)
+   ============================================================ */
+#ai {
+  width: 0; flex: none;
+  display: flex; flex-direction: column;
+  background: var(--panel);
+  border-left: 1px solid transparent;
+  overflow: hidden;
+  transition: width var(--t-fold), border-left-color var(--t-fold);
+}
+#app.ai-open #ai { width: var(--right-w); border-left-color: var(--line); }
+#app.focus #ai { margin-right: calc(-1 * var(--right-w)); }
+/* 面板双视图:会话 / 工具,互斥显示,避免一栏堆叠 */
+#ai-session-view, #ai-tools-view {
+  display: flex; flex-direction: column;
+  width: var(--right-w); height: 100%; min-height: 0;
+}
+#app.view-tools #ai-session-view { display: none; }
+#app:not(.view-tools) #ai-tools-view { display: none; }
 .ai-head { border-bottom: 1px solid var(--line); padding: 10px 12px 9px; }
 .ai-scope { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
 .ai-scope .lbl { font-size: 10.5px; letter-spacing: 0.18em; color: var(--muted); flex: none; }
@@ -622,6 +678,21 @@ input, textarea, select { font-family: var(--ui-font); color: var(--ink); }
 }
 .ai-session .name:hover { background: color-mix(in srgb, var(--muted) 8%, transparent); }
 .ai-body { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 12px; }
+
+/* 工具视图头(B3/B10 收纳在独立视图,不与消息流堆叠) */
+.ai-tools-head {
+  flex: none;
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px 9px;
+  border-bottom: 1px solid var(--line);
+}
+.ai-tools-title { font-size: 12.5px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.ai-tools-count {
+  min-width: 17px; height: 17px; padding: 0 5px;
+  border-radius: 9px; background: var(--accent); color: #fff;
+  font-size: 10.5px; line-height: 17px; text-align: center;
+}
+.ai-tools-hint { flex: 1; font-size: 10.5px; color: var(--muted); }
 
 /* 消息 */
 .msg { display: flex; flex-direction: column; gap: 5px; }
@@ -1263,8 +1334,29 @@ select.inline-sel {
       </div>
     </section>
 
-    <!-- ================= 右栏 · AI 面板 ================= -->
+    <!-- ================= 右栏 · AI 窄条(v2:默认收起 48px) ================= -->
+    <aside id="ai-rail">
+      <span class="rail-logo" title="AI 面板 · 默认收起,点图标展开">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/></svg>
+      </span>
+      <button class="rail-btn" data-act="ai-view" data-view="session" title="会话 · 挂载/消息/输入">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        <span class="rail-tip">会话 · 挂载 / 消息 / 输入</span>
+      </button>
+      <button class="rail-btn" data-act="ai-view" data-view="tools" title="工具 · 调用卡(B3/B10)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+        <span class="rail-tip">工具 · 调用卡(B3/B10)</span>
+      </button>
+      <div class="rail-spacer"></div>
+      <button class="rail-btn" data-act="settings" title="设置(新增)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <span class="rail-tip">设置</span>
+      </button>
+    </aside>
+
+    <!-- ================= 右栏 · AI 面板(点击窄条图标展开) ================= -->
     <aside id="ai">
+      <div id="ai-session-view">
       <div class="ai-head">
         <div class="ai-scope">
           <span class="lbl">挂 载</span>
@@ -1288,6 +1380,9 @@ select.inline-sel {
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
             </button>
           </div>
+          <button class="icon-btn" data-act="ai-collapse" title="收起面板 (Esc)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg>
+          </button>
         </div>
       </div>
 
@@ -1299,41 +1394,6 @@ select.inline-sel {
           <span class="who">AI · 本章挂载(章 id 关联,重排改名不失效 · B7)</span>
           <div class="bubble">
             <p>先读一遍本章和相关前文,确认"莲纹"已有的铺垫。</p>
-          </div>
-        </div>
-
-        <!-- 工具卡:已完成 -->
-        <div class="tool-card done open">
-          <div class="tool-head">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="color: var(--muted)"><path d="M6 9l6 6 6-6"/></svg>
-            <span class="tname">read_chapter</span>
-            <span class="targ">第一卷/第三章·雨夜来客.md</span>
-            <span class="tool-state">✓ 0.4s</span>
-          </div>
-          <div class="tool-detail">
-            <div class="tool-kv"><span class="k">参 数</span><span class="v">path: "第一卷·风起/第三章·雨夜来客.md"</span></div>
-            <div class="tool-kv"><span class="k">结 果</span><span class="v">3,214 字 · 4 场 · frontmatter: 打磨 / POV 沈不言</span></div>
-            <div class="tool-result">雨是从申时末开始落的,起先只是坊墙根下几点湿痕,待到沈不言打马进了朱雀门,已经是满城的凉意……(就地审阅,B3)</div>
-          </div>
-        </div>
-
-        <!-- 工具卡:已完成,折叠 -->
-        <div class="tool-card done">
-          <div class="tool-head">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="color: var(--muted); transform: rotate(-90deg)"><path d="M6 9l6 6 6-6"/></svg>
-            <span class="tname">search_content</span>
-            <span class="targ">query: "莲" · 全作品</span>
-            <span class="tool-state">✓ 命中 3 处</span>
-          </div>
-        </div>
-
-        <!-- 工具卡:进行中 -->
-        <div class="tool-card running">
-          <div class="tool-head">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="color: var(--status-polish); transform: rotate(-90deg)"><path d="M6 9l6 6 6-6"/></svg>
-            <span class="tname">word_count</span>
-            <span class="targ">统计改写区间字数…</span>
-            <span class="tool-state"><span class="pulse-dot"></span>调用中</span>
           </div>
         </div>
 
@@ -1350,23 +1410,6 @@ select.inline-sel {
             产出 2 条改写候选 → 已送暂存区,点击前往裁决
           </div>
         </div>
-
-        <!-- 工具卡:挂起待审批(B6) -->
-        <div class="tool-card pending-approval">
-          <div class="tool-head">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="color: var(--status-draft)"><path d="M12 9v4M12 17h.01M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
-            <span class="tname">write_chapter</span>
-            <span class="targ">AI 直调写入(危险操作)</span>
-            <span class="tool-state"><span class="pulse-dot"></span>挂起待审批</span>
-          </div>
-          <div class="tool-detail" style="display:block; background: transparent;">
-            <div class="tool-kv"><span class="k">说 明</span><span class="v">ask 模式下,AI 直接写章需人工放行(B6);走暂存采纳路径不弹此卡</span></div>
-            <div class="tool-approval-ops">
-              <button class="btn sm primary" data-act="approval">查看审批卡</button>
-              <button class="btn sm ghost-danger">拒绝</button>
-            </div>
-          </div>
-        </div>
       </div>
 
       <div class="ai-composer">
@@ -1380,6 +1423,71 @@ select.inline-sel {
           </div>
         </div>
       </div>
+      </div><!-- /#ai-session-view -->
+
+      <!-- 工具视图(B3/B10):与消息流分栏,避免一栏堆叠 -->
+      <div id="ai-tools-view">
+        <div class="ai-tools-head">
+          <span class="ai-tools-title">工具调用<span class="ai-tools-count">4</span></span>
+          <span class="ai-tools-hint">B3 就地审阅 · 点卡头展开/收起</span>
+          <button class="icon-btn" data-act="ai-collapse" title="收起面板 (Esc)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg>
+          </button>
+        </div>
+        <div class="ai-body">
+          <!-- 工具卡:已完成,展开审阅(B3) -->
+          <div class="tool-card done open">
+            <div class="tool-head">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="color: var(--muted)"><path d="M6 9l6 6 6-6"/></svg>
+              <span class="tname">read_chapter</span>
+              <span class="targ">第一卷/第三章·雨夜来客.md</span>
+              <span class="tool-state">✓ 0.4s</span>
+            </div>
+            <div class="tool-detail">
+              <div class="tool-kv"><span class="k">参 数</span><span class="v">path: "第一卷·风起/第三章·雨夜来客.md"</span></div>
+              <div class="tool-kv"><span class="k">结 果</span><span class="v">3,214 字 · 4 场 · frontmatter: 打磨 / POV 沈不言</span></div>
+              <div class="tool-result">雨是从申时末开始落的,起先只是坊墙根下几点湿痕,待到沈不言打马进了朱雀门,已经是满城的凉意……(就地审阅,B3)</div>
+            </div>
+          </div>
+
+          <!-- 工具卡:已完成,折叠(B10) -->
+          <div class="tool-card done">
+            <div class="tool-head">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="color: var(--muted); transform: rotate(-90deg)"><path d="M6 9l6 6 6-6"/></svg>
+              <span class="tname">search_content</span>
+              <span class="targ">query: "莲" · 全作品</span>
+              <span class="tool-state">✓ 命中 3 处</span>
+            </div>
+          </div>
+
+          <!-- 工具卡:进行中 -->
+          <div class="tool-card running">
+            <div class="tool-head">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="color: var(--status-polish); transform: rotate(-90deg)"><path d="M6 9l6 6 6-6"/></svg>
+              <span class="tname">word_count</span>
+              <span class="targ">统计改写区间字数…</span>
+              <span class="tool-state"><span class="pulse-dot"></span>调用中</span>
+            </div>
+          </div>
+
+          <!-- 工具卡:挂起待审批(B6) -->
+          <div class="tool-card pending-approval">
+            <div class="tool-head">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="color: var(--status-draft)"><path d="M12 9v4M12 17h.01M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+              <span class="tname">write_chapter</span>
+              <span class="targ">AI 直调写入(危险操作)</span>
+              <span class="tool-state"><span class="pulse-dot"></span>挂起待审批</span>
+            </div>
+            <div class="tool-detail" style="display:block; background: transparent;">
+              <div class="tool-kv"><span class="k">说 明</span><span class="v">ask 模式下,AI 直接写章需人工放行(B6);走暂存采纳路径不弹此卡</span></div>
+              <div class="tool-approval-ops">
+                <button class="btn sm primary" data-act="approval">查看审批卡</button>
+                <button class="btn sm ghost-danger">拒绝</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div><!-- /#ai-tools-view -->
     </aside>
   </div>
 </div>
@@ -1532,7 +1640,7 @@ const html = document.documentElement;
 const actMap = {
   theme:    () => { html.dataset.theme = html.dataset.theme === 'light' ? 'dark' : 'light'; },
   focus:    { cls: 'focus' },
-  ai:       { cls: 'hide-ai', invert: true },
+  ai:       { cls: 'ai-open' },
   drawer:   { cls: 'show-drawer' },
   selpop:   { cls: 'show-selpop' },
   approval: { cls: 'show-approval' },
@@ -1545,9 +1653,30 @@ function syncButtons() {
   document.querySelectorAll('.proto-btn').forEach(b => {
     const a = actMap[b.dataset.act];
     if (!a || !a.cls) return;
-    const on = app.classList.contains(a.cls);
-    b.classList.toggle('on', a.invert ? !on : on);
+    b.classList.toggle('on', app.classList.contains(a.cls));
   });
+}
+/* ---- v2:AI 窄条 / 展开面板 ---- */
+function syncRail() {
+  const open = app.classList.contains('ai-open');
+  document.querySelectorAll('#ai-rail .rail-btn[data-view]').forEach(b => {
+    const tools = b.dataset.view === 'tools';
+    b.classList.toggle('on', open && app.classList.contains('view-tools') === tools);
+  });
+}
+function openAiView(view) {
+  const tools = view === 'tools';
+  const already = app.classList.contains('ai-open') && app.classList.contains('view-tools') === tools;
+  if (already) app.classList.remove('ai-open');   /* 再点当前视图图标 = 收起 */
+  else {
+    app.classList.add('ai-open');
+    app.classList.toggle('view-tools', tools);
+  }
+  syncButtons(); syncRail();
+}
+function collapseAi() {
+  app.classList.remove('ai-open');
+  syncButtons(); syncRail();
 }
 document.addEventListener('click', e => {
   const t = e.target.closest('[data-act]');
@@ -1557,11 +1686,12 @@ document.addEventListener('click', e => {
     app.classList.remove('show-approval', 'show-settings');
     return;
   }
+  if (act === 'ai-view') { openAiView(t.dataset.view); return; }
+  if (act === 'ai-collapse') { collapseAi(); return; }
   const a = actMap[act];
   if (!a) return;
   if (typeof a === 'function') { a(); return; }
-  if (a.invert) { app.classList.toggle(a.cls); }
-  else if (a.cls === 'show-approval' || a.cls === 'show-settings') { app.classList.add(a.cls); }
+  if (a.cls === 'show-approval' || a.cls === 'show-settings') { app.classList.add(a.cls); }
   else if (a.cls === 'show-toast') {
     app.classList.add(a.cls);
     clearTimeout(window.__toastT);
@@ -1570,9 +1700,15 @@ document.addEventListener('click', e => {
   else { app.classList.toggle(a.cls); }
   syncButtons();
 });
+/* v2:点击外部(正文/树/抽屉)收起 AI 面板;工具栏与既有浮层除外 */
+document.addEventListener('click', e => {
+  if (e.target.closest('#ai, #ai-rail, #toolbar, #approval-overlay, #settings-overlay, #proto-bar')) return;
+  if (app.classList.contains('ai-open')) collapseAi();
+});
 /* 初始状态同步 */
 app.classList.add('show-tw');
 syncButtons();
+syncRail();
 
 /* 遮罩点击关闭 */
 document.getElementById('approval-overlay').addEventListener('click', e => {
@@ -1584,10 +1720,13 @@ document.getElementById('settings-overlay').addEventListener('click', e => {
 
 /* 快捷键,与真实壳一致 */
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') app.classList.remove('show-approval', 'show-settings', 'show-selpop');
+  if (e.key === 'Escape') {
+    app.classList.remove('show-approval', 'show-settings', 'show-selpop', 'ai-open');
+    syncButtons(); syncRail();
+  }
   if (e.key === 'F8') { e.preventDefault(); app.classList.toggle('focus'); syncButtons(); }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'j') {
-    e.preventDefault(); app.classList.toggle('hide-ai'); syncButtons();
+    e.preventDefault(); app.classList.toggle('ai-open'); syncButtons(); syncRail();
   }
 });
 
