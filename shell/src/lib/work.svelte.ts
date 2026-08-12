@@ -5,10 +5,12 @@
 import type { CoreClient } from './core.js';
 import type { ChapterNode, ReadChapterResult, VolumeNode } from './types.js';
 
-/** 编辑器现场入口：序列化 + 候选替换（original 唯一定位，替换为 proposed）。 */
+/** 编辑器现场入口：序列化 + 候选替换 / 插入（original 唯一定位）。 */
 export interface EditorApi {
   getMd: () => string;
   applyEdit: (original: string, proposed: string) => 'ok' | 'not-found' | 'ambiguous';
+  /** B1 插入其后：proposed 插入 original 之后（原文保留）。 */
+  insertAfter?: (original: string, proposed: string) => 'ok' | 'not-found' | 'ambiguous';
 }
 
 export interface OpenChapter {
@@ -16,8 +18,14 @@ export interface OpenChapter {
   title: string;
   /** 原样保留的 frontmatter 文本块，保存时字节级回拼。 */
   frontmatterRaw: string;
+  /** 解析出的 frontmatter（章头元信息行展示用）。 */
+  frontmatter: Record<string, unknown>;
   /** 打开时的正文 md（脏检查基准）。 */
   savedMd: string;
+  /** frontmatter 目标字数（B5）。 */
+  goal?: number;
+  /** frontmatter 稳定 id（B7）。 */
+  id?: string;
 }
 
 export class WorkStore {
@@ -79,6 +87,20 @@ export class WorkStore {
     return null;
   }
 
+  /** 按 frontmatter 稳定 id 找章（B7：重排改名不失效）。 */
+  findChapterById(id: string): ChapterNode | null {
+    for (const v of this.structure) {
+      for (const ch of v.children) if (ch.id === id) return ch;
+    }
+    return null;
+  }
+
+  /** 当前章的目标字数（B5，frontmatter goal）。 */
+  currentGoal(): number | null {
+    const g = this.current?.goal ?? this.findChapter(this.current?.relPath ?? '')?.goal;
+    return typeof g === 'number' && g > 0 ? g : null;
+  }
+
   async loadStructure(): Promise<void> {
     this.structure = await this.client.callTool<VolumeNode[]>('list_structure', {
       workDir: this.workDir,
@@ -95,12 +117,16 @@ export class WorkStore {
         workDir: this.workDir,
         relPath: ch.relPath,
       });
-      this.current = {
+      const open: OpenChapter = {
         relPath: ch.relPath,
         title: ch.title,
         frontmatterRaw: r.frontmatterRaw,
+        frontmatter: r.frontmatter,
         savedMd: r.body,
       };
+      if (typeof r.frontmatter.goal === 'number') open.goal = r.frontmatter.goal;
+      if (typeof r.frontmatter.id === 'string') open.id = r.frontmatter.id;
+      this.current = open;
       this.pendingScene = sceneTitle ?? null;
       this.dirty = false;
     } catch (err) {
@@ -165,6 +191,118 @@ export class WorkStore {
     } catch (err) {
       this.error = `导出失败：${err instanceof Error ? err.message : String(err)}`;
     }
+  }
+
+  // ---------- A 组 · 章/卷生产与组织（domain create/rename/move） ----------
+
+  /** A1 新建章（自动接续卷内编号 + frontmatter 模板）；volume 省略 → manuscript 根。 */
+  async createChapter(volume: string | null, title?: string, goal?: number): Promise<string | null> {
+    this.error = null;
+    try {
+      const r = await this.client.callTool<{ ok: boolean; relPath: string }>('create_chapter', {
+        workDir: this.workDir,
+        volume: volume ?? '',
+        ...(title ? { title } : {}),
+        ...(goal ? { goal } : {}),
+      });
+      await this.loadStructure();
+      this.notice = `已新建 ${r.relPath}`;
+      return r.relPath;
+    } catch (err) {
+      this.error = `新建章失败：${err instanceof Error ? err.message : String(err)}`;
+      return null;
+    }
+  }
+
+  /** A1 新建卷。 */
+  async createVolume(title?: string): Promise<string | null> {
+    this.error = null;
+    try {
+      const r = await this.client.callTool<{ ok: boolean; volumePath: string }>('create_volume', {
+        workDir: this.workDir,
+        ...(title ? { title } : {}),
+      });
+      await this.loadStructure();
+      this.notice = `已新建卷 ${r.volumePath}`;
+      return r.volumePath;
+    } catch (err) {
+      this.error = `新建卷失败：${err instanceof Error ? err.message : String(err)}`;
+      return null;
+    }
+  }
+
+  /** A2 重命名章（只改用户标题部分，编号不动，frontmatter title 同步）。 */
+  async renameChapter(relPath: string, title: string): Promise<boolean> {
+    this.error = null;
+    try {
+      const r = await this.client.callTool<{ ok: boolean; relPath: string }>('rename_chapter', {
+        workDir: this.workDir,
+        relPath,
+        title,
+      });
+      await this.loadStructure();
+      // 重命名后若正开着该章，title 跟随
+      if (this.current?.relPath === relPath) {
+        this.current = { ...this.current, relPath: r.relPath };
+      }
+      return true;
+    } catch (err) {
+      this.error = `重命名失败：${err instanceof Error ? err.message : String(err)}`;
+      return false;
+    }
+  }
+
+  /** A2 重命名卷。 */
+  async renameVolume(volumePath: string, title: string): Promise<boolean> {
+    this.error = null;
+    try {
+      await this.client.callTool('rename_volume', { workDir: this.workDir, volumePath, title });
+      await this.loadStructure();
+      return true;
+    } catch (err) {
+      this.error = `重命名卷失败：${err instanceof Error ? err.message : String(err)}`;
+      return false;
+    }
+  }
+
+  /** A3 卷内拖拽重排（事务化重编号；跨卷不支持）。 */
+  async moveChapter(relPath: string, toIndex: number): Promise<boolean> {
+    this.error = null;
+    try {
+      await this.client.callTool('move_chapter', { workDir: this.workDir, relPath, toIndex });
+      await this.loadStructure();
+      return true;
+    } catch (err) {
+      this.error = `移动失败：${err instanceof Error ? err.message : String(err)}`;
+      return false;
+    }
+  }
+
+  /** A3 卷排序（改目录名前缀）。 */
+  async moveVolume(volumePath: string, toIndex: number): Promise<boolean> {
+    this.error = null;
+    try {
+      await this.client.callTool('move_volume', { workDir: this.workDir, volumePath, toIndex });
+      await this.loadStructure();
+      return true;
+    } catch (err) {
+      this.error = `移动卷失败：${err instanceof Error ? err.message : String(err)}`;
+      return false;
+    }
+  }
+
+  /** B1 插入其后：把 proposed 插到 original 之后（原文保留）。 */
+  insertAfter(original: string, proposed: string): 'ok' | 'not-found' | 'ambiguous' | 'no-editor' {
+    if (!this.editorApi?.insertAfter) return 'no-editor';
+    return this.editorApi.insertAfter(original, proposed);
+  }
+
+  /** 重载当前章（快照还原等磁盘回写后刷新现场）。 */
+  async reloadCurrent(): Promise<void> {
+    const cur = this.current;
+    if (!cur) return;
+    const node = this.findChapter(cur.relPath);
+    if (node) await this.openChapter(node);
   }
 }
 

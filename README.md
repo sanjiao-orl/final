@@ -23,10 +23,10 @@ node core/scripts/e2e.mjs   # 真实 LLM e2e(key 在场才跑)
 ## 包结构
 
 - `core/` — sidecar 核心:HTTP+SSE server、AI SDK v7、MCP client、node:sqlite 会话持久化
-- `domain/` — MCP 领域服务:结构树(卷/章/场,标题派生)、章节读写(原子写)、搜索、字数统计
-- `shell/` — Tauri 2 + Svelte 5 + TipTap 壳(三栏布局/专注模式/安全阀四件;第 3 周接入 AI 面板+暂存抽屉;启动自动保存 60s 低频兜底)
+- `domain/` — MCP 领域服务:结构树(卷/章/场,标题派生)、章节读写(原子写)、搜索、字数统计、章/卷生产与组织(新建/重命名/卷内重排)、历史快照读取
+- `shell/` — Tauri 2 + Svelte 5 + TipTap 壳(v3 布局:48px AI 窄条 + 会话/对话/工具/设置多栏,点击/滚轮双切换;多候选浮层 B1、工具卡 B3/B10、快照还原 B4、目标字数 B5、ask/auto/yolo 审批 B6、会话多级挂载 B7、采纳留痕 B8、树搜索/场大纲/拖拽 B9、设置面板;自动保存间隔可配)
 - `.demo-work/` — 演示作品(测试文本,随时可删)
-- `docs/` — 需求基线(01-产品定义)、旧项目诊断(00)、决策记录(decisions/0001-0007)、路线图(roadmap)、审核手册
+- `docs/` — 需求基线(01-产品定义)、旧项目诊断(00)、决策记录(decisions/0001-0007)、路线图(roadmap)、审核手册、壳重设计系列
 - `scripts/check-env.ps1` — 检查 LLM_* 环境变量是否配置
 
 ## 下一轮流程（动工前必读）
@@ -40,5 +40,5 @@ node core/scripts/e2e.mjs   # 真实 LLM e2e(key 在场才跑)
 
 ## 验收口径
 
-- `npm run check` / `npm test`(145 用例:core 54 + domain 38 + shell 53)
+- `npm run check` / `npm test`(207 用例:core 64 + domain 67 + shell 76)
 - 每周出口 = 作者用本仓真实写作;不以测试绿为验收

@@ -15,6 +15,10 @@ export interface ChapterNode {
   status?: string;
   wordCount: number;
   scenes: SceneNode[];
+  /** frontmatter id（uuid 稳定标识，B7 章稳定 id 关联；旧章可缺省）。 */
+  id?: string;
+  /** frontmatter goal（目标字数，B5；可缺省）。 */
+  goal?: number;
 }
 
 export interface VolumeNode {
