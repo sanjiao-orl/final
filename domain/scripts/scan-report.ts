@@ -148,6 +148,8 @@ if (!workDir) {
   process.exit(1);
 }
 const result = scanWork(path.resolve(workDir));
+// 报告里按调用方传入的路径原样展示（不写运行时机器绝对路径）
+result.workDir = workDir;
 const md = renderReport(result);
 const outPath = process.argv[3];
 if (outPath) {
