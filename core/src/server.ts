@@ -1,4 +1,5 @@
-// 模块职责：本地 HTTP 服务——路由、Bearer 鉴权（/health、/dev 豁免）、CORS；业务委托给 chat 管道与 session-store。
+// 模块职责：本地 HTTP 服务——路由（协议版本化：全部业务路由在 /v1/ 前缀下，契约见 docs/decisions/0007）、
+// Bearer 鉴权（/v1/health、/v1/dev 豁免）、CORS；业务委托给 chat 管道与 session-store。
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { z } from 'zod';
 import { handleChatRequest, type ChatDeps } from './chat.js';
@@ -58,13 +59,21 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
   }
 
   // 公开端点（免鉴权）
-  if (req.method === 'GET' && pathname === '/health') {
-    writeJson(res, 200, { ok: true, version: deps.version });
+  if (req.method === 'GET' && pathname === '/v1/health') {
+    writeJson(res, 200, { ok: true, version: deps.version, protocol: 1 });
     return;
   }
-  if (req.method === 'GET' && pathname === '/dev') {
+  if (req.method === 'GET' && pathname === '/v1/dev') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...CORS_HEADERS });
-    res.end(devPage(deps.token));
+    res.end(devPage(deps.token, deps.version));
+    return;
+  }
+
+  // 协议已版本化：无 /v1/ 前缀的路径一律 404（在鉴权之前判定，旧客户端不带 token 也能看到迁移提示）
+  if (!pathname.startsWith('/v1/')) {
+    writeJson(res, 404, {
+      error: `未找到: ${req.method} ${pathname}（协议已版本化：请使用 /v1/ 前缀，契约见 docs/decisions/0007）`,
+    });
     return;
   }
 
@@ -74,7 +83,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
     return;
   }
 
-  if (req.method === 'GET' && pathname === '/sessions') {
+  if (req.method === 'GET' && pathname === '/v1/sessions') {
     // ?scope= 精确过滤讨论归属：''=无归属，章 relPath=章节内；缺省返回全部。
     const scope = url.searchParams.get('scope');
     const sessions = deps.store.listSessions(scope ?? undefined);
@@ -82,8 +91,8 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
     return;
   }
 
-  if (req.method === 'GET' && pathname.startsWith('/sessions/')) {
-    const id = pathname.slice('/sessions/'.length);
+  if (req.method === 'GET' && pathname.startsWith('/v1/sessions/')) {
+    const id = pathname.slice('/v1/sessions/'.length);
     if (!id || !deps.store.getSession(id)) {
       writeJson(res, 404, { error: '会话不存在: ' + id });
       return;
@@ -93,8 +102,8 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
     return;
   }
 
-  if (req.method === 'POST' && pathname.startsWith('/tools/')) {
-    const name = decodeURIComponent(pathname.slice('/tools/'.length));
+  if (req.method === 'POST' && pathname.startsWith('/v1/tools/')) {
+    const name = decodeURIComponent(pathname.slice('/v1/tools/'.length));
     if (!name || name.includes('/')) throw new HttpError(404, `工具名非法: ${name}`);
     const tool = deps.chat.tools?.[name];
     if (!tool?.execute) {
@@ -110,19 +119,19 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
     return;
   }
 
-  if (req.method === 'POST' && pathname === '/chat') {
+  if (req.method === 'POST' && pathname === '/v1/chat') {
     const body = await readJsonBody(req);
     await handleChatRequest(body, deps.chat, req, res);
     return;
   }
 
-  if (req.method === 'POST' && pathname === '/rewrite') {
+  if (req.method === 'POST' && pathname === '/v1/rewrite') {
     const body = await readJsonBody(req);
     await handleRewriteRequest(body, deps.rewrite, req, res);
     return;
   }
 
-  if (pathname === '/candidates' || pathname.startsWith('/candidates/')) {
+  if (pathname === '/v1/candidates' || pathname.startsWith('/v1/candidates/')) {
     await routeCandidates(req, res, url, deps.candidates);
     return;
   }
@@ -130,7 +139,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
   writeJson(res, 404, { error: `未找到: ${req.method} ${pathname}` });
 }
 
-/** /candidates 路由：GET 列表（?status=&chapter=）、POST 新建、PATCH 状态/整改。 */
+/** /v1/candidates 路由：GET 列表（?status=&chapter=）、POST 新建、PATCH 状态/整改。 */
 async function routeCandidates(
   req: IncomingMessage,
   res: ServerResponse,
@@ -139,7 +148,7 @@ async function routeCandidates(
 ): Promise<void> {
   const pathname = url.pathname;
 
-  if (req.method === 'GET' && pathname === '/candidates') {
+  if (req.method === 'GET' && pathname === '/v1/candidates') {
     const status = url.searchParams.get('status');
     if (status !== null && !['pending', 'adopted', 'discarded'].includes(status)) {
       throw new HttpError(400, `status 取值非法: ${status}`);
@@ -153,7 +162,7 @@ async function routeCandidates(
     return;
   }
 
-  if (req.method === 'POST' && pathname === '/candidates') {
+  if (req.method === 'POST' && pathname === '/v1/candidates') {
     const parsed = candidateCreateSchema.safeParse(await readJsonBody(req));
     if (!parsed.success) {
       throw new HttpError(400, '请求体不合法: ' + parsed.error.issues.map((i) => i.message).join('; '));
@@ -163,7 +172,7 @@ async function routeCandidates(
     return;
   }
 
-  const patchMatch = /^\/candidates\/([^/]+)$/.exec(pathname);
+  const patchMatch = /^\/v1\/candidates\/([^/]+)$/.exec(pathname);
   if (req.method === 'PATCH' && patchMatch) {
     const id = decodeURIComponent(patchMatch[1]!);
     const parsed = candidatePatchSchema.safeParse(await readJsonBody(req));

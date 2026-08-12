@@ -41,17 +41,17 @@ const fail = (msg) => {
   process.exit(1);
 };
 
-/** 发一轮 /chat，返回 { sessionId, reply }（reply 为拼接的 assistant 文本）。 */
+/** 发一轮 /v1/chat，返回 { sessionId, reply }（reply 为拼接的 assistant 文本）。 */
 async function chat(sessionId, text) {
-  const res = await fetch(`${base}/chat`, {
+  const res = await fetch(`${base}/v1/chat`, {
     method: 'POST',
     headers: auth,
     body: JSON.stringify(sessionId ? { sessionId, text } : { text }),
   });
-  if (!res.ok) fail('/chat ' + res.status + ' ' + (await res.text()));
+  if (!res.ok) fail('/v1/chat ' + res.status + ' ' + (await res.text()));
   const t = await res.text();
   const m = /event: done\ndata: (\{.*\})/.exec(t);
-  if (!m) fail('/chat 无 done: ' + t.slice(-300));
+  if (!m) fail('/v1/chat 无 done: ' + t.slice(-300));
   const reply = [...t.matchAll(/event: text-delta\ndata: (\{.*\})/g)]
     .map((x) => JSON.parse(x[1]).delta)
     .join('');
@@ -69,7 +69,7 @@ console.log(`[M] 第二轮（问回）回复="${r2.reply}"`);
 if (!r2.reply.includes(secret)) fail(`第二轮未召回「${secret}」，实际回复="${r2.reply}"`);
 
 // ---- 落库核对：同一会话应有 4 条消息（user/assistant/user/assistant）----
-const sessions = (await (await fetch(`${base}/sessions`, { headers: auth })).json()).sessions;
+const sessions = (await (await fetch(`${base}/v1/sessions`, { headers: auth })).json()).sessions;
 if (!sessions.some((s) => s.id === r1.sessionId)) fail('会话未落库');
 console.log(`[M] 会话 ${r1.sessionId} 两轮均落库，跨对话记忆 OK`);
 

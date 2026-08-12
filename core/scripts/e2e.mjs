@@ -66,12 +66,12 @@ const prompt =
   '然后把工具返回的数字写进一句话回复里。';
 
 const events = [];
-const res = await fetch(`${baseUrl}/chat`, {
+const res = await fetch(`${baseUrl}/v1/chat`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
   body: JSON.stringify({ text: prompt, tier: 'writing' }),
 });
-if (!res.ok) throw new Error(`/chat 返回 ${res.status}: ${await res.text()}`);
+if (!res.ok) throw new Error(`/v1/chat 返回 ${res.status}: ${await res.text()}`);
 
 const reader = res.body.getReader();
 const decoder = new TextDecoder();
@@ -109,11 +109,11 @@ if (toolCalls.length === 0) {
 }
 
 // ---- 校验落库 ----
-const sessionsRes = await fetch(`${baseUrl}/sessions`, { headers: { Authorization: `Bearer ${token}` } });
+const sessionsRes = await fetch(`${baseUrl}/v1/sessions`, { headers: { Authorization: `Bearer ${token}` } });
 const { sessions } = await sessionsRes.json();
 const sessionId = done[0].data.sessionId;
 if (!sessions.some((s) => s.id === sessionId)) throw new Error('[e2e] 会话未落库');
-const detailRes = await fetch(`${baseUrl}/sessions/${sessionId}`, { headers: { Authorization: `Bearer ${token}` } });
+const detailRes = await fetch(`${baseUrl}/v1/sessions/${sessionId}`, { headers: { Authorization: `Bearer ${token}` } });
 const { messages } = await detailRes.json();
 if (messages.length < 2) throw new Error('[e2e] 消息未落库完整');
 const assistantMsg = messages[messages.length - 1];

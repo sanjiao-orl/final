@@ -1,9 +1,9 @@
-// 测试：/rewrite SSE 改写管道与 /candidates REST——mock 模型驱动的改写流、候选 CRUD、鉴权与校验。
+// 测试：/v1/rewrite SSE 改写管道与 /v1/candidates REST——mock 模型驱动的改写流、候选 CRUD、鉴权与校验。
 import { describe, expect, it } from 'vitest';
 import { readSse, startTestServer, stepModel, textResult } from './helpers.js';
 
 function postRewrite(baseUrl: string, token: string, body: unknown): Promise<Response> {
-  return fetch(`${baseUrl}/rewrite`, {
+  return fetch(`${baseUrl}/v1/rewrite`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
     body: JSON.stringify(body),
@@ -11,7 +11,7 @@ function postRewrite(baseUrl: string, token: string, body: unknown): Promise<Res
 }
 
 function postCandidate(baseUrl: string, token: string, body: unknown): Promise<Response> {
-  return fetch(`${baseUrl}/candidates`, {
+  return fetch(`${baseUrl}/v1/candidates`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
     body: JSON.stringify(body),
@@ -19,14 +19,14 @@ function postCandidate(baseUrl: string, token: string, body: unknown): Promise<R
 }
 
 function patchCandidate(baseUrl: string, token: string, id: string, body: unknown): Promise<Response> {
-  return fetch(`${baseUrl}/candidates/${encodeURIComponent(id)}`, {
+  return fetch(`${baseUrl}/v1/candidates/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
     body: JSON.stringify(body),
   });
 }
 
-describe('/rewrite SSE 改写管道', () => {
+describe('/v1/rewrite SSE 改写管道', () => {
   it('text-delta 流 → done 带完整改写文本（trim 后），不落库', async () => {
     const s = await startTestServer({ modelForTier: () => stepModel([textResult(['改后一段，', '更有画面。'])]) });
     try {
@@ -51,7 +51,7 @@ describe('/rewrite SSE 改写管道', () => {
       const bad = await postRewrite(s.baseUrl, s.token, { original: '', instruction: 'x' });
       expect(bad.status).toBe(400);
 
-      const noAuth = await fetch(`${s.baseUrl}/rewrite`, {
+      const noAuth = await fetch(`${s.baseUrl}/v1/rewrite`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ original: 'a', instruction: '' }),
@@ -123,11 +123,11 @@ describe('/rewrite SSE 改写管道', () => {
   });
 });
 
-describe('/candidates REST', () => {
-  it('OPTIONS 预检放行 PATCH（壳经浏览器跨源调 /candidates/:id 的硬依赖）', async () => {
+describe('/v1/candidates REST', () => {
+  it('OPTIONS 预检放行 PATCH（壳经浏览器跨源调 /v1/candidates/:id 的硬依赖）', async () => {
     const s = await startTestServer({ modelForTier: () => stepModel([textResult(['x'])]) });
     try {
-      const res = await fetch(`${s.baseUrl}/candidates/any-id`, { method: 'OPTIONS' });
+      const res = await fetch(`${s.baseUrl}/v1/candidates/any-id`, { method: 'OPTIONS' });
       expect(res.status).toBe(204);
       expect(res.headers.get('access-control-allow-methods')).toContain('PATCH');
     } finally {
@@ -151,7 +151,7 @@ describe('/candidates REST', () => {
       await postCandidate(s.baseUrl, s.token, { chapter: 'c2.md', original: '原文二', proposed: '建议二' });
 
       // 列表过滤
-      const listRes = await fetch(`${s.baseUrl}/candidates?status=pending&chapter=c1.md`, {
+      const listRes = await fetch(`${s.baseUrl}/v1/candidates?status=pending&chapter=c1.md`, {
         headers: { Authorization: `Bearer ${s.token}` },
       });
       const list = ((await listRes.json()) as { candidates: unknown[] }).candidates;
@@ -172,7 +172,7 @@ describe('/candidates REST', () => {
       expect((await patchCandidate(s.baseUrl, s.token, 'no-such', { status: 'adopted' })).status).toBe(404);
 
       // status 过滤参数非法
-      const badFilter = await fetch(`${s.baseUrl}/candidates?status=weird`, {
+      const badFilter = await fetch(`${s.baseUrl}/v1/candidates?status=weird`, {
         headers: { Authorization: `Bearer ${s.token}` },
       });
       expect(badFilter.status).toBe(400);

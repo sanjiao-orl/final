@@ -29,12 +29,12 @@ async function startCore() {
 }
 
 function chatOnce(baseUrl, token) {
-  return fetch(`${baseUrl}/chat`, {
+  return fetch(`${baseUrl}/v1/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
     body: JSON.stringify({ text: '用一句话介绍你自己。' }),
   }).then(async (res) => {
-    if (!res.ok) throw new Error('/chat ' + res.status);
+    if (!res.ok) throw new Error('/v1/chat ' + res.status);
     const text = await res.text();
     const m = /event: done\ndata: (\{.*\})/.exec(text);
     if (!m) throw new Error('没有 done 事件: ' + text.slice(-200));
@@ -53,7 +53,7 @@ console.log('[restart] core 已停止，模拟重启…');
 
 // 第二轮：同 NOVEL_DIR 重启，token 已变（进程级随机），验证会话仍在
 let c2 = await startCore();
-const detail = await fetch(`${c2.baseUrl}/sessions/${done.sessionId}`, { headers: { Authorization: `Bearer ${c2.token}` } });
+const detail = await fetch(`${c2.baseUrl}/v1/sessions/${done.sessionId}`, { headers: { Authorization: `Bearer ${c2.token}` } });
 if (!detail.ok) throw new Error('重启后旧会话 404，恢复失败');
 const { messages } = await detail.json();
 const roles = messages.map((m) => m.role).join(',');

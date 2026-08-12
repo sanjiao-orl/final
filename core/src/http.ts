@@ -24,17 +24,10 @@ export function writeJson(res: ServerResponse, status: number, data: unknown): v
   res.end(JSON.stringify(data));
 }
 
-/** 写一个 SSE 帧：event 行 + data 行（JSON）。socket 已断则静默跳过。 */
-export function sse(res: ServerResponse, event: string, data: unknown): void {
-  if (res.destroyed || res.writableEnded) return;
-  try {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-  } catch {
-    // 客户端已断开，忽略写失败
-  }
-}
+/** 进入 SSE 响应头；先写一行注释帧，避免代理/浏览器缓冲。
+ * 注意：SSE 帧的写入一律走 event_pump（src/event-pump.ts，D4 单一发射点），
+ * 各 handler 不得直接 res.write 帧。 */
 
-/** 进入 SSE 响应头；先写一行注释帧，避免代理/浏览器缓冲。 */
 export function startSse(res: ServerResponse): void {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',

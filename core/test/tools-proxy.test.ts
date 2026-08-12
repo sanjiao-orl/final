@@ -1,4 +1,4 @@
-// 测试：POST /tools/:name —— core 对 domain MCP 工具的 HTTP 代理（壳的数据面）。
+// 测试：POST /v1/tools/:name —— core 对 domain MCP 工具的 HTTP 代理（壳的数据面）。
 // 覆盖：JSON 文本结果解析回对象、structuredContent 优先、isError → 502、工具缺失/未注入 → 404、非 JSON 文本原样返回。
 import { describe, expect, it } from 'vitest';
 import type { ToolSet } from 'ai';
@@ -23,14 +23,14 @@ function fakeTools(): ToolSet {
 }
 
 async function postTool(baseUrl: string, token: string, name: string, body: unknown): Promise<Response> {
-  return fetch(`${baseUrl}/tools/${name}`, {
+  return fetch(`${baseUrl}/v1/tools/${name}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
     body: JSON.stringify(body ?? {}),
   });
 }
 
-describe('POST /tools/:name 工具代理', () => {
+describe('POST /v1/tools/:name 工具代理', () => {
   it('JSON 文本结果解析回对象返回，参数原样透传', async () => {
     const s = await startTestServer({ tools: fakeTools() });
     try {

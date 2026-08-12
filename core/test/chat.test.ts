@@ -1,4 +1,4 @@
-// 测试：/chat SSE 管道——mock 模型（ai/test 的 MockLanguageModelV3）驱动的事件序列、落库、工具多轮、断连中止。
+// 测试：/v1/chat SSE 管道——mock 模型（ai/test 的 MockLanguageModelV3）驱动的事件序列、落库、工具多轮、断连中止。
 import { tool, type ToolSet } from 'ai';
 import { z } from 'zod';
 import { describe, expect, it } from 'vitest';
@@ -14,7 +14,7 @@ const domainTools: ToolSet = {
 };
 
 function postChat(baseUrl: string, token: string, body: unknown): Promise<Response> {
-  return fetch(`${baseUrl}/chat`, {
+  return fetch(`${baseUrl}/v1/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
     body: JSON.stringify(body),
@@ -27,7 +27,7 @@ function promptText(m: { content: unknown }): string {
   return (m.content as { text?: string }[]).map((p) => p.text ?? '').join('');
 }
 
-describe('/chat SSE 管道', () => {
+describe('/v1/chat SSE 管道', () => {
   it('文本流：text-delta → done，用户与 assistant 消息落库，title 取首条用户消息前 20 字', async () => {
     const s = await startTestServer({ modelForTier: () => stepModel([textResult(['你好，', '世界！'])]) });
     try {
@@ -153,7 +153,7 @@ describe('/chat SSE 管道', () => {
     const s = await startTestServer({ modelForTier: () => hangingModel(() => (aborted = true)) });
     try {
       const controller = new AbortController();
-      const res = await fetch(`${s.baseUrl}/chat`, {
+      const res = await fetch(`${s.baseUrl}/v1/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.token}` },
         body: JSON.stringify({ text: '断连测试' }),
@@ -185,7 +185,7 @@ describe('/chat SSE 管道', () => {
     }
   });
 
-  it('scope：新建会话记讨论归属，GET /sessions?scope= 过滤；已有会话续聊不改归属', async () => {
+  it('scope：新建会话记讨论归属，GET /v1/sessions?scope= 过滤；已有会话续聊不改归属', async () => {
     const s = await startTestServer({ modelForTier: () => stepModel([textResult(['嗯。'])]) });
     try {
       // 章节内讨论：带 scope 建会话
@@ -207,13 +207,13 @@ describe('/chat SSE 管道', () => {
 
       // ?scope= 过滤
       const scoped = await (
-        await fetch(`${s.baseUrl}/sessions?scope=${encodeURIComponent('第一卷/第一章.md')}`, {
+        await fetch(`${s.baseUrl}/v1/sessions?scope=${encodeURIComponent('第一卷/第一章.md')}`, {
           headers: { Authorization: `Bearer ${s.token}` },
         })
       ).json() as { sessions: { id: string }[] };
       expect(scoped.sessions.map((x) => x.id)).toEqual([sessionId]);
       const unscoped = await (
-        await fetch(`${s.baseUrl}/sessions?scope=`, { headers: { Authorization: `Bearer ${s.token}` } })
+        await fetch(`${s.baseUrl}/v1/sessions?scope=`, { headers: { Authorization: `Bearer ${s.token}` } })
       ).json() as { sessions: { id: string }[] };
       expect(unscoped.sessions.map((x) => x.id)).toEqual([sessionId2]);
     } finally {
