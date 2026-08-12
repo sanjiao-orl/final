@@ -1,10 +1,15 @@
 // 模块职责：集中读取进程环境配置（LLM 双档模型、.novel 目录、MCP 命令、runtime 文件路径），缺失即抛错，不静默降级。
+// 另含进程版本门禁（D2）：Node 版本下限校验、git commit 自报（供握手文件/ready 行携带）。
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import type { LanguageModel } from 'ai';
 
 /** 与 core/package.json version 保持同步。 */
 export const VERSION = '0.1.0';
+
+/** Node 版本门禁下限（与根 package.json engines.node 对齐）：低于此版本直接拒启。 */
+export const MIN_NODE_MAJOR = 24;
 
 export type Tier = 'writing' | 'background';
 
@@ -57,4 +62,30 @@ export function getDomainMcpCommand(env: NodeJS.ProcessEnv = process.env): { com
 /** runtime 信息文件：默认仓库根 core-runtime.local.json（根 .gitignore 的 *.local 已覆盖）。 */
 export function getRuntimeFilePath(env: NodeJS.ProcessEnv = process.env): string {
   return env.CORE_RUNTIME_FILE || path.resolve(import.meta.dirname, '..', '..', 'core-runtime.local.json');
+}
+
+/**
+ * Node 版本门禁（D2）：主版本低于 MIN_NODE_MAJOR 即抛错拒启。
+ * 版本串可注入以便测试（缺省读 process.versions.node）。
+ */
+export function assertNodeVersion(version = process.versions.node): void {
+  const major = Number(version.split('.')[0]);
+  if (!Number.isInteger(major) || major < MIN_NODE_MAJOR) {
+    throw new Error(`Node 版本过低：当前 ${version}，需要 >= ${MIN_NODE_MAJOR}（根 package.json engines 对齐）`);
+  }
+}
+
+/**
+ * git 短 commit 自报（D2）：在 cwd（缺省 core 包目录）取 `git rev-parse --short HEAD`；
+ * 非 git 环境/命令失败回退 'unknown'——commit 仅自报展示，不参与协议校验。
+ */
+export function getGitCommit(cwd = path.resolve(import.meta.dirname, '..')): string {
+  try {
+    // 注意：不显式传 stdio 数组——实测显式 stdio 下 execFileSync 返回 null 而非 stdout（Node 行为）。
+    const out = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd, encoding: 'utf8' });
+    const commit = out.trim();
+    return commit || 'unknown';
+  } catch {
+    return 'unknown';
+  }
 }

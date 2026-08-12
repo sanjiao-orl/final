@@ -1,9 +1,10 @@
-// 模块职责：POST /chat 的 SSE 聊天管道——落库用户消息 → streamText 多轮工具流 → 逐条转发 SSE → done 前落库完整 assistant 消息；客户端断连中止 LLM 请求。
+// 模块职责：POST /v1/chat 的 SSE 聊天管道——落库用户消息 → streamText 多轮工具流 → 逐条转发 SSE → done 前落库完整 assistant 消息；客户端断连中止 LLM 请求。
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { stepCountIs, streamText, type LanguageModel, type ToolSet } from 'ai';
 import { z } from 'zod';
 import type { MessageRow, SessionRow, SessionStore } from './session-store.js';
-import { sse, startSse, writeJson } from './http.js';
+import { EventPump } from './event-pump.js';
+import { writeJson } from './http.js';
 
 export const chatBodySchema = z.object({
   sessionId: z.string().uuid().optional(),
@@ -77,8 +78,8 @@ function buildReplayMessages(
 }
 
 /**
- * 处理一次 /chat 请求。校验、会话解析、用户消息落库在 SSE 之前完成（失败返回 JSON 错误）；
- * 之后进入 SSE 流，逐条转发 AI SDK 事件，done 前落库完整 assistant 消息。
+ * 处理一次 /v1/chat 请求。校验、会话解析、用户消息落库在 SSE 之前完成（失败返回 JSON 错误）；
+ * 之后进入 SSE 流，经 event_pump（单一发射点、按会话保序）逐条转发 AI SDK 事件，done 前落库完整 assistant 消息。
  */
 export async function handleChatRequest(
   body: unknown,
@@ -116,7 +117,8 @@ export async function handleChatRequest(
   req.on('close', onClose);
   res.on('close', onClose);
 
-  startSse(res);
+  const pump = new EventPump(res, sessionId);
+  pump.start();
   try {
     const model = deps.modelForTier(tier);
     const options: Parameters<typeof streamText>[0] = {
@@ -135,16 +137,16 @@ export async function handleChatRequest(
       switch (part.type) {
         case 'text-delta':
           assistantText += part.text;
-          sse(res, 'text-delta', { delta: part.text });
+          pump.emit('text-delta', { delta: part.text });
           break;
         case 'tool-call': {
           const call = { id: part.toolCallId, name: part.toolName, args: part.input ?? {} };
           toolCalls.push(call);
-          sse(res, 'tool-call', call);
+          pump.emit('tool-call', call);
           break;
         }
         case 'tool-result':
-          sse(res, 'tool-result', { id: part.toolCallId, name: part.toolName, result: part.output ?? null });
+          pump.emit('tool-result', { id: part.toolCallId, name: part.toolName, result: part.output ?? null });
           break;
         case 'error':
           throw new Error(part.error instanceof Error ? part.error.message : String(part.error));
@@ -156,7 +158,7 @@ export async function handleChatRequest(
 
     if (abort.signal.aborted) {
       // 客户端断连：不落库、不发 done。
-      res.end();
+      pump.end();
       return;
     }
 
@@ -166,16 +168,16 @@ export async function handleChatRequest(
       content: assistantText,
       toolCalls,
     });
-    sse(res, 'done', { sessionId, messageId: assistantMsg.id });
-    res.end();
+    pump.emit('done', { sessionId, messageId: assistantMsg.id });
+    pump.end();
   } catch (err) {
     if (abort.signal.aborted) {
-      res.end();
+      pump.end();
       return;
     }
     const message = err instanceof Error ? err.message : String(err);
-    sse(res, 'error', { message });
-    res.end();
+    pump.emit('error', { message });
+    pump.end();
   } finally {
     req.off('close', onClose);
     res.off('close', onClose);

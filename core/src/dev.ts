@@ -1,6 +1,6 @@
-// 模块职责：GET /dev 的内嵌联调页（无外部资源）：会话选择/新建、消息列表、输入框，用 fetch POST /chat + ReadableStream 手工解析 SSE。
+// 模块职责：GET /v1/dev 的内嵌联调页（无外部资源）：会话选择/新建、消息列表、输入框，用 fetch POST /v1/chat + ReadableStream 手工解析 SSE。
 // token 由服务端直接内嵌（页面本身免鉴权、仅本地服务），供浏览器裸联调用。
-export function devPage(token: string): string {
+export function devPage(token: string, version: string): string {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -43,7 +43,8 @@ export function devPage(token: string): string {
 </head>
 <body>
 <header>
-  <h1>novel core /dev</h1>
+  <h1>novel core /v1/dev</h1>
+  <span class="meta">协议 v1 · core __VERSION__</span>
   <span class="meta" id="status">连接中…</span>
 </header>
 <main>
@@ -58,6 +59,7 @@ export function devPage(token: string): string {
 </main>
 <script>
 var TOKEN = '__TOKEN__';
+var WORKDIR = new URLSearchParams(window.location.search).get('workDir') || null;
 var state = { sessionId: null, streaming: false, toolLines: {} };
 var $ = function (id) { return document.getElementById(id); };
 
@@ -80,7 +82,7 @@ function esc(s) {
 
 // ---- 会话列表 ----
 function loadSessions() {
-  api('/sessions').then(function (j) {
+  api('/v1/sessions').then(function (j) {
     var box = $('sessions');
     box.innerHTML = '';
     var btn = document.createElement('button');
@@ -115,7 +117,7 @@ function openSession(id) {
   box.innerHTML = '';
   state.toolLines = {};
   if (!id) { setStatus('新会话', true); return; }
-  api('/sessions/' + id).then(function (j) {
+  api('/v1/sessions/' + id).then(function (j) {
     box.innerHTML = '';
     j.messages.forEach(function (m) { renderMessage(m); });
     box.scrollTop = box.scrollHeight;
@@ -155,9 +157,12 @@ function send() {
   var assistantEl = appendBubble('assistant', '');
   state.toolLines = {};
   // sessionId 为 null 时不下发该字段（服务端 schema 的 optional 不接受 null）
-  var body = JSON.stringify(state.sessionId ? { sessionId: state.sessionId, text: text } : { text: text });
+  var payload = state.sessionId ? { sessionId: state.sessionId, text: text } : { text: text };
+  // 页面带 ?workDir= 时下发作品目录（领域工具需要；缺省不带，纯对话可用）
+  if (WORKDIR) payload.workDir = WORKDIR;
+  var body = JSON.stringify(payload);
 
-  fetch('/chat', {
+  fetch('/v1/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + TOKEN },
     body: body
@@ -246,5 +251,5 @@ loadSessions();
 </script>
 </body>
 </html>
-`.replace('__TOKEN__', token);
+`.replace('__TOKEN__', token).replace('__VERSION__', version);
 }

@@ -1,9 +1,13 @@
 /**
  * core.ts —— core sidecar 的 HTTP 客户端：Bearer 鉴权、工具代理（壳的数据面）、
- * 会话读取、/chat SSE 流（fetch + ReadableStream 手工解析，text-delta 经批次器进回调）。
+ * 会话读取、/v1/chat SSE 流（fetch + ReadableStream 手工解析，text-delta 经批次器进回调）。
+ * 只消费版本化契约（/v1/ 前缀，docs/decisions/0007），不依赖引擎内部类型。
  */
 import { DeltaBatcher, parseSseFrames } from './sse.js';
 import type { Candidate, SessionRow, StoredMessage } from './types.js';
+
+/** 协议契约前缀（core 全部业务端点）。 */
+const API_PREFIX = '/v1';
 
 export interface CoreInfo {
   port: number;
@@ -46,15 +50,15 @@ export class CoreClient {
     return body as T;
   }
 
-  async health(): Promise<{ ok: boolean; version: string }> {
-    const res = await fetch(`${this.baseUrl}/health`);
+  async health(): Promise<{ ok: boolean; version: string; protocol?: number }> {
+    const res = await fetch(`${this.baseUrl}${API_PREFIX}/health`);
     if (!res.ok) throw new Error(`core 健康检查失败: ${res.status}`);
-    return (await res.json()) as { ok: boolean; version: string };
+    return (await res.json()) as { ok: boolean; version: string; protocol?: number };
   }
 
   /** 调 domain 工具（经 core 代理）。失败抛出带服务端 message 的 Error。 */
   callTool<T>(name: string, args: Record<string, unknown>): Promise<T> {
-    return this.request<T>(`/tools/${encodeURIComponent(name)}`, {
+    return this.request<T>(`${API_PREFIX}/tools/${encodeURIComponent(name)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(args),
@@ -64,11 +68,11 @@ export class CoreClient {
   /** 会话列表；scope 传入时按归属过滤（''=无归属讨论，章 relPath=章节内讨论）。 */
   listSessions(scope?: string): Promise<{ sessions: SessionRow[] }> {
     const q = scope === undefined ? '' : `?scope=${encodeURIComponent(scope)}`;
-    return this.request(`/sessions${q}`);
+    return this.request(`${API_PREFIX}/sessions${q}`);
   }
 
   sessionMessages(id: string): Promise<{ sessionId: string; messages: StoredMessage[] }> {
-    return this.request(`/sessions/${encodeURIComponent(id)}`);
+    return this.request(`${API_PREFIX}/sessions/${encodeURIComponent(id)}`);
   }
 
   /** 暂存候选列表；status / chapter 过滤可组合。 */
@@ -77,7 +81,7 @@ export class CoreClient {
     if (filter.status !== undefined) params.set('status', filter.status);
     if (filter.chapter !== undefined) params.set('chapter', filter.chapter);
     const q = params.toString();
-    return this.request(`/candidates${q ? '?' + q : ''}`);
+    return this.request(`${API_PREFIX}/candidates${q ? '?' + q : ''}`);
   }
 
   createCandidate(c: {
@@ -87,7 +91,7 @@ export class CoreClient {
     instruction?: string;
     sessionId?: string;
   }): Promise<{ candidate: Candidate }> {
-    return this.request('/candidates', {
+    return this.request(`${API_PREFIX}/candidates`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(c),
@@ -98,19 +102,19 @@ export class CoreClient {
     id: string,
     patch: { status?: string; proposed?: string; instruction?: string },
   ): Promise<{ candidate: Candidate }> {
-    return this.request(`/candidates/${encodeURIComponent(id)}`, {
+    return this.request(`${API_PREFIX}/candidates/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
     });
   }
 
-  /** POST /chat 的 SSE 流：手工解析帧，text-delta 经 DeltaBatcher 批次后才进 onDelta。 */
+  /** POST /v1/chat 的 SSE 流：手工解析帧，text-delta 经 DeltaBatcher 批次后才进 onDelta。 */
   async chatStream(
     body: { sessionId?: string; text: string; workDir?: string; scope?: string },
     handlers: ChatStreamHandlers,
   ): Promise<void> {
-    await this.postSse('/chat', body, handlers.onDelta, (event, data, flush) => {
+    await this.postSse(`${API_PREFIX}/chat`, body, handlers.onDelta, (event, data, flush) => {
       switch (event) {
         case 'tool-call':
           handlers.onToolCall?.(data as { id: string; name: string; args: unknown });
@@ -132,12 +136,12 @@ export class CoreClient {
     });
   }
 
-  /** POST /rewrite 的 SSE 流：纯改写（无工具、不落库），done 带完整改写文本。 */
+  /** POST /v1/rewrite 的 SSE 流：纯改写（无工具、不落库），done 带完整改写文本。 */
   async rewriteStream(
     body: { original: string; instruction: string },
     handlers: RewriteStreamHandlers,
   ): Promise<void> {
-    await this.postSse('/rewrite', body, handlers.onDelta, (event, data, flush) => {
+    await this.postSse(`${API_PREFIX}/rewrite`, body, handlers.onDelta, (event, data, flush) => {
       if (event === 'done') {
         flush();
         handlers.onDone?.({ text: String((data as { text?: string }).text ?? '') });

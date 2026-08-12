@@ -1,13 +1,22 @@
 // 模块职责：core 进程入口——解析参数、装配依赖、启动 HTTP 服务、打印/写入 token+port、孤儿守护与优雅关闭。
 import { randomUUID } from 'node:crypto';
-import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { Server } from 'node:http';
-import { createModelForTier, getNovelDir, getRuntimeFilePath, loadLlmConfig, VERSION, type Tier } from './config.js';
+import {
+  assertNodeVersion,
+  createModelForTier,
+  getGitCommit,
+  getNovelDir,
+  getRuntimeFilePath,
+  loadLlmConfig,
+  VERSION,
+  type Tier,
+} from './config.js';
 import { connectDomainMcp } from './mcp.js';
 import { createAppServer } from './server.js';
 import { CandidateStore } from './candidate-store.js';
 import { SessionStore } from './session-store.js';
+import { PROTOCOL_VERSION, readyLine, writeRuntimeFile, type RuntimeInfo } from './runtime.js';
 
 interface CliArgs {
   port: number | undefined;
@@ -35,6 +44,9 @@ function parseArgs(argv: string[]): CliArgs {
 }
 
 async function main(): Promise<void> {
+  // Node 版本门禁（D2）：低于下限直接拒启，不给半坏运行状态。
+  assertNodeVersion();
+
   const args = parseArgs(process.argv.slice(2));
 
   // 配置缺失（LLM 环境变量）在启动即抛错，不静默降级。
@@ -63,10 +75,20 @@ async function main(): Promise<void> {
   await listen(server, args.port);
   const port = getPort(server);
 
-  // token + port：打印到 stdout（单行 JSON，便于壳解析），并写入 runtime 文件。
-  console.log(JSON.stringify({ event: 'ready', port, token }));
-  writeFileSync(getRuntimeFilePath(), JSON.stringify({ port, token, pid: process.pid, startedAt: new Date().toISOString() }, null, 2) + '\n');
-  console.log(`[core] 已就绪：http://127.0.0.1:${port}（/dev 联调页免鉴权，其余端点需 Bearer token）`);
+  // 握手自报（D2）：ready 行（stdout，壳接线用）与 runtime 文件携带同一组版本/commit/协议字段，
+  // 消费者按 protocol 校验兼容性（壳侧校验见 shell/src-tauri/src/lib.rs）。
+  const info: RuntimeInfo = {
+    port,
+    token,
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    version: VERSION,
+    commit: getGitCommit(),
+    protocol: PROTOCOL_VERSION,
+  };
+  console.log(readyLine(info));
+  writeRuntimeFile(getRuntimeFilePath(), info);
+  console.log(`[core] 已就绪：http://127.0.0.1:${port}（/v1/dev 联调页免鉴权，其余端点需 Bearer token，协议 v${PROTOCOL_VERSION}）`);
 
   // 孤儿守护：每 5s 探测父进程，不在则退出。
   let orphanTimer: NodeJS.Timeout | undefined;

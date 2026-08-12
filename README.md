@@ -14,8 +14,8 @@ npm install
 #   LLM_MODEL_CHEAP  deepseek-v4-flash(后台档,缺省回退 LLM_MODEL)
 # 注:裸 /zen/v1 端点付费模型余额不足会 402;/zen/go/v1 为 Go 订阅模型池,可用模型以 GET /models 为准
 
-npm run dev:core        # 起 sidecar 核心(打印 port/token,写 core-runtime.local.json)
-# 浏览器打开 http://127.0.0.1:<port>/dev → 裸联调页(对话/流式/工具/多会话)
+npm run dev:core        # 起 sidecar 核心(打印 port/token,写 core-runtime.local.json,含版本/commit/协议自报)
+# 浏览器打开 http://127.0.0.1:<port>/v1/dev → 裸联调页(对话/流式/工具/多会话);协议契约见 docs/decisions/0007
 
 node core/scripts/e2e.mjs   # 真实 LLM e2e(key 在场才跑)
 ```
@@ -26,7 +26,7 @@ node core/scripts/e2e.mjs   # 真实 LLM e2e(key 在场才跑)
 - `domain/` — MCP 领域服务:结构树(卷/章/场,标题派生)、章节读写(原子写)、搜索、字数统计
 - `shell/` — Tauri 2 + Svelte 5 + TipTap 壳(三栏布局/专注模式/安全阀四件;第 3 周接入 AI 面板+暂存抽屉;启动自动保存 60s 低频兜底)
 - `.demo-work/` — 演示作品(测试文本,随时可删)
-- `docs/` — 需求基线(01-产品定义)、旧项目诊断(00)、决策记录(decisions/0001-0006)、路线图(roadmap)、审核手册
+- `docs/` — 需求基线(01-产品定义)、旧项目诊断(00)、决策记录(decisions/0001-0007)、路线图(roadmap)、审核手册
 - `scripts/check-env.ps1` — 检查 LLM_* 环境变量是否配置
 
 ## 下一轮流程（动工前必读）

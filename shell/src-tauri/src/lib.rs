@@ -6,12 +6,30 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use tauri_plugin_updater::UpdaterExt;
 
+/// 协议契约版本（core 侧自报，docs/decisions/0007）。壳只认这个版本，不匹配即拒接。
+const EXPECTED_PROTOCOL: u64 = 1;
+
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CoreInfo {
   port: u16,
   token: String,
   work_dir: String,
+  version: String,
+  commit: String,
+  protocol: u64,
+}
+
+/// 握手校验（D2）：core ready 行自报的 protocol 必须等于 EXPECTED_PROTOCOL，
+/// 否则视为不兼容版本，壳拒绝接线（客户端与引擎脱节的快速失败）。
+fn validate_protocol(protocol: Option<u64>) -> Result<(), String> {
+  match protocol {
+    Some(p) if p == EXPECTED_PROTOCOL => Ok(()),
+    Some(p) => Err(format!(
+      "core 协议版本不兼容：实际 v{p}，壳期望 v{EXPECTED_PROTOCOL}（见 docs/decisions/0007-协议契约-v1.md）"
+    )),
+    None => Err("core ready 行缺少 protocol 字段（core 版本过旧？）".to_string()),
+  }
 }
 
 enum CoreState {
@@ -91,16 +109,34 @@ fn watch_core(child: &mut Child, shared: Shared, work_dir: String) {
         Ok(v) => {
           let port = v.get("port").and_then(|p| p.as_u64());
           let token = v.get("token").and_then(|t| t.as_str());
+          let version = v.get("version").and_then(|t| t.as_str()).unwrap_or("unknown").to_string();
+          let commit = v.get("commit").and_then(|t| t.as_str()).unwrap_or("unknown").to_string();
+          let protocol = v.get("protocol").and_then(|p| p.as_u64());
           if let (Some(port), Some(token)) = (port, token) {
+            if let Err(e) = validate_protocol(protocol) {
+              log::error!("[shell] 握手校验失败: {e}");
+              if let Ok(mut guard) = shared.lock() {
+                *guard = CoreState::Failed(e);
+              }
+              return;
+            }
             let info = CoreInfo {
               port: port as u16,
               token: token.to_string(),
               work_dir: work_dir.clone(),
+              version,
+              commit,
+              protocol: protocol.unwrap_or(0),
             };
+            log::info!(
+              "[shell] core 就绪于 127.0.0.1:{port}（v{}, commit {}, 协议 v{}）",
+              info.version,
+              info.commit,
+              info.protocol
+            );
             if let Ok(mut guard) = shared.lock() {
               *guard = CoreState::Ready(info);
             }
-            log::info!("[shell] core 就绪于 127.0.0.1:{port}");
           }
         }
         Err(e) => log::warn!("[shell] 解析 core ready 行失败: {e}"),
@@ -183,5 +219,16 @@ mod tests {
   fn default_work_dir_is_demo_work_under_repo() {
     let w = work_dir().expect("work_dir");
     assert!(w.ends_with(".demo-work"), "缺省作品目录应为 <repo>/.demo-work: {w:?}");
+  }
+
+  /// 握手校验：协议版本不匹配或缺失必须拒接（快速失败，防新旧壳/core 混接）。
+  #[test]
+  fn handshake_validates_protocol() {
+    assert!(validate_protocol(Some(1)).is_ok(), "期望协议 v1 通过");
+    assert!(
+      validate_protocol(Some(2)).is_err(),
+      "协议 v2 与壳期望不符必须拒绝"
+    );
+    assert!(validate_protocol(None).is_err(), "缺 protocol 字段必须拒绝");
   }
 }

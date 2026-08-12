@@ -1,9 +1,10 @@
-// 模块职责：POST /rewrite 的 SSE 改写管道——纯文本改写（无工具、不落库），
-// 原文+指令进模型，改写结果流式吐回；产出由壳另行 POST /candidates 进暂存区（人的方向 AI 的笔）。
+// 模块职责：POST /v1/rewrite 的 SSE 改写管道——纯文本改写（无工具、不落库），
+// 原文+指令进模型，改写结果流式吐回；产出由壳另行 POST /v1/candidates 进暂存区（人的方向 AI 的笔）。
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { streamText, type LanguageModel } from 'ai';
 import { z } from 'zod';
-import { sse, startSse, writeJson } from './http.js';
+import { EventPump } from './event-pump.js';
+import { writeJson } from './http.js';
 
 export const rewriteBodySchema = z.object({
   /** 选区原文（锚定文本，改写对象）。 */
@@ -29,7 +30,7 @@ const MAX_OUTPUT_CHARS = 20_000;
 const OUTPUT_RATIO_MIN = 0.2;
 const OUTPUT_RATIO_MAX = 3;
 
-/** 处理一次 /rewrite 请求。校验失败返回 JSON 错误；之后进入 SSE 流（text-delta / done / error）。 */
+/** 处理一次 /v1/rewrite 请求。校验失败返回 JSON 错误；之后进入 SSE 流（text-delta / done / error，经 event_pump 单一发射点）。 */
 export async function handleRewriteRequest(
   body: unknown,
   deps: RewriteDeps,
@@ -48,7 +49,8 @@ export async function handleRewriteRequest(
   req.on('close', onClose);
   res.on('close', onClose);
 
-  startSse(res);
+  const pump = new EventPump(res);
+  pump.start();
   try {
     const result = streamText({
       model: deps.modelForTier('writing'),
@@ -61,39 +63,39 @@ export async function handleRewriteRequest(
     for await (const part of result.stream) {
       if (part.type === 'text-delta') {
         text += part.text;
-        sse(res, 'text-delta', { delta: part.text });
+        pump.emit('text-delta', { delta: part.text });
       } else if (part.type === 'error') {
         throw new Error(part.error instanceof Error ? part.error.message : String(part.error));
       }
     }
 
     if (abort.signal.aborted) {
-      res.end();
+      pump.end();
       return;
     }
     const finalText = text.trim();
     if (!finalText) {
-      sse(res, 'error', { message: '模型返回了空改写结果' });
-      res.end();
+      pump.emit('error', { message: '模型返回了空改写结果' });
+      pump.end();
       return;
     }
     // 输出护栏：改写结果异常（超长/过短/注水）不进暂存区，显式 error 让壳走失败红条。
     const guard = guardRewrite(finalText, original);
     if (guard) {
-      sse(res, 'error', { message: guard });
-      res.end();
+      pump.emit('error', { message: guard });
+      pump.end();
       return;
     }
-    sse(res, 'done', { text: finalText });
-    res.end();
+    pump.emit('done', { text: finalText });
+    pump.end();
   } catch (err) {
     if (abort.signal.aborted) {
-      res.end();
+      pump.end();
       return;
     }
     const message = err instanceof Error ? err.message : String(err);
-    sse(res, 'error', { message });
-    res.end();
+    pump.emit('error', { message });
+    pump.end();
   } finally {
     req.off('close', onClose);
     res.off('close', onClose);
