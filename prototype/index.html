@@ -29,7 +29,7 @@
   --body-maxwidth: 720px;
 
   --tree-w: 260px;
-  --right-w: 360px;
+  --right-w: 600px; /* v3:JS 按可见栏求和动态覆盖 */
   --rail-w: 48px;
   --toolbar-h: 42px;
 
@@ -592,7 +592,7 @@ input, textarea, select { font-family: var(--ui-font); color: var(--ink); }
 .stg-empty .hint { font-size: 11px; opacity: 0.75; }
 
 /* ============================================================
-   右栏 · AI 窄条 48px(v2:默认收起,点击图标展开)
+   右栏 · AI 窄条 48px(v3:默认收起;点图标开/关栏,滚轮增减栏数)
    ============================================================ */
 #ai-rail {
   width: var(--rail-w); flex: none;
@@ -621,7 +621,6 @@ input, textarea, select { font-family: var(--ui-font); color: var(--ink); }
 .rail-btn svg { width: 18px; height: 18px; }
 .rail-btn:hover { background: color-mix(in srgb, var(--muted) 10%, transparent); color: var(--ink); }
 .rail-btn.on { background: var(--accent-soft); color: var(--accent); }
-#app.show-settings #ai-rail [data-act="settings"] { background: var(--accent-soft); color: var(--accent); }
 /* hover 提示(向左弹出,不遮挡正文视线) */
 .rail-btn .rail-tip {
   position: absolute; left: calc(100% + 10px); top: 50%;
@@ -639,11 +638,13 @@ input, textarea, select { font-family: var(--ui-font); color: var(--ink); }
 .rail-spacer { flex: 1; }
 
 /* ============================================================
-   右栏 · AI 面板 360px(展开形态)
+   右栏 · AI 面板 v3:按功能分栏——会话 / 对话 / 工具 / 设置
+   2 栏起,逐栏增至多栏;栏序固定,`--right-w` 由 JS 按可见栏求和;
+   栏间分隔线用 :has() 只看"右侧还有可见栏",任意可见组合都正确
    ============================================================ */
 #ai {
   width: 0; flex: none;
-  display: flex; flex-direction: column;
+  display: flex; flex-direction: row;
   background: var(--panel);
   border-left: 1px solid transparent;
   overflow: hidden;
@@ -651,14 +652,35 @@ input, textarea, select { font-family: var(--ui-font); color: var(--ink); }
 }
 #app.ai-open #ai { width: var(--right-w); border-left-color: var(--line); }
 #app.focus #ai { margin-right: calc(-1 * var(--right-w)); }
-/* 面板双视图:会话 / 工具,互斥显示,避免一栏堆叠 */
-#ai-session-view, #ai-tools-view {
+.ai-col {
+  flex: none; height: 100%; min-height: 0;
   display: flex; flex-direction: column;
-  width: var(--right-w); height: 100%; min-height: 0;
+  background: var(--panel);
 }
-#app.view-tools #ai-session-view { display: none; }
-#app:not(.view-tools) #ai-tools-view { display: none; }
-.ai-head { border-bottom: 1px solid var(--line); padding: 10px 12px 9px; }
+#col-session { width: 280px; }
+#col-chat    { width: 320px; }
+#col-tools   { width: 280px; }
+#col-settings{ width: 300px; }
+.ai-col.off { display: none; }
+#ai .ai-col:has(~ .ai-col:not(.off)) { border-right: 1px solid var(--line); }
+
+/* 栏头 / 栏体 */
+.col-head {
+  flex: none;
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px 9px;
+  border-bottom: 1px solid var(--line);
+}
+.col-title { font-size: 12.5px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.col-title .n {
+  min-width: 17px; height: 17px; padding: 0 5px;
+  border-radius: 9px; background: var(--accent); color: #fff;
+  font-size: 10.5px; line-height: 17px; text-align: center;
+}
+.col-hint { flex: 1; font-size: 10.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.col-body { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 12px; }
+
+/* 会话栏:挂载 chips(B7) */
 .ai-scope { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
 .ai-scope .lbl { font-size: 10.5px; letter-spacing: 0.18em; color: var(--muted); flex: none; }
 .scope-chips { display: flex; gap: 4px; flex-wrap: wrap; }
@@ -670,29 +692,46 @@ input, textarea, select { font-family: var(--ui-font); color: var(--ink); }
 }
 .scope-chip.on { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent); }
 .scope-chip:not(.on):hover { border-color: var(--muted); color: var(--ink); }
-.ai-session { display: flex; align-items: center; gap: 6px; }
+
+/* 会话列表(B7):搜索 / 切换 / 重命名 / 归档 */
+.sess-search { position: relative; }
+.sess-search svg {
+  position: absolute; left: 7px; top: 7px;
+  width: 12px; height: 12px; color: var(--muted); pointer-events: none;
+}
+.sess-search input {
+  width: 100%; height: 26px;
+  padding: 0 8px 0 24px;
+  font-size: 12px;
+  background: color-mix(in srgb, var(--muted) 7%, transparent);
+  border: 1px solid transparent; border-radius: 6px;
+  outline: none;
+  transition: border-color var(--t-hover), background var(--t-hover);
+}
+.sess-search input:focus { border-color: var(--accent-line); background: var(--panel); }
+.sess-list { display: flex; flex-direction: column; gap: 2px; }
+.sess-row {
+  display: flex; align-items: center; gap: 6px;
+  min-height: 30px; padding: 3px 8px;
+  border-radius: 6px; cursor: pointer;
+  transition: background var(--t-hover);
+}
+.sess-row:hover { background: color-mix(in srgb, var(--muted) 8%, transparent); }
+.sess-row.on { background: var(--accent-soft); }
+.sess-row.on .sess-name { color: var(--accent); font-weight: 600; }
+.sess-name { flex: 1; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sess-meta { font-size: 10.5px; color: var(--muted); flex: none; }
+.sess-ops { display: flex; gap: 2px; opacity: 0; transition: opacity var(--t-hover); }
+.sess-row:hover .sess-ops { opacity: 1; }
+
+/* 对话栏:当前会话名 + 操作(B7) */
+.ai-session { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
 .ai-session .name {
   flex: 1; font-size: 13px; font-weight: 600;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   cursor: text; padding: 2px 4px; border-radius: 4px;
 }
 .ai-session .name:hover { background: color-mix(in srgb, var(--muted) 8%, transparent); }
-.ai-body { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 12px; }
-
-/* 工具视图头(B3/B10 收纳在独立视图,不与消息流堆叠) */
-.ai-tools-head {
-  flex: none;
-  display: flex; align-items: center; gap: 8px;
-  padding: 10px 12px 9px;
-  border-bottom: 1px solid var(--line);
-}
-.ai-tools-title { font-size: 12.5px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
-.ai-tools-count {
-  min-width: 17px; height: 17px; padding: 0 5px;
-  border-radius: 9px; background: var(--accent); color: #fff;
-  font-size: 10.5px; line-height: 17px; text-align: center;
-}
-.ai-tools-hint { flex: 1; font-size: 10.5px; color: var(--muted); }
 
 /* 消息 */
 .msg { display: flex; flex-direction: column; gap: 5px; }
@@ -802,7 +841,7 @@ input, textarea, select { font-family: var(--ui-font); color: var(--ink); }
 /* ============================================================
    B6 · 审批卡
    ============================================================ */
-#approval-overlay, #settings-overlay {
+#approval-overlay {
   position: fixed; inset: 0;
   background: color-mix(in srgb, var(--ink) 22%, transparent);
   z-index: 90;
@@ -863,20 +902,8 @@ input, textarea, select { font-family: var(--ui-font); color: var(--ink); }
 .mini-mode.on { border-color: var(--status-draft); color: var(--status-draft); background: var(--warn-bg); }
 
 /* ============================================================
-   设置面板(新增,右滑出)
+   设置内容(v3 起为右栏「设置」列,不再右滑出)
    ============================================================ */
-#settings-overlay { justify-content: flex-end; background: color-mix(in srgb, var(--ink) 14%, transparent); }
-#app.show-settings ~ #settings-overlay { opacity: 1; pointer-events: auto; }
-#settings {
-  width: 380px; height: 100%;
-  background: var(--panel);
-  border-left: 1px solid var(--line);
-  box-shadow: var(--shadow-modal);
-  transform: translateX(24px);
-  transition: transform 0.3s var(--ease-fold);
-  display: flex; flex-direction: column;
-}
-#app.show-settings ~ #settings-overlay #settings { transform: none; }
 .set-head {
   display: flex; align-items: center; gap: 8px;
   padding: 14px 18px 12px;
@@ -1334,107 +1361,167 @@ select.inline-sel {
       </div>
     </section>
 
-    <!-- ================= 右栏 · AI 窄条(v2:默认收起 48px) ================= -->
+    <!-- ================= 右栏 · AI 窄条(v3:默认收起 48px;点图标开/关栏,滚轮增减栏数) ================= -->
     <aside id="ai-rail">
-      <span class="rail-logo" title="AI 面板 · 默认收起,点图标展开">
+      <span class="rail-logo" title="AI 面板 · 默认收起;点图标开/关栏,滚轮增减栏数">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/></svg>
       </span>
-      <button class="rail-btn" data-act="ai-view" data-view="session" title="会话 · 挂载/消息/输入">
+      <button class="rail-btn" data-act="ai-view" data-view="session" title="会话 · 挂载/会话列表">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l10 5-10 5L2 7z"/><path d="M2 12l10 5 10-5"/><path d="M2 17l10 5 10-5"/></svg>
+        <span class="rail-tip">会话 · 挂载 / 会话列表(B7)</span>
+      </button>
+      <button class="rail-btn" data-act="ai-view" data-view="chat" title="对话 · 消息流/输入">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-        <span class="rail-tip">会话 · 挂载 / 消息 / 输入</span>
+        <span class="rail-tip">对话 · 消息流 / 输入</span>
       </button>
       <button class="rail-btn" data-act="ai-view" data-view="tools" title="工具 · 调用卡(B3/B10)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
         <span class="rail-tip">工具 · 调用卡(B3/B10)</span>
       </button>
       <div class="rail-spacer"></div>
-      <button class="rail-btn" data-act="settings" title="设置(新增)">
+      <button class="rail-btn" data-act="ai-view" data-view="settings" title="设置">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         <span class="rail-tip">设置</span>
       </button>
     </aside>
 
-    <!-- ================= 右栏 · AI 面板(点击窄条图标展开) ================= -->
+    <!-- ================= 右栏 · AI 面板(v3:按功能分栏,2 栏起可增至多栏) ================= -->
     <aside id="ai">
-      <div id="ai-session-view">
-      <div class="ai-head">
-        <div class="ai-scope">
-          <span class="lbl">挂 载</span>
-          <div class="scope-chips">
-            <button class="scope-chip">无归属</button>
-            <button class="scope-chip on">本章</button>
-            <button class="scope-chip" title="B7:会话可挂载任意层级">第一卷</button>
-            <button class="scope-chip" title="B7:作品根">作品</button>
+      <!-- 会话栏:挂载 chips + 会话列表(B7) -->
+      <section class="ai-col" id="col-session">
+        <div class="col-head">
+          <span class="col-title">会话</span>
+          <span class="col-hint">挂载 / 会话(B7)</span>
+          <button class="icon-btn" data-act="col-close" data-col="session" title="关此栏 (点窄条图标/滚轮可调)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="col-body">
+          <div class="ai-scope">
+            <span class="lbl">挂 载</span>
+            <div class="scope-chips">
+              <button class="scope-chip">无归属</button>
+              <button class="scope-chip on">本章</button>
+              <button class="scope-chip" title="B7:会话可挂载任意层级">第一卷</button>
+              <button class="scope-chip" title="B7:作品根">作品</button>
+            </div>
+          </div>
+          <div class="sess-search">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+            <input type="text" placeholder="搜索会话(B7)">
+          </div>
+          <div class="sess-list">
+            <div class="sess-row on" data-sess="雨夜场景打磨">
+              <span class="sess-name">雨夜场景打磨</span>
+              <span class="sess-meta">本章 · 13:41</span>
+              <div class="sess-ops">
+                <button class="icon-btn" title="重命名(B7)">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z"/></svg>
+                </button>
+                <button class="icon-btn" title="归档(B7)">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4"/></svg>
+                </button>
+              </div>
+            </div>
+            <div class="sess-row" data-sess="莲纹钩子检索">
+              <span class="sess-name">莲纹钩子检索</span>
+              <span class="sess-meta">作品 · 13:12</span>
+              <div class="sess-ops">
+                <button class="icon-btn" title="重命名(B7)">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z"/></svg>
+                </button>
+                <button class="icon-btn" title="归档(B7)">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4"/></svg>
+                </button>
+              </div>
+            </div>
+            <div class="sess-row" data-sess="第四章·鬼市大纲">
+              <span class="sess-name">第四章·鬼市大纲</span>
+              <span class="sess-meta">第四章 · 昨日</span>
+              <div class="sess-ops">
+                <button class="icon-btn" title="重命名(B7)">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z"/></svg>
+                </button>
+                <button class="icon-btn" title="归档(B7)">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4"/></svg>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
-        <div class="ai-session">
-          <span class="name" title="双击重命名(B7)">雨夜场景打磨</span>
-          <div class="session-ops">
-            <button class="icon-btn" title="搜索会话(B7)">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-            </button>
-            <button class="icon-btn" title="归档(B7)">
+      </section>
+
+      <!-- 对话栏:当前会话消息流 + composer(B7/B8) -->
+      <section class="ai-col" id="col-chat">
+        <div class="col-head">
+          <div class="ai-session">
+            <span class="name" id="chat-sess-name" title="双击重命名(B7)">雨夜场景打磨</span>
+            <div class="session-ops">
+              <button class="icon-btn" title="搜索会话(B7)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+              </button>
+              <button class="icon-btn" title="归档(B7)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4"/></svg>
+              </button>
+              <button class="icon-btn" title="新建会话(可挂载任意层级)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+              </button>
+            </div>
+          </div>
+          <button class="icon-btn" data-act="col-close" data-col="chat" title="关此栏 (点窄条图标/滚轮可调)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+
+        <div class="col-body">
+          <div class="msg msg-user">
+            <div class="bubble">第三章"廊下密信"这场节奏有点拖,帮我把拆信前的铺垫收紧,再给莲纹封蜡埋个钩子。</div>
+          </div>
+          <div class="msg msg-ai">
+            <span class="who">AI · 本章挂载(章 id 关联,重排改名不失效 · B7)</span>
+            <div class="bubble">
+              <p>先读一遍本章和相关前文,确认"莲纹"已有的铺垫。</p>
+            </div>
+          </div>
+
+          <div class="msg msg-ai">
+            <div class="bubble">
+              <p>前文只有第二章提过一句"白莲绸庄",钩子很轻。两个改法都避开了直给解释:第一条收紧对话,第二条把钩子换成父亲临终的一句话,让莲纹从"纹样"变成"旧债"。</p>
+              <p>按「小改就地、大改进暂存」(B1),这次动了两段,已送暂存区裁决。</p>
+            </div>
+          </div>
+
+          <div class="msg">
+            <div class="staged-note" data-act="drawer">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4"/></svg>
-            </button>
-            <button class="icon-btn" title="新建会话(可挂载任意层级)">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-            </button>
+              产出 2 条改写候选 → 已送暂存区,点击前往裁决
+            </div>
           </div>
-          <button class="icon-btn" data-act="ai-collapse" title="收起面板 (Esc)">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg>
+        </div>
+
+        <div class="ai-composer">
+          <div class="composer-box">
+            <textarea placeholder="对本章下指令…(挂载:第三章·雨夜来客)"></textarea>
+            <div class="composer-bar">
+              <span class="composer-hint">Enter 发送 · Shift+Enter 换行</span>
+              <button class="send-btn" title="发送">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4z"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 工具栏:工具调用卡(B3/B10),独立分栏,不挤消息流 -->
+      <section class="ai-col" id="col-tools">
+        <div class="col-head">
+          <span class="col-title">工具调用<span class="n">4</span></span>
+          <span class="col-hint">B3 就地审阅 · 点卡头展开/收起</span>
+          <button class="icon-btn" data-act="col-close" data-col="tools" title="关此栏 (点窄条图标/滚轮可调)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
           </button>
         </div>
-      </div>
-
-      <div class="ai-body">
-        <div class="msg msg-user">
-          <div class="bubble">第三章"廊下密信"这场节奏有点拖,帮我把拆信前的铺垫收紧,再给莲纹封蜡埋个钩子。</div>
-        </div>
-        <div class="msg msg-ai">
-          <span class="who">AI · 本章挂载(章 id 关联,重排改名不失效 · B7)</span>
-          <div class="bubble">
-            <p>先读一遍本章和相关前文,确认"莲纹"已有的铺垫。</p>
-          </div>
-        </div>
-
-        <div class="msg msg-ai">
-          <div class="bubble">
-            <p>前文只有第二章提过一句"白莲绸庄",钩子很轻。两个改法都避开了直给解释:第一条收紧对话,第二条把钩子换成父亲临终的一句话,让莲纹从"纹样"变成"旧债"。</p>
-            <p>按「小改就地、大改进暂存」(B1),这次动了两段,已送暂存区裁决。</p>
-          </div>
-        </div>
-
-        <div class="msg">
-          <div class="staged-note" data-act="drawer">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4"/></svg>
-            产出 2 条改写候选 → 已送暂存区,点击前往裁决
-          </div>
-        </div>
-      </div>
-
-      <div class="ai-composer">
-        <div class="composer-box">
-          <textarea placeholder="对本章下指令…(挂载:第三章·雨夜来客)"></textarea>
-          <div class="composer-bar">
-            <span class="composer-hint">Enter 发送 · Shift+Enter 换行</span>
-            <button class="send-btn" title="发送">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4z"/></svg>
-            </button>
-          </div>
-        </div>
-      </div>
-      </div><!-- /#ai-session-view -->
-
-      <!-- 工具视图(B3/B10):与消息流分栏,避免一栏堆叠 -->
-      <div id="ai-tools-view">
-        <div class="ai-tools-head">
-          <span class="ai-tools-title">工具调用<span class="ai-tools-count">4</span></span>
-          <span class="ai-tools-hint">B3 就地审阅 · 点卡头展开/收起</span>
-          <button class="icon-btn" data-act="ai-collapse" title="收起面板 (Esc)">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg>
-          </button>
-        </div>
-        <div class="ai-body">
+        <div class="col-body">
           <!-- 工具卡:已完成,展开审阅(B3) -->
           <div class="tool-card done open">
             <div class="tool-head">
@@ -1487,7 +1574,78 @@ select.inline-sel {
             </div>
           </div>
         </div>
-      </div><!-- /#ai-tools-view -->
+      </section>
+
+      <!-- 设置栏:审批模式 / 外观 / 快照 / 暂存与裁决 -->
+      <section class="ai-col" id="col-settings">
+        <div class="col-head">
+          <span class="col-title">设置</span>
+          <span class="col-hint">B6 / 外观 / 快照</span>
+          <button class="icon-btn" data-act="col-close" data-col="settings" title="关此栏 (点窄条图标/滚轮可调)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="col-body">
+          <div class="set-group">
+            <div class="set-group-label">审批模式(B6)</div>
+            <div class="approval-cards">
+              <div class="appr-opt on">
+                <span class="radio"></span>
+                <div><div class="o-name">ask · 逐项询问</div><div class="o-desc">AI 直调写/删/导出前一律弹审批卡;暂存采纳路径不弹(已有人的裁决)。默认。</div></div>
+              </div>
+              <div class="appr-opt">
+                <span class="radio"></span>
+                <div><div class="o-name">auto · 同类放行</div><div class="o-desc">本会话内同工具同目标放行一次后不再询问,换目标仍询问。</div></div>
+              </div>
+              <div class="appr-opt">
+                <span class="radio"></span>
+                <div><div class="o-name">yolo · 完全放手</div><div class="o-desc">全部自动放行。所有写入仍强制事前快照(B4 不受模式影响)。</div></div>
+              </div>
+            </div>
+          </div>
+          <div class="set-group">
+            <div class="set-group-label">外 观</div>
+            <div class="set-row">
+              <div class="r-label">主题</div>
+              <div class="seg"><button class="on">纸 · 明</button><button>墨 · 暗</button></div>
+            </div>
+            <div class="set-row">
+              <div class="r-label">正文字号</div>
+              <div class="r-desc">改字号将同步打字机定位与浮动条几何(theme.ts 注释约束)</div>
+              <div class="seg"><button>15</button><button class="on">17</button><button>19</button></div>
+            </div>
+            <div class="set-row inline">
+              <span class="r-label">打字机滚动(光标锁 42%)</span>
+              <label class="switch"><input type="checkbox" checked><span class="sl"></span></label>
+            </div>
+          </div>
+          <div class="set-group">
+            <div class="set-group-label">保 存 与 快 照</div>
+            <div class="set-row inline">
+              <span class="r-label">自动保存间隔</span>
+              <select class="inline-sel"><option>30 秒</option><option selected>60 秒</option><option>120 秒</option></select>
+            </div>
+            <div class="set-row inline">
+              <span class="r-label">采纳/危险操作前自动快照(B4)</span>
+              <label class="switch"><input type="checkbox" checked><span class="sl"></span></label>
+            </div>
+          </div>
+          <div class="set-group">
+            <div class="set-group-label">暂 存 与 裁 决</div>
+            <div class="set-row inline">
+              <span class="r-label">小改就地浮层,大改进暂存(B1)</span>
+              <label class="switch"><input type="checkbox" checked><span class="sl"></span></label>
+            </div>
+            <div class="set-row inline">
+              <span class="r-label">采纳留痕:显示"为何采纳"(B8)</span>
+              <label class="switch"><input type="checkbox" checked><span class="sl"></span></label>
+            </div>
+          </div>
+          <div class="set-note">
+            设置项清单为设计方提案(开放项 2),默认值遵循「默认否、可配」原则——默认全部关闭/最保守,逐项经作者确认后定稿。
+          </div>
+        </div>
+      </section>
     </aside>
   </div>
 </div>
@@ -1525,78 +1683,6 @@ select.inline-sel {
   </div>
 </div>
 
-<!-- ================= 设置面板 ================= -->
-<div id="settings-overlay">
-  <div id="settings">
-    <div class="set-head">
-      <span class="set-title">设置</span>
-      <button class="icon-btn" data-act="close-overlays">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
-      </button>
-    </div>
-    <div class="set-body">
-      <div class="set-group">
-        <div class="set-group-label">审批模式(B6)</div>
-        <div class="approval-cards">
-          <div class="appr-opt on">
-            <span class="radio"></span>
-            <div><div class="o-name">ask · 逐项询问</div><div class="o-desc">AI 直调写/删/导出前一律弹审批卡;暂存采纳路径不弹(已有人的裁决)。默认。</div></div>
-          </div>
-          <div class="appr-opt">
-            <span class="radio"></span>
-            <div><div class="o-name">auto · 同类放行</div><div class="o-desc">本会话内同工具同目标放行一次后不再询问,换目标仍询问。</div></div>
-          </div>
-          <div class="appr-opt">
-            <span class="radio"></span>
-            <div><div class="o-name">yolo · 完全放手</div><div class="o-desc">全部自动放行。所有写入仍强制事前快照(B4 不受模式影响)。</div></div>
-          </div>
-        </div>
-      </div>
-      <div class="set-group">
-        <div class="set-group-label">外 观</div>
-        <div class="set-row">
-          <div class="r-label">主题</div>
-          <div class="seg"><button class="on">纸 · 明</button><button>墨 · 暗</button></div>
-        </div>
-        <div class="set-row">
-          <div class="r-label">正文字号</div>
-          <div class="r-desc">改字号将同步打字机定位与浮动条几何(theme.ts 注释约束)</div>
-          <div class="seg"><button>15</button><button class="on">17</button><button>19</button></div>
-        </div>
-        <div class="set-row inline">
-          <span class="r-label">打字机滚动(光标锁 42%)</span>
-          <label class="switch"><input type="checkbox" checked><span class="sl"></span></label>
-        </div>
-      </div>
-      <div class="set-group">
-        <div class="set-group-label">保 存 与 快 照</div>
-        <div class="set-row inline">
-          <span class="r-label">自动保存间隔</span>
-          <select class="inline-sel"><option>30 秒</option><option selected>60 秒</option><option>120 秒</option></select>
-        </div>
-        <div class="set-row inline">
-          <span class="r-label">采纳/危险操作前自动快照(B4)</span>
-          <label class="switch"><input type="checkbox" checked><span class="sl"></span></label>
-        </div>
-      </div>
-      <div class="set-group">
-        <div class="set-group-label">暂 存 与 裁 决</div>
-        <div class="set-row inline">
-          <span class="r-label">小改就地浮层,大改进暂存(B1)</span>
-          <label class="switch"><input type="checkbox" checked><span class="sl"></span></label>
-        </div>
-        <div class="set-row inline">
-          <span class="r-label">采纳留痕:显示"为何采纳"(B8)</span>
-          <label class="switch"><input type="checkbox" checked><span class="sl"></span></label>
-        </div>
-      </div>
-      <div class="set-note">
-        设置项清单为设计方提案(开放项 2),默认值遵循「默认否、可配」原则——默认全部关闭/最保守,逐项经作者确认后定稿。
-      </div>
-    </div>
-  </div>
-</div>
-
 <!-- ================= B4 · 快照 toast ================= -->
 <div id="toast">
   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--ok)" stroke-width="2.2" stroke-linecap="round"><path d="M20 6L9 17l-5-5"/></svg>
@@ -1625,7 +1711,7 @@ select.inline-sel {
       <button class="proto-btn on" data-act="drawer">暂存抽屉</button>
       <button class="proto-btn on" data-act="selpop">选区浮层</button>
       <button class="proto-btn" data-act="approval">审批卡</button>
-      <button class="proto-btn" data-act="settings">设置面板</button>
+      <button class="proto-btn" data-act="settings">设置栏</button>
       <button class="proto-btn" data-act="toast">快照提示</button>
       <button class="proto-btn" data-act="notes">设计标注</button>
       <button class="proto-btn on" data-act="tw">打字机线</button>
@@ -1644,7 +1730,6 @@ const actMap = {
   drawer:   { cls: 'show-drawer' },
   selpop:   { cls: 'show-selpop' },
   approval: { cls: 'show-approval' },
-  settings: { cls: 'show-settings' },
   toast:    { cls: 'show-toast', timed: 4000 },
   notes:    { cls: 'show-notes' },
   tw:       { cls: 'show-tw' },
@@ -1656,42 +1741,86 @@ function syncButtons() {
     b.classList.toggle('on', app.classList.contains(a.cls));
   });
 }
-/* ---- v2:AI 窄条 / 展开面板 ---- */
+/* ---- v3:AI 窄条 / 两栏→多栏面板 ----
+   栏序固定:会话(session) / 对话(chat) / 工具(tools) / 设置(settings)
+   - 默认收起(窄条);点窄条图标:收起→展开 2 栏(该栏+左邻);已开→未显栏=增栏,已显栏=减栏(≥2 栏);仅 2 栏时点已显栏=收起
+   - 滚轮:窄条或面板栏头/空白区,上滚=右端增栏,下滚=右端减栏;2 栏下滚=收起,收起上滚=开 2 栏;内容区滚动不受影响
+   - 栏头 × 同"点已显栏";Esc/点外部=收起;Ctrl+J/顶栏 AI 按钮=开合;F8 专注连窄条隐藏
+   - 能力全保留:B3/B4/B6/B7/B8/B10 */
+const COL_ORDER = ['session', 'chat', 'tools', 'settings'];
+const COL_W = { session: 280, chat: 320, tools: 280, settings: 300 };
+let cols = ['session', 'chat'];
+function colEl(id) { return document.getElementById('col-' + id); }
+function byOrder(a, b) { return COL_ORDER.indexOf(a) - COL_ORDER.indexOf(b); }
+function applyAi() {
+  const open = app.classList.contains('ai-open');
+  if (open) {
+    const w = cols.reduce((s, id) => s + COL_W[id], 0);
+    app.style.setProperty('--right-w', w + 'px');
+  }
+  COL_ORDER.forEach(id => colEl(id).classList.toggle('off', !cols.includes(id)));
+  syncButtons(); syncRail();
+  /* 面板宽度动效结束后给选区浮层收尾钳位(避免盖住窄条;错峰三次,抗慢渲染;
+     placeSelPop 有防空) */
+  [480, 950, 1600].forEach(ms => setTimeout(placeSelPop, ms));
+}
+function openAi() { app.classList.add('ai-open'); applyAi(); }
+function collapseAi() { app.classList.remove('ai-open'); applyAi(); }
+function toggleCol(id) {
+  if (!app.classList.contains('ai-open')) {
+    const i = COL_ORDER.indexOf(id);
+    const n = i > 0 ? COL_ORDER[i - 1] : COL_ORDER[i + 1];   /* 2 栏起:该栏 + 左邻(首位取右邻) */
+    cols = [n, id].sort(byOrder);
+    openAi();
+  } else if (cols.includes(id)) {
+    if (cols.length > 2) { cols = cols.filter(x => x !== id); applyAi(); }
+    else collapseAi();                                       /* 仅 2 栏时点已显栏 = 收起(v2 惯性) */
+  } else {
+    cols = cols.concat(id).sort(byOrder);
+    applyAi();
+  }
+}
+function wheelAi(dir) {                                      /* dir>0 上滚=增栏;dir<0 下滚=减栏 */
+  if (!app.classList.contains('ai-open')) {
+    if (dir < 0) return;
+    cols = ['session', 'chat'];
+    openAi();
+    return;
+  }
+  if (dir > 0) {
+    const last = cols.slice().sort(byOrder).pop();
+    const add = COL_ORDER[COL_ORDER.indexOf(last) + 1];
+    if (add) { cols = cols.concat(add).sort(byOrder); applyAi(); }
+  } else {
+    if (cols.length > 2) {
+      const last = cols.slice().sort(byOrder).pop();
+      cols = cols.filter(x => x !== last);
+      applyAi();
+    } else collapseAi();
+  }
+}
 function syncRail() {
   const open = app.classList.contains('ai-open');
   document.querySelectorAll('#ai-rail .rail-btn[data-view]').forEach(b => {
-    const tools = b.dataset.view === 'tools';
-    b.classList.toggle('on', open && app.classList.contains('view-tools') === tools);
+    b.classList.toggle('on', open && cols.includes(b.dataset.view));
   });
-}
-function openAiView(view) {
-  const tools = view === 'tools';
-  const already = app.classList.contains('ai-open') && app.classList.contains('view-tools') === tools;
-  if (already) app.classList.remove('ai-open');   /* 再点当前视图图标 = 收起 */
-  else {
-    app.classList.add('ai-open');
-    app.classList.toggle('view-tools', tools);
-  }
-  syncButtons(); syncRail();
-}
-function collapseAi() {
-  app.classList.remove('ai-open');
-  syncButtons(); syncRail();
+  document.querySelectorAll('[data-act="settings"]').forEach(b => {
+    b.classList.toggle('on', open && cols.includes('settings'));
+  });
 }
 document.addEventListener('click', e => {
   const t = e.target.closest('[data-act]');
   if (!t) return;
   const act = t.dataset.act;
-  if (act === 'close-overlays') {
-    app.classList.remove('show-approval', 'show-settings');
-    return;
-  }
-  if (act === 'ai-view') { openAiView(t.dataset.view); return; }
-  if (act === 'ai-collapse') { collapseAi(); return; }
+  if (act === 'close-overlays') { app.classList.remove('show-approval'); return; }
+  if (act === 'ai-view') { toggleCol(t.dataset.view); return; }
+  if (act === 'col-close') { toggleCol(t.dataset.col); return; }
+  if (act === 'settings') { toggleCol('settings'); return; }
+  if (act === 'ai') { app.classList.toggle('ai-open'); applyAi(); return; }
   const a = actMap[act];
   if (!a) return;
   if (typeof a === 'function') { a(); return; }
-  if (a.cls === 'show-approval' || a.cls === 'show-settings') { app.classList.add(a.cls); }
+  if (a.cls === 'show-approval') { app.classList.add(a.cls); }
   else if (a.cls === 'show-toast') {
     app.classList.add(a.cls);
     clearTimeout(window.__toastT);
@@ -1700,33 +1829,39 @@ document.addEventListener('click', e => {
   else { app.classList.toggle(a.cls); }
   syncButtons();
 });
-/* v2:点击外部(正文/树/抽屉)收起 AI 面板;工具栏与既有浮层除外 */
+/* v3:滚轮切换——窄条任意位置;面板上避开内容滚动区(栏体/输入框) */
+document.getElementById('ai-rail').addEventListener('wheel', e => {
+  e.preventDefault();
+  wheelAi(e.deltaY < 0 ? 1 : -1);
+}, { passive: false });
+document.getElementById('ai').addEventListener('wheel', e => {
+  if (e.target.closest('.col-body, textarea')) return;   /* 内容区正常滚动 */
+  e.preventDefault();
+  wheelAi(e.deltaY < 0 ? 1 : -1);
+}, { passive: false });
+/* v3:点击外部(正文/树/抽屉)收起 AI 面板;工具栏与既有浮层除外 */
 document.addEventListener('click', e => {
-  if (e.target.closest('#ai, #ai-rail, #toolbar, #approval-overlay, #settings-overlay, #proto-bar')) return;
+  if (e.target.closest('#ai, #ai-rail, #toolbar, #approval-overlay, #proto-bar')) return;
   if (app.classList.contains('ai-open')) collapseAi();
 });
 /* 初始状态同步 */
 app.classList.add('show-tw');
-syncButtons();
-syncRail();
+applyAi();
 
 /* 遮罩点击关闭 */
 document.getElementById('approval-overlay').addEventListener('click', e => {
   if (e.target.id === 'approval-overlay') app.classList.remove('show-approval');
 });
-document.getElementById('settings-overlay').addEventListener('click', e => {
-  if (e.target.id === 'settings-overlay') app.classList.remove('show-settings');
-});
 
 /* 快捷键,与真实壳一致 */
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
-    app.classList.remove('show-approval', 'show-settings', 'show-selpop', 'ai-open');
-    syncButtons(); syncRail();
+    app.classList.remove('show-approval', 'show-selpop', 'ai-open');
+    applyAi();
   }
   if (e.key === 'F8') { e.preventDefault(); app.classList.toggle('focus'); syncButtons(); }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'j') {
-    e.preventDefault(); app.classList.toggle('ai-open'); syncButtons(); syncRail();
+    e.preventDefault(); app.classList.toggle('ai-open'); applyAi();
   }
 });
 
@@ -1766,6 +1901,9 @@ document.getElementById('editor-scroll').addEventListener('scroll', placeSelPop)
 /* 抽屉开合后浮层重新钳位 */
 const drawerObserver = new MutationObserver(placeSelPop);
 drawerObserver.observe(app, { attributes: true, attributeFilter: ['class'] });
+/* v3:AI 面板宽度随栏数动画(0.42s),过渡期间滚动事件只在中间态钳位、
+   结束后无收尾,浮层会按过渡前宽度定位盖住窄条挡住滚轮切换。
+   在 applyAi() 后延时再钳一次,保证浮层始终停在正文区之内(见 applyAi) */
 
 /* 工具卡展开/收起 */
 document.querySelectorAll('.tool-card .tool-head').forEach(h => {
@@ -1794,6 +1932,15 @@ document.querySelectorAll('.ch-row').forEach(r => {
 /* 卷折叠 */
 document.querySelectorAll('.vol-row').forEach(r => {
   r.addEventListener('click', () => r.parentElement.classList.toggle('closed'));
+});
+/* 会话行切换(演示):激活态 + 对话栏标题联动 */
+document.querySelectorAll('.sess-row').forEach(r => {
+  r.addEventListener('click', () => {
+    document.querySelectorAll('.sess-row').forEach(x => x.classList.remove('on'));
+    r.classList.add('on');
+    const n = document.getElementById('chat-sess-name');
+    if (n && r.dataset.sess) n.textContent = r.dataset.sess;
+  });
 });
 /* scope chips / seg / appr-opt 单选演示 */
 document.querySelectorAll('.scope-chips').forEach(g => g.addEventListener('click', e => {
