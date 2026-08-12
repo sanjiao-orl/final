@@ -142,18 +142,21 @@ function renderReport(result: WorkScanResult): string {
   return out.join('\n') + '\n';
 }
 
-const workDir = process.argv[2];
-if (!workDir) {
-  console.error('用法: npm run scan -w domain -- <workDir> [outPath]');
+const workDirArg = process.argv[2];
+if (!workDirArg) {
+  console.error('用法: npm run scan -w domain -- <workDir> [outPath]（相对路径按仓库根解析）');
   process.exit(1);
 }
-const result = scanWork(path.resolve(workDir));
+// 相对路径一律按仓库根解析（npm run -w 会把 cwd 切到工作区目录，不能依赖 cwd）
+const repoRoot = path.resolve(import.meta.dirname, '..', '..');
+const resolveArg = (p: string): string => (path.isAbsolute(p) ? p : path.resolve(repoRoot, p));
+const result = scanWork(resolveArg(workDirArg));
 // 报告里按调用方传入的路径原样展示（不写运行时机器绝对路径）
-result.workDir = workDir;
+result.workDir = workDirArg;
 const md = renderReport(result);
 const outPath = process.argv[3];
 if (outPath) {
-  fs.writeFileSync(path.resolve(outPath), md, 'utf8');
-  console.error(`报告已写入 ${path.resolve(outPath)}`);
+  fs.writeFileSync(resolveArg(outPath), md, 'utf8');
+  console.error(`报告已写入 ${resolveArg(outPath)}`);
 }
 process.stdout.write(md);
