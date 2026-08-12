@@ -1,5 +1,5 @@
 /**
- * tools.ts —— 五个 MCP 工具的业务实现（不含 MCP 装配）。
+ * tools.ts —— 六个 MCP 工具的业务实现（不含 MCP 装配）。
  * 结构树永远从文件内容派生；relPath 一律相对 workDir，输出统一用正斜杠。
  */
 import fs from 'node:fs';
@@ -14,6 +14,7 @@ import {
   toPosix,
   type MdFile,
 } from './fsutil.js';
+export { scanWork as scanQuality } from './qualityScan.js';
 
 // ---------- 字数统计 ----------
 

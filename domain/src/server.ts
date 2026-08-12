@@ -1,5 +1,5 @@
 /**
- * server.ts —— MCP stdio server 装配：注册五个工具并连接 stdio transport。
+ * server.ts —— MCP stdio server 装配：注册六个工具并连接 stdio transport。
  * 被 core 包经 MCP stdio spawn 调用；工具实现见 tools.ts。
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -10,6 +10,7 @@ import {
   exportTxt,
   listStructure,
   readChapter,
+  scanQuality,
   searchContent,
   wordCount,
   writeChapter,
@@ -117,6 +118,17 @@ server.registerTool(
     inputSchema: { workDir: z.string().describe('作品文件夹的绝对路径') },
   },
   async ({ workDir }) => jsonResult(exportTxt(workDir)),
+);
+
+server.registerTool(
+  'scan_quality',
+  {
+    title: '扫描去 AI 味量化指标（LAY）',
+    description:
+      '确定性扫描 manuscript 全部章（零 LLM 成本）：CJK 字数、破折号、"不是X是Y"句式、正文元话语、段落长度、AI 口水词、高频词候选、感叹号/粗口分布、场景；书级：场景轮换池、连续同场景、跨章模板段落。逐章读文件，不注入正文。',
+    inputSchema: { workDir: z.string().describe('作品文件夹的绝对路径') },
+  },
+  async ({ workDir }) => jsonResult(scanQuality(workDir)),
 );
 
 // 挂起等待 stdio 上的 MCP 请求
