@@ -265,8 +265,13 @@ export class CandidatesStore {
           {
             onDelta: (d) => {
               text += d;
+              const next = { ...c, proposed: text };
               // 流式整改：目标卡的 proposed 逐批更新（30–50ms 批次进 store）
-              this.setItems(this.items.map((i) => (i.id === c.id ? { ...i, proposed: text } : i)));
+              this.setItems(this.items.map((i) => (i.id === c.id ? next : i)));
+              // 全览打开时（整改可能由全览发起）同步 allItems，全览内同样实时可见
+              if (this.overviewOpen) {
+                this.allItems = this.allItems.map((i) => (i.id === c.id ? next : i));
+              }
             },
             onDone: ({ text: t }) => {
               text = t;

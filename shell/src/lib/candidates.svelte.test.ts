@@ -220,4 +220,34 @@ describe('CandidatesStore', () => {
     expect(store.selected.size).toBe(0);
     expect(store.busy).toBe(false);
   });
+
+  it('rectifyOne（全览发起）：流式期间 allItems 逐批更新（整改过程实时可见）', async () => {
+    const patchCandidate = vi.fn().mockResolvedValue({ candidate: CAND });
+    const seen: Array<string | undefined> = [];
+    const listCandidates = vi.fn().mockResolvedValue({
+      candidates: [{ ...CAND, proposed: '整改完成', instruction: '润色 / 整改：加细节' }],
+    });
+    const client = clientOf({
+      rewriteStream: vi.fn().mockImplementation(async (_b: unknown, h: RewriteStreamHandlers) => {
+        h.onDelta?.('整改中');
+        seen.push(store.allItems[0]?.proposed); // 流式第一拍：allItems 已更新
+        h.onDelta?.('整改完成');
+        seen.push(store.allItems[0]?.proposed); // 流式第二拍：继续追加
+        h.onDone?.({ text: '整改完成' });
+      }),
+      patchCandidate,
+      listCandidates,
+    });
+    const store = new CandidatesStore();
+    store.init(client);
+    store.overviewOpen = true;
+    store.allItems = [CAND];
+    await store.rectifyOne(CAND, '加细节');
+    expect(seen).toEqual(['整改中', '整改中整改完成']); // 全览数据源随 delta 增量实时更新
+    expect(patchCandidate).toHaveBeenCalledWith('c1', {
+      proposed: '整改完成',
+      instruction: '润色 / 整改：加细节',
+    });
+    expect(store.allItems[0]?.proposed).toBe('整改完成'); // 完成后 loadAll 刷新一致
+  });
 });

@@ -22,7 +22,22 @@
       dialog.ok();
     }
   }
+
+  /** 窗口级兜底：confirm 无输入框、焦点留在原按钮，框内 onkeydown 收不到按键；
+   *  这里保证任意焦点下 Esc=取消、Enter=确定（prompt 输入框已 stopPropagation，不会双触发）。 */
+  function onWindowKeydown(e: KeyboardEvent): void {
+    if (!dialog.current) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      dialog.cancel();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      dialog.ok();
+    }
+  }
 </script>
+
+<svelte:window onkeydown={onWindowKeydown} />
 
 {#if dialog.current}
   <div class="mask" role="presentation" onmousedown={(e) => { if (e.target === e.currentTarget) dialog.cancel(); }}>

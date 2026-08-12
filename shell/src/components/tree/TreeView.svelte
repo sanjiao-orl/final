@@ -1,6 +1,6 @@
 <script lang="ts">
   // 结构树（v3）：树头新建章/卷（A1）、搜索（B9：卷/章/场）、卷折叠、章状态点+字数+目标进度条（B5）、
-  // 场级大纲导航（B9）、双击重命名（A2）、卷内拖拽重排（A3，事务化重编号）、底部回收站。
+  // 场级大纲导航（B9）、双击重命名（A2）、卷/章拖拽重排（A3，事务化重编号）、底部回收站。
   //
   // 拖拽用 pointer 事件实现（不用 HTML5 DnD）：Tauri WebView2 下 dragover/drop 不可靠
   // （出现系统 🚫 禁止光标、松手无动作），指针实现跨引擎一致，有效区/指示线完全可控。
@@ -33,8 +33,8 @@
     zone: 'ch' | 'end' | 'vol' | null;
   }
   let drag = $state<DragState | null>(null);
-  /** 落点指示：ch 落点行 relPath；end 落点卷 title（卷尾）。 */
-  let dropTarget = $state<{ kind: 'ch' | 'end'; key: string } | null>(null);
+  /** 落点指示：ch 落点行 relPath；end 落点卷 title（卷尾）；vol 落点卷 title（插到该卷前）；vol-end 卷列尾部（移到最末）。 */
+  let dropTarget = $state<{ kind: 'ch' | 'end' | 'vol' | 'vol-end'; key: string } | null>(null);
 
   const q = $derived(query.trim().toLowerCase());
 
@@ -116,8 +116,15 @@
   // ---------- 拖拽重排（A3，pointer 实现） ----------
   function dragStart(e: PointerEvent, kind: 'ch' | 'vol', key: string, volTitle?: string): void {
     if (e.button !== 0) return;
+    const target = e.target as HTMLElement;
     // 输入框/按钮上的按下不拖（重命名输入、软删按钮、图标按钮）
-    if ((e.target as HTMLElement).closest('.rename-input, .icon-btn, .del')) return;
+    if (target.closest('.rename-input, .icon-btn, .del')) return;
+    // 捕获指针：拖出窗口/面板边界后松手也能收到 pointerup，避免拖拽态卡死（仅 Esc 可恢复）
+    try {
+      target.setPointerCapture(e.pointerId);
+    } catch {
+      // jsdom/个别 WebView2 版本不支持捕获：忽略，事件仍走 window 监听
+    }
     drag = { kind, key, volTitle, startX: e.clientX, startY: e.clientY, active: false, x: e.clientX, y: e.clientY, zone: null };
     dropTarget = null;
   }
@@ -144,6 +151,13 @@
     if (wasActive) swallowNextClick(e);
   }
 
+  /** pointercancel（指针被系统抢占/窗口失焦等）：取消拖拽现场，不提交落点。 */
+  function cancelDrag(): void {
+    if (!drag) return;
+    drag = null;
+    dropTarget = null;
+  }
+
   /** 拖拽后吞掉紧随的 click（防止松手瞬间打开被落点/源行）。 */
   function swallowNextClick(_e?: PointerEvent): void {
     const h = (ev: MouseEvent): void => {
@@ -154,7 +168,7 @@
     window.addEventListener('click', h, true);
   }
 
-  /** 指针所在的有效区：章行 / 卷尾空区 / 卷行；无效区返回 null（无指示、无 🚫）。 */
+  /** 指针所在的有效区：章行 / 卷尾空区 / 卷行 / 卷列尾部；无效区返回 null（无指示、无 🚫）。 */
   function hitZone(x: number, y: number): DragState['zone'] | null {
     const d = drag;
     if (!d) return null;
@@ -163,7 +177,9 @@
     const zone = row?.dataset['drop'] ?? null;
     if (!zone) return null;
     if (d.kind === 'vol') {
-      return zone.startsWith('vol:') ? 'vol' : null;
+      if (zone.startsWith('vol:')) return 'vol';
+      if (zone === 'vol-end') return 'end';
+      return null;
     }
     // ch：只有同卷的章行 / 同卷卷尾空区有效
     if (zone.startsWith('ch:')) {
@@ -183,6 +199,17 @@
     const el = document.elementFromPoint(d.x, d.y);
     const row = el?.closest<HTMLElement>('[data-drop]');
     const zone = row?.dataset['drop'] ?? null;
+    if (d.kind === 'vol') {
+      // 卷拖拽：卷行（插到该卷前）/ 卷列尾部（移到最末）
+      if (d.zone === 'vol' && zone?.startsWith('vol:')) {
+        dropTarget = { kind: 'vol', key: zone.slice(4) };
+      } else if (d.zone === 'end' && zone === 'vol-end') {
+        dropTarget = { kind: 'vol-end', key: '' };
+      } else {
+        dropTarget = null;
+      }
+      return;
+    }
     if (d.zone === 'ch' && zone?.startsWith('ch:')) {
       dropTarget = { kind: 'ch', key: zone.slice(3) };
     } else if (d.zone === 'end' && zone?.startsWith('end:')) {
@@ -214,11 +241,18 @@
       void work.moveChapter(from, toIndex);
     } else {
       const from = d.key;
-      if (t.kind === 'end' || t.key === from) return;
-      const idx = work.structure.findIndex((x) => x.title === t.key);
       const fromIdx = work.structure.findIndex((x) => x.title === from);
-      if (idx === -1 || fromIdx === -1) return;
-      const toIndex = fromIdx < idx ? idx - 1 : idx;
+      if (fromIdx === -1) return;
+      let toIndex: number;
+      if (t.kind === 'vol-end') {
+        toIndex = work.structure.length - 1; // 卷列尾部 → 移到最末位
+      } else {
+        if (t.kind !== 'vol' || t.key === from) return;
+        const idx = work.structure.findIndex((x) => x.title === t.key);
+        if (idx === -1) return;
+        toIndex = fromIdx < idx ? idx - 1 : idx; // 插到落点卷之前
+      }
+      if (toIndex === fromIdx) return;
       void work.moveVolume(volDir(from), toIndex);
     }
   }
@@ -280,6 +314,7 @@
 <svelte:window
   onpointermove={dragMove}
   onpointerup={dragEnd}
+  onpointercancel={cancelDrag}
   onkeydown={onDragKeydown}
 />
 
@@ -306,6 +341,7 @@
           <div
             class="vol-row"
             class:drop-zone={drag?.kind === 'vol'}
+            class:drop-target={drag?.kind === 'vol' && dropTarget?.kind === 'vol' && dropTarget.key === vol.title && drag.key !== vol.title}
             role="button"
             tabindex="0"
             data-drop={`vol:${vol.title}`}
@@ -413,6 +449,9 @@
 
     {#if drag?.kind === 'vol' && dragHint}
       <div class="drag-hint">{dragHint}</div>
+    {/if}
+    {#if drag?.kind === 'vol' && work.structure.length > 0}
+      <div class="vol-end" class:drop-target={dropTarget?.kind === 'vol-end'} data-drop="vol-end"></div>
     {/if}
   </div>
 
@@ -531,6 +570,21 @@
   }
   .vol-row.drop-zone:active {
     cursor: grabbing;
+  }
+  /* 卷行落点：指示线在顶边（插到该卷前） */
+  .vol-row.drop-target {
+    box-shadow: inset 0 2px 0 var(--accent);
+  }
+  /* 卷列尾部落点：移到最末（指示线在底边） */
+  .vol-end {
+    height: 12px;
+    margin: 2px 8px 0;
+    border-radius: 6px;
+    transition: background var(--t-hover);
+  }
+  .vol-end.drop-target {
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    box-shadow: inset 0 -2px 0 var(--accent);
   }
   .grip {
     width: 12px;
