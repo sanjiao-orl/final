@@ -99,4 +99,27 @@ describe('list_structure', () => {
     fs.mkdirSync(path.join(work, 'manuscript'));
     expect(listStructure(work)).toEqual([]);
   });
+
+  it('空卷（新建后尚无章）也入树；隐藏目录跳过', () => {
+    const work = makeWorkDir();
+    writeTree(work, {
+      'manuscript/第一卷/第一章.md': CH1,
+    });
+    fs.mkdirSync(path.join(work, 'manuscript', '第二卷'), { recursive: true });
+    fs.mkdirSync(path.join(work, 'manuscript', '.hidden'), { recursive: true });
+
+    const tree = listStructure(work);
+    expect(tree.map((v) => v.title)).toEqual(['第一卷', '第二卷']);
+    const empty = tree.find((v) => v.title === '第二卷')!;
+    expect(empty.children).toEqual([]);
+  });
+
+  it('只有空卷时也返回卷（A1 新建卷后树可见，即使尚无章）', () => {
+    const work = makeWorkDir();
+    fs.mkdirSync(path.join(work, 'manuscript', '第二卷·云涌'), { recursive: true });
+
+    const tree = listStructure(work);
+    expect(tree.map((v) => v.title)).toEqual(['第二卷·云涌']);
+    expect(tree[0]!.children).toEqual([]);
+  });
 });

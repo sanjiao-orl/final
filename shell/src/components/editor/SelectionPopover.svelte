@@ -34,6 +34,8 @@
   let instruction = $state(initialInstruction);
   let polishing = $state(false);
   let progress = $state(0);
+  /** 流式打磨草稿：生成过程实时显示，完成态落候选卡（缺陷2修复）。 */
+  let draft = $state('');
   let applying = $state(false);
   let seq = 0;
 
@@ -53,8 +55,13 @@
         : `换一种写法（第 ${cands.length + 1} 版），与上一版风格/节奏明显不同，保持原意`;
     polishing = true;
     progress = 0;
-    const text = await candidates.rewriteText(original, variant, (t) => (progress = t.length));
+    draft = '';
+    const text = await candidates.rewriteText(original, variant, (t) => {
+      progress = t.length;
+      draft = t; // 增量追加显示（30–50ms 批次）
+    });
     polishing = false;
+    draft = '';
     if (text === null) return;
     seq += 1;
     cands = [...cands, { id: seq, text, label: `候选 ${cn(cands.length + 1)}` }];
@@ -129,6 +136,7 @@
     {#if polishing}
       <div class="cand">
         <div class="cand-tag"><span class="pulse-dot"></span><span>AI 打磨中…{progress > 0 ? `已生成 ${progress} 字` : ''}</span></div>
+        {#if draft}<div class="cand-text draft">{draft}</div>{/if}
       </div>
     {/if}
   </div>
@@ -292,6 +300,13 @@
     font-size: 14px;
     line-height: 1.75;
     white-space: pre-wrap;
+  }
+  /* 流式草稿：生成中文本高亮（完成态转正式候选卡） */
+  .cand-text.draft {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 5%, transparent);
+    border-radius: 5px;
+    padding: 2px 6px;
   }
   .cand-text.muted {
     color: var(--muted);

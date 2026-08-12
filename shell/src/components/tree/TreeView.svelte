@@ -1,9 +1,13 @@
 <script lang="ts">
   // 结构树（v3）：树头新建章/卷（A1）、搜索（B9：卷/章/场）、卷折叠、章状态点+字数+目标进度条（B5）、
   // 场级大纲导航（B9）、双击重命名（A2）、卷内拖拽重排（A3，事务化重编号）、底部回收站。
+  //
+  // 拖拽用 pointer 事件实现（不用 HTML5 DnD）：Tauri WebView2 下 dragover/drop 不可靠
+  // （出现系统 🚫 禁止光标、松手无动作），指针实现跨引擎一致，有效区/指示线完全可控。
   import { iconSvg } from '../../lib/icons.js';
   import { statusVar } from '../../theme.js';
   import { work } from '../../lib/work.svelte.js';
+  import { dialog } from '../../lib/dialog.svelte.js';
   import type { ChapterNode, VolumeNode } from '../../lib/types.js';
 
   let query = $state('');
@@ -11,9 +15,26 @@
   let renaming = $state<{ kind: 'ch' | 'vol'; key: string; draft: string } | null>(null);
   /** 卷折叠态（title → 折叠）。 */
   let collapsed = $state<Record<string, boolean>>({});
-  /** 拖拽现场。 */
-  let dragging = $state<{ kind: 'ch' | 'vol'; key: string } | null>(null);
-  let dropTarget = $state<string | null>(null); // 落点行的 key（章 relPath / 卷 title）
+
+  // ---------- 拖拽现场（pointer 实现，A3） ----------
+  interface DragState {
+    kind: 'ch' | 'vol';
+    /** ch: relPath；vol: 卷 title。 */
+    key: string;
+    /** ch 所属卷 title（跨卷无效区判定）；vol 拖拽时为 undefined。 */
+    volTitle: string | undefined;
+    startX: number;
+    startY: number;
+    /** 位移超阈值才进入拖拽态（否则视为普通点击）。 */
+    active: boolean;
+    x: number;
+    y: number;
+    /** 当前指针所在的有效区类型：ch 行 / 卷尾部空区 / 卷行。 */
+    zone: 'ch' | 'end' | 'vol' | null;
+  }
+  let drag = $state<DragState | null>(null);
+  /** 落点指示：ch 落点行 relPath；end 落点卷 title（卷尾）。 */
+  let dropTarget = $state<{ kind: 'ch' | 'end'; key: string } | null>(null);
 
   const q = $derived(query.trim().toLowerCase());
 
@@ -37,18 +58,24 @@
     collapsed = { ...collapsed, [v.title]: !collapsed[v.title] };
   }
 
-  // ---------- 新建（A1） ----------
-  function newChapter(): void {
+  // ---------- 新建（A1；WebView2 无 window.prompt，走壳内对话框） ----------
+  async function newChapter(): Promise<void> {
     const targetVol = volumeForNew();
-    const title = window.prompt(`新建章${targetVol ? `（${targetVol.title}）` : '（manuscript 根）'}标题，留空=新章`, '');
+    const title = await dialog.prompt({
+      message: targetVol ? `新建章（${targetVol.title}）标题，留空=新章` : '新建章（manuscript 根）标题，留空=新章',
+      placeholder: '章标题（不含编号，自动续号）',
+    });
     if (title === null) return;
-    void work.createChapter(targetVol ? targetVol.title : null, title.trim() || undefined);
+    await work.createChapter(targetVol ? targetVol.title : null, title.trim() || undefined);
   }
 
-  function newVolume(): void {
-    const title = window.prompt('新卷标题，留空=新卷', '');
+  async function newVolume(): Promise<void> {
+    const title = await dialog.prompt({
+      message: '新卷标题，留空=新卷',
+      placeholder: '卷标题（不含编号，自动续号）',
+    });
     if (title === null) return;
-    void work.createVolume(title.trim() || undefined);
+    await work.createVolume(title.trim() || undefined);
   }
 
   /** 新章落点：当前章所在卷 > 第一卷 > null（根）。 */
@@ -86,62 +113,147 @@
     return `manuscript/${title}`;
   }
 
-  // ---------- 拖拽重排（A3） ----------
-  function dragStartCh(e: DragEvent, c: ChapterNode): void {
-    dragging = { kind: 'ch', key: c.relPath };
-    e.dataTransfer?.setData('text/plain', c.relPath);
-    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
-  }
-  function dragStartVol(e: DragEvent, v: VolumeNode): void {
-    dragging = { kind: 'vol', key: v.title };
-    e.dataTransfer?.setData('text/plain', v.title);
-    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
-  }
-  function dragEnd(): void {
-    dragging = null;
+  // ---------- 拖拽重排（A3，pointer 实现） ----------
+  function dragStart(e: PointerEvent, kind: 'ch' | 'vol', key: string, volTitle?: string): void {
+    if (e.button !== 0) return;
+    // 输入框/按钮上的按下不拖（重命名输入、软删按钮、图标按钮）
+    if ((e.target as HTMLElement).closest('.rename-input, .icon-btn, .del')) return;
+    drag = { kind, key, volTitle, startX: e.clientX, startY: e.clientY, active: false, x: e.clientX, y: e.clientY, zone: null };
     dropTarget = null;
   }
 
-  function dropOnChapter(e: DragEvent, vol: VolumeNode, ch: ChapterNode): void {
-    e.preventDefault();
-    if (!dragging || dragging.kind !== 'ch') return;
-    const from = dragging.key;
-    if (from === ch.relPath) return;
-    // 仅同卷：目标章所在卷 = 拖源卷
-    if (!vol.children.some((c) => c.relPath === from)) return;
-    const idx = vol.children.findIndex((c) => c.relPath === ch.relPath);
-    const fromIdx = vol.children.findIndex((c) => c.relPath === from);
-    const toIndex = fromIdx < idx ? idx - 1 : idx; // 插入到落点行之前
-    void work.moveChapter(from, toIndex);
-    dragEnd();
+  function dragMove(e: PointerEvent): void {
+    const d = drag;
+    if (!d) return;
+    if (!d.active) {
+      if (Math.hypot(e.clientX - d.startX, e.clientY - d.startY) < 5) return; // 阈值内=点击
+      drag = { ...d, active: true };
+    }
+    const cur = drag!;
+    drag = { ...cur, x: e.clientX, y: e.clientY, zone: hitZone(e.clientX, e.clientY) };
+    updateDropTarget();
   }
 
-  function dropOnVolumeEnd(e: DragEvent, vol: VolumeNode): void {
-    e.preventDefault();
-    if (!dragging || dragging.kind !== 'ch') return;
-    const from = dragging.key;
-    if (!vol.children.some((c) => c.relPath === from)) return;
-    const fromIdx = vol.children.findIndex((c) => c.relPath === from);
-    if (fromIdx === vol.children.length - 1) return; // 已在末尾
-    void work.moveChapter(from, vol.children.length - 1);
-    dragEnd();
+  function dragEnd(e?: PointerEvent): void {
+    const d = drag;
+    if (!d) return;
+    const wasActive = d.active;
+    if (wasActive) commitDrop(d);
+    drag = null;
+    dropTarget = null;
+    if (wasActive) swallowNextClick(e);
   }
 
-  function dropOnVolume(e: DragEvent, v: VolumeNode): void {
-    e.preventDefault();
-    if (!dragging || dragging.kind !== 'vol') return;
-    const from = dragging.key;
-    if (from === v.title) return;
-    const idx = work.structure.findIndex((x) => x.title === v.title);
-    const fromIdx = work.structure.findIndex((x) => x.title === from);
-    const toIndex = fromIdx < idx ? idx - 1 : idx;
-    void work.moveVolume(volDir(from), toIndex);
-    dragEnd();
+  /** 拖拽后吞掉紧随的 click（防止松手瞬间打开被落点/源行）。 */
+  function swallowNextClick(_e?: PointerEvent): void {
+    const h = (ev: MouseEvent): void => {
+      ev.stopPropagation();
+      ev.preventDefault();
+      window.removeEventListener('click', h, true);
+    };
+    window.addEventListener('click', h, true);
   }
 
-  function onDragOver(e: DragEvent): void {
-    e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+  /** 指针所在的有效区：章行 / 卷尾空区 / 卷行；无效区返回 null（无指示、无 🚫）。 */
+  function hitZone(x: number, y: number): DragState['zone'] | null {
+    const d = drag;
+    if (!d) return null;
+    const el = document.elementFromPoint(x, y);
+    const row = el?.closest<HTMLElement>('[data-drop]');
+    const zone = row?.dataset['drop'] ?? null;
+    if (!zone) return null;
+    if (d.kind === 'vol') {
+      return zone.startsWith('vol:') ? 'vol' : null;
+    }
+    // ch：只有同卷的章行 / 同卷卷尾空区有效
+    if (zone.startsWith('ch:')) {
+      const rel = zone.slice(3);
+      const vol = work.structure.find((v) => v.children.some((c) => c.relPath === rel));
+      return vol?.title === d.volTitle ? 'ch' : null;
+    }
+    if (zone.startsWith('end:')) {
+      return zone.slice(4) === d.volTitle ? 'end' : null;
+    }
+    return null;
+  }
+
+  function updateDropTarget(): void {
+    const d = drag;
+    if (!d) return;
+    const el = document.elementFromPoint(d.x, d.y);
+    const row = el?.closest<HTMLElement>('[data-drop]');
+    const zone = row?.dataset['drop'] ?? null;
+    if (d.zone === 'ch' && zone?.startsWith('ch:')) {
+      dropTarget = { kind: 'ch', key: zone.slice(3) };
+    } else if (d.zone === 'end' && zone?.startsWith('end:')) {
+      dropTarget = { kind: 'end', key: zone.slice(4) };
+    } else {
+      dropTarget = null;
+    }
+  }
+
+  function commitDrop(d: DragState): void {
+    const t = dropTarget;
+    if (!t) return;
+    if (d.kind === 'ch') {
+      const from = d.key;
+      const vol = work.structure.find((v) => v.title === d.volTitle);
+      if (!vol || t.kind === 'end') {
+        if (vol && t.kind === 'end') {
+          const fromIdx = vol.children.findIndex((c) => c.relPath === from);
+          if (fromIdx !== -1 && fromIdx !== vol.children.length - 1) {
+            void work.moveChapter(from, vol.children.length - 1);
+          }
+        }
+        return;
+      }
+      const idx = vol.children.findIndex((c) => c.relPath === t.key);
+      const fromIdx = vol.children.findIndex((c) => c.relPath === from);
+      if (idx === -1 || fromIdx === -1 || from === t.key) return;
+      const toIndex = fromIdx < idx ? idx - 1 : idx; // 插入到落点行之前
+      void work.moveChapter(from, toIndex);
+    } else {
+      const from = d.key;
+      if (t.kind === 'end' || t.key === from) return;
+      const idx = work.structure.findIndex((x) => x.title === t.key);
+      const fromIdx = work.structure.findIndex((x) => x.title === from);
+      if (idx === -1 || fromIdx === -1) return;
+      const toIndex = fromIdx < idx ? idx - 1 : idx;
+      void work.moveVolume(volDir(from), toIndex);
+    }
+  }
+
+  /** 拖拽提示：仅拖拽激活时显示；无效区（跨卷）给明确说明，不用系统禁止光标。 */
+  const dragHint = $derived.by(() => {
+    const d = drag;
+    if (!d?.active) return '';
+    if (d.kind === 'vol') return '松开即重排卷序（自动重编卷号，标题不动）';
+    const inOwn = d.zone !== null;
+    if (!inOwn) return '仅支持在本卷内重排：拖到本卷的章行或卷尾松开（跨卷移动不支持）';
+    return '松开即重排：落位后自动从第 1 章起重编号，标题不动';
+  });
+
+  /** 幽灵标签文本：章 relPath → 章标题。 */
+  function chapterTitleOf(relPath: string): string {
+    return work.findChapter(relPath)?.title ?? relPath.split('/').pop()?.replace(/\.md$/, '') ?? relPath;
+  }
+
+  // 拖拽期间 Esc 取消
+  function onDragKeydown(e: KeyboardEvent): void {
+    if (e.key === 'Escape' && drag) {
+      drag = null;
+      dropTarget = null;
+    }
+  }
+
+  // ---------- 软删 ----------
+  async function confirmDelete(ch: ChapterNode): Promise<void> {
+    const ok = await dialog.confirm({
+      message: `删除「${ch.title}」？文件移入 .novel/trash/（软删，可找回）。`,
+      okLabel: '删除',
+      danger: true,
+    });
+    if (ok) void work.deleteChapter(ch.relPath);
   }
 
   function fmtWc(n: number): string {
@@ -163,19 +275,19 @@
     const wc = v.children.reduce((s, c) => s + c.wordCount, 0);
     return `${chs} 章 · ${fmtWc(wc)}字`;
   }
-
-  function confirmDelete(ch: ChapterNode): void {
-    if (window.confirm(`删除「${ch.title}」？文件移入 .novel/trash/（软删，可找回）。`)) {
-      void work.deleteChapter(ch.relPath);
-    }
-  }
 </script>
 
-<nav class="tree">
+<svelte:window
+  onpointermove={dragMove}
+  onpointerup={dragEnd}
+  onkeydown={onDragKeydown}
+/>
+
+<nav class="tree" class:dragging={drag?.active}>
   <div class="head">
     <span class="label">结 构</span>
-    <button class="icon-btn" title="新建章(A1：自动续编号 + frontmatter 模板)" onclick={newChapter} aria-label="新建章">{@html iconSvg('doc', 14)}</button>
-    <button class="icon-btn" title="新建卷(A1)" onclick={newVolume} aria-label="新建卷">{@html iconSvg('folder', 14)}</button>
+    <button class="icon-btn" title="新建章(A1：自动续编号 + frontmatter 模板)" onclick={() => void newChapter()} aria-label="新建章">{@html iconSvg('doc', 14)}</button>
+    <button class="icon-btn" title="新建卷(A1)" onclick={() => void newVolume()} aria-label="新建卷">{@html iconSvg('folder', 14)}</button>
   </div>
 
   <div class="search">
@@ -193,13 +305,11 @@
         <div class="vol" class:closed={collapsed[vol.title]}>
           <div
             class="vol-row"
+            class:drop-zone={drag?.kind === 'vol'}
             role="button"
             tabindex="0"
-            draggable="true"
-            ondragstart={(e) => dragStartVol(e, vol)}
-            ondragend={dragEnd}
-            ondragover={onDragOver}
-            ondrop={(e) => dropOnVolume(e, vol)}
+            data-drop={`vol:${vol.title}`}
+            onpointerdown={(e) => dragStart(e, 'vol', vol.title)}
             onclick={(e) => {
               if ((e.target as HTMLElement).closest('.rename-input, .icon-btn')) return;
               toggleVol(vol);
@@ -228,27 +338,23 @@
             <span class="meta">{volMeta(vol)}</span>
           </div>
 
-          <div class="ch-list" role="list" ondragover={onDragOver} ondrop={(e) => dropOnVolumeEnd(e, vol)}>
+          <div class="ch-list" class:drop-end={drag?.kind === 'ch' && dropTarget?.kind === 'end' && dropTarget.key === vol.title} role="list" data-drop={`end:${vol.title}`}>
             {#each vol.children as ch (ch.relPath)}
               {#if chVisible(ch)}
                 <div
                   class="ch-row"
                   class:active={work.current?.relPath === ch.relPath}
-                  class:dragging={dragging?.kind === 'ch' && dragging.key === ch.relPath}
-                  class:drop-target={dropTarget === ch.relPath}
-                  draggable="true"
-                  ondragstart={(e) => dragStartCh(e, ch)}
-                  ondragend={dragEnd}
-                  ondragover={(e) => { onDragOver(e); dropTarget = ch.relPath; }}
-                  ondragleave={() => { if (dropTarget === ch.relPath) dropTarget = null; }}
-                  ondrop={(e) => dropOnChapter(e, vol, ch)}
-                  role="button"
-                  tabindex="0"
+                  class:dragging={drag?.kind === 'ch' && drag.key === ch.relPath}
+                  class:drop-target={drag?.kind === 'ch' && dropTarget?.kind === 'ch' && dropTarget.key === ch.relPath && drag.key !== ch.relPath}
+                  data-drop={`ch:${ch.relPath}`}
+                  onpointerdown={(e) => dragStart(e, 'ch', ch.relPath, vol.title)}
                   onclick={(e) => {
                     if ((e.target as HTMLElement).closest('.rename-input, .icon-btn')) return;
                     void work.openChapter(ch);
                   }}
                   onkeydown={(e) => e.key === 'Enter' && void work.openChapter(ch)}
+                  role="button"
+                  tabindex="0"
                 >
                   <span class="grip" title="拖拽改序(A3)：落位后自动从第 1 章起重编号，跨卷不支持">{@html iconSvg('grip', 12)}</span>
                   <i class="status" style:background={statusVar(ch.status)} title={ch.status ?? '无状态'}></i>
@@ -268,7 +374,7 @@
                     <span class="name" role="button" tabindex="0" ondblclick={(e) => { e.stopPropagation(); startRenameCh(ch); }} onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), startRenameCh(ch))} title="双击重命名(A2)">{ch.title}</span>
                   {/if}
                   <span class="wc">{goalRatio(ch) !== null ? `${fmtWcFull(ch.wordCount)}/${fmtWcFull(ch.goal!)}` : fmtWcFull(ch.wordCount)}</span>
-                  <button class="del" title="软删进 .novel/trash/" onclick={(e) => { e.stopPropagation(); confirmDelete(ch); }} aria-label="软删章节">×</button>
+                  <button class="del" title="软删进 .novel/trash/" onclick={(e) => { e.stopPropagation(); void confirmDelete(ch); }} aria-label="软删章节">×</button>
                   {#if goalRatio(ch) !== null}
                     <span class="goal" class:done={goalRatio(ch) === 1} title={`目标 ${fmtWcFull(ch.goal!)} 字`}>
                       <i style:width={`${(goalRatio(ch)! * 100).toFixed(1)}%`}></i>
@@ -295,14 +401,26 @@
                 {/if}
               {/if}
             {/each}
-            {#if dragging?.kind === 'ch' && vol.children.some((c) => c.relPath === dragging?.key)}
-              <div class="drag-hint">卷内拖拽重排(A3)：落位后自动从第 1 章起重编号，标题不动；跨卷移动不支持</div>
+            {#if drag?.kind === 'ch' && vol.children.some((c) => c.relPath === drag?.key)}
+              {#if dragHint}
+                <div class="drag-hint" class:warn={drag.zone === null}>{dragHint}</div>
+              {/if}
             {/if}
           </div>
         </div>
       {/if}
     {/each}
+
+    {#if drag?.kind === 'vol' && dragHint}
+      <div class="drag-hint">{dragHint}</div>
+    {/if}
   </div>
+
+  {#if drag?.active}
+    <div class="ghost" style:left="{drag.x + 14}px" style:top="{drag.y + 10}px">
+      {drag.kind === 'ch' ? chapterTitleOf(drag.key) : drag.key}
+    </div>
+  {/if}
 
   <div class="foot">
     <div class="trash-row" title="软删章在这里（.novel/trash/），移回原路径即找回">
@@ -318,6 +436,12 @@
     display: flex;
     flex-direction: column;
     background: var(--panel);
+  }
+  /* 拖拽期间禁止整树文本选择 */
+  .tree.dragging,
+  .tree.dragging * {
+    user-select: none;
+    cursor: grabbing;
   }
   .head {
     display: flex;
@@ -378,6 +502,7 @@
     flex: 1;
     overflow-y: auto;
     padding: 2px 6px 12px;
+    position: relative;
   }
   .empty {
     color: var(--muted);
@@ -400,6 +525,12 @@
   }
   .vol-row:hover {
     background: color-mix(in srgb, var(--muted) 8%, transparent);
+  }
+  .vol-row.drop-zone {
+    cursor: grab;
+  }
+  .vol-row.drop-zone:active {
+    cursor: grabbing;
   }
   .grip {
     width: 12px;
@@ -450,9 +581,16 @@
   }
   .ch-list {
     padding: 1px 0 2px 20px;
+    position: relative;
   }
   .vol.closed .ch-list {
     display: none;
+  }
+  /* 卷尾落点：ch-list 整区高亮（含末行之后），指示可落到卷尾 */
+  .ch-list.drop-end {
+    border-radius: 6px;
+    box-shadow: inset 0 -2px 0 var(--accent);
+    background: color-mix(in srgb, var(--accent) 4%, transparent);
   }
   .ch-row {
     display: flex;
@@ -479,7 +617,7 @@
     background: var(--panel);
     box-shadow: var(--shadow-pop);
     border: 1px solid var(--accent-line);
-    opacity: 0.96;
+    opacity: 0.6;
   }
   .ch-row.drop-target {
     box-shadow: inset 0 2px 0 var(--accent);
@@ -578,6 +716,29 @@
     background: color-mix(in srgb, var(--status-polish) 8%, transparent);
     border: 1px dashed color-mix(in srgb, var(--status-polish) 35%, var(--line));
     border-radius: 6px;
+  }
+  .drag-hint.warn {
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 7%, transparent);
+    border-color: color-mix(in srgb, var(--danger) 35%, var(--line));
+  }
+  /* 拖拽幽灵标签（跟随指针，pointer-events 关掉避免遮挡命中测试） */
+  .ghost {
+    position: fixed;
+    z-index: 300;
+    max-width: 220px;
+    padding: 4px 10px;
+    font-size: 12px;
+    color: var(--ink);
+    background: var(--panel);
+    border: 1px solid var(--accent-line);
+    border-radius: 6px;
+    box-shadow: var(--shadow-pop);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: none;
+    user-select: none;
   }
   .foot {
     border-top: 1px solid var(--line);

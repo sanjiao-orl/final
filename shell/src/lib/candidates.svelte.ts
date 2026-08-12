@@ -13,6 +13,12 @@ export class CandidatesStore {
   selected = $state<Set<string>>(new Set());
   drawerOpen = $state(false);
   busy = $state(false);
+  /** 流式改写中的生成现场（缺陷修复：改写过程在暂存区实时流式显示，完成态才落候选卡）。 */
+  generating = $state<{ chapter: string; original: string; instruction: string; text: string } | null>(null);
+  /** 全览视图（弹出展示全部候选：列表/双栏对照/批量操作/快照还原）。 */
+  overviewOpen = $state(false);
+  /** 全览视图数据源：全部状态的候选（status 不限，新在前）。 */
+  allItems = $state<Candidate[]>([]);
   /** 装饰插件刷新信号：items 任何变化递增（Editor 监听它重建删除线装饰）。 */
   revision = $state(0);
   pendingCount = $derived(this.items.length);
@@ -43,6 +49,28 @@ export class CandidatesStore {
     if (this.drawerOpen) void this.load();
   }
 
+  /** 全览：载入全部状态候选并弹出（与抽屉互斥）；关闭时清空选中。 */
+  async openOverview(): Promise<void> {
+    this.drawerOpen = false;
+    this.overviewOpen = true;
+    await this.loadAll();
+  }
+
+  closeOverview(): void {
+    this.overviewOpen = false;
+    this.clearSelection();
+  }
+
+  /** 全部状态候选（status 不限，新在前）——全览视图数据源。 */
+  async loadAll(): Promise<void> {
+    try {
+      const r = await this.client.listCandidates();
+      this.allItems = r.candidates;
+    } catch (err) {
+      work.error = `暂存全览加载失败：${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
   toggleSelect(id: string): void {
     const next = new Set(this.selected);
     if (next.has(id)) next.delete(id);
@@ -60,7 +88,8 @@ export class CandidatesStore {
 
   /**
    * 选区改写：/rewrite 流式生成 → 完成后 POST /candidates 进暂存区。
-   * onProgress 逐批回调已累计文本（浮动条显示进度）；失败显式报错返回 false。
+   * 生成过程实时进 generating（暂存区流式显示，30–50ms 批次），完成态落候选卡。
+   * 失败显式报错返回 false。
    */
   async createFromSelection(
     chapter: string,
@@ -70,12 +99,15 @@ export class CandidatesStore {
   ): Promise<boolean> {
     let text = '';
     const failure: { err: Error | null } = { err: null }; // 闭包赋值，TS 收窄不跨闭包，用对象持有
+    this.generating = { chapter, original, instruction: instruction.trim(), text: '' };
+    this.drawerOpen = true; // 暂存区实时展示生成内容
     try {
       await this.client.rewriteStream(
         { original, instruction },
         {
           onDelta: (d) => {
             text += d;
+            if (this.generating) this.generating = { ...this.generating, text };
             onProgress?.(text);
           },
           onDone: ({ text: t }) => {
@@ -87,10 +119,12 @@ export class CandidatesStore {
         },
       );
       if (failure.err) throw failure.err;
+      this.generating = null;
       const r = await this.client.createCandidate({ chapter, original, proposed: text, instruction });
       this.setItems([r.candidate, ...this.items]);
       return true;
     } catch (err) {
+      this.generating = null;
       work.error = `AI 改写失败：${err instanceof Error ? err.message : String(err)}`;
       return false;
     }
@@ -188,6 +222,7 @@ export class CandidatesStore {
         work.error = `部分候选未能采纳：${failures.join('；')}`;
       }
       await this.load();
+      if (this.overviewOpen) void this.loadAll();
       this.clearSelection();
     } catch (err) {
       work.error = `采纳失败：${err instanceof Error ? err.message : String(err)}`;
@@ -200,7 +235,21 @@ export class CandidatesStore {
   async rectifySelected(rectifyText: string): Promise<void> {
     const targets = this.items.filter((i) => this.selected.has(i.id));
     const ask = rectifyText.trim();
-    if (targets.length === 0 || !ask || this.busy) return;
+    if (targets.length === 0 || !ask) return;
+    await this.rectifyTargets(targets, ask);
+    this.clearSelection();
+  }
+
+  /** 单条整改（全览视图）：按新要求重写单条候选。 */
+  async rectifyOne(c: Candidate, rectifyText: string): Promise<void> {
+    const ask = rectifyText.trim();
+    if (!ask) return;
+    await this.rectifyTargets([c], ask);
+  }
+
+  /** 整改公共实现：逐条流式重写（目标卡 proposed 逐批更新），指令留痕。 */
+  private async rectifyTargets(targets: Candidate[], ask: string): Promise<void> {
+    if (targets.length === 0 || this.busy) return;
     this.busy = true;
     try {
       for (const [n, c] of targets.entries()) {
@@ -211,6 +260,8 @@ export class CandidatesStore {
           {
             onDelta: (d) => {
               text += d;
+              // 流式整改：目标卡的 proposed 逐批更新（30–50ms 批次进 store）
+              this.setItems(this.items.map((i) => (i.id === c.id ? { ...i, proposed: text } : i)));
             },
             onDone: ({ text: t }) => {
               text = t;
@@ -228,7 +279,7 @@ export class CandidatesStore {
         // 本地即时更新（流式期间装饰已随旧 proposed 显示，整改后刷新）
         this.setItems(this.items.map((i) => (i.id === c.id ? { ...i, proposed: text, instruction: `${c.instruction || '润色'} / 整改：${ask}` } : i)));
       }
-      this.clearSelection();
+      if (this.overviewOpen) void this.loadAll();
     } catch (err) {
       work.error = err instanceof Error ? err.message : String(err);
     } finally {
@@ -252,6 +303,7 @@ export class CandidatesStore {
     try {
       for (const c of list) await this.client.patchCandidate(c.id, { status: 'discarded' });
       await this.load();
+      if (this.overviewOpen) void this.loadAll();
       this.clearSelection();
     } catch (err) {
       work.error = `丢弃失败：${err instanceof Error ? err.message : String(err)}`;

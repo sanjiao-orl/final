@@ -4,6 +4,7 @@
   import { candidates } from '../lib/candidates.svelte.js';
   import { settings } from '../lib/settings.svelte.js';
   import { snapshot } from '../lib/snapshot.svelte.js';
+  import { dialog } from '../lib/dialog.svelte.js';
   import { ui } from '../lib/ui.svelte.js';
   import { work } from '../lib/work.svelte.js';
 
@@ -12,26 +13,32 @@
   }
   let { onSave }: Props = $props();
 
-  function confirmDelete(): void {
+  async function confirmDelete(): Promise<void> {
     const cur = work.current;
     if (!cur) return;
-    if (window.confirm(`删除「${cur.title}」？文件移入 .novel/trash/（软删，可找回）。`)) {
-      void work.deleteChapter(cur.relPath);
-    }
+    const ok = await dialog.confirm({
+      message: `删除「${cur.title}」？文件移入 .novel/trash/（软删，可找回）。`,
+      okLabel: '删除',
+      danger: true,
+    });
+    if (ok) void work.deleteChapter(cur.relPath);
   }
 
   /** 快照入口：列当前章快照，有则还原最新（B4）。 */
   async function openSnapshot(): Promise<void> {
     const cur = work.current;
-    if (!cur) return;    const list = await snapshot.listForChapter(cur.relPath);
+    if (!cur) return;
+    const list = await snapshot.listForChapter(cur.relPath);
     if (list.length === 0) {
       work.notice = '当前章还没有历史快照（保存覆写时自动滚动，最多 20 份）';
       return;
     }
     const name = list[0]?.path.split('/').pop() ?? '';
-    if (window.confirm(`还原到最新快照 ${name}？当前未保存改动会先保留在编辑器里。`)) {
-      void snapshot.restoreLatest(cur.relPath);
-    }
+    const ok = await dialog.confirm({
+      message: `还原到最新快照 ${name}？当前未保存改动会先保留在编辑器里。`,
+      okLabel: '还原',
+    });
+    if (ok) void snapshot.restoreLatest(cur.relPath);
   }
 </script>
 

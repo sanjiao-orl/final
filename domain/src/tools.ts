@@ -130,7 +130,6 @@ function collectManuscriptFiles(workDir: string): { files: MdFile[] } {
  */
 export function listStructure(workDir: string): VolumeNode[] {
   const { files } = collectManuscriptFiles(workDir);
-  if (files.length === 0) return [];
 
   // 卷 -> 章文件；rel 首段即卷名（空段表示 manuscript 根下的散章）
   const byVolume = new Map<string, MdFile[]>();
@@ -142,15 +141,30 @@ export function listStructure(workDir: string): VolumeNode[] {
     byVolume.set(key, list);
   }
 
+  // 空卷（A1 新建后尚无章）也入树：manuscript 的直接子目录即卷，隐藏目录跳过
+  for (const name of directChildDirNames(path.join(assertWorkDir(workDir), 'manuscript'))) {
+    if (!byVolume.has(name)) byVolume.set(name, []);
+  }
+
   const volumes: VolumeNode[] = [];
   for (const title of [...byVolume.keys()].sort()) {
-    const chapters = byVolume
-      .get(title)!
+    const chapters = (byVolume.get(title) ?? [])
       .map(buildChapter)
       .sort(byFileName); // 卷内按文件名排序（同名的按完整路径兜底），与嵌套层级无关
     volumes.push({ type: 'volume', title, children: chapters });
   }
   return volumes;
+}
+
+/** manuscript 的直接子目录名（卷目录），隐藏目录（. 开头）跳过；目录不存在返回空。 */
+function directChildDirNames(msDir: string): string[] {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(msDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries.filter((e) => e.isDirectory() && !e.name.startsWith('.')).map((e) => e.name);
 }
 
 /** 章排序：文件名升序；重名时按 relPath 兜底，保证稳定。 */

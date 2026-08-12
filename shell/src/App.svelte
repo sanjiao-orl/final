@@ -12,6 +12,7 @@
   import { ui } from './lib/ui.svelte.js';
   import { mdToHtml } from './lib/markdown.js';
   import { approval } from './lib/approval.svelte.js';
+  import { dialog } from './lib/dialog.svelte.js';
   import Toolbar from './components/Toolbar.svelte';
   import TreeView from './components/tree/TreeView.svelte';
   import Editor from './components/editor/Editor.svelte';
@@ -20,6 +21,7 @@
   import AiPanel from './components/ai/AiPanel.svelte';
   import ApprovalCard from './components/approval/ApprovalCard.svelte';
   import SnapshotToast from './components/SnapshotToast.svelte';
+  import DialogHost from './components/DialogHost.svelte';
 
   let booted = $state(false);
   let bootError = $state<string | null>(null);
@@ -50,6 +52,7 @@
   });
 
   function onKeydown(e: KeyboardEvent): void {
+    if (dialog.current) return; // 模态对话框打开时全局快捷键让位（Esc/Enter 由对话框消费）
     if (e.key === 'Escape') {
       // 浮层/审批卡/面板逐级收起；审批卡 Esc 关闭后挂起卡仍在工具列可重新打开
       approval.active = null;
@@ -137,6 +140,7 @@
 
     <ApprovalCard />
     <SnapshotToast />
+    <DialogHost />
   </div>
 {/if}
 
@@ -213,6 +217,8 @@
   }
   .rail-wrap {
     flex: none;
+    display: flex; /* 窄条随窗口等高拉伸 */
+    min-height: 0;
     overflow: hidden;
     transition: margin-right var(--t-fold);
   }
@@ -221,7 +227,10 @@
   }
   .ai-wrap {
     flex: none;
+    /* 固定高度：与树/编辑器同列底（与窗口等高），内容超高栏内滚动，绝不让面板拉长 */
+    height: 100%;
     min-height: 0;
+    overflow: hidden;
     transition: margin-right var(--t-fold);
   }
   .app.focus .ai-wrap {
