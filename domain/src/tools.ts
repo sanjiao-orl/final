@@ -147,7 +147,9 @@ export function listStructure(workDir: string): VolumeNode[] {
   }
 
   const volumes: VolumeNode[] = [];
-  for (const title of [...byVolume.keys()].sort()) {
+  // 卷按编号感知升序（第一卷在最上，与 moveVolume / byFileName 的 compareNames 一致）；
+  // 纯字典序下汉字编号（三 U+4E09 < 二 U+4E8C）与超 9 卷的阿拉伯编号都会乱序。
+  for (const title of [...byVolume.keys()].sort((a, b) => compareNames(a, b, VOLUME_NAME_RE))) {
     const chapters = (byVolume.get(title) ?? [])
       .map(buildChapter)
       .sort(byFileName); // 卷内按文件名排序（同名的按完整路径兜底），与嵌套层级无关

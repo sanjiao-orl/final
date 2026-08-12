@@ -123,3 +123,62 @@ describe('list_structure', () => {
     expect(tree[0]!.children).toEqual([]);
   });
 });
+
+describe('list_structure 卷排序（编号感知升序，第一卷在最上）', () => {
+  it('汉字编号：第一卷<第二卷<…<第十卷 按数值升序（非 Unicode 字典序）', () => {
+    const work = makeWorkDir();
+    writeTree(work, {
+      'manuscript/第三卷/第一章.md': CH1,
+      'manuscript/第一卷/第一章.md': CH1,
+      'manuscript/第十卷/第一章.md': CH1,
+      'manuscript/第二卷/第一章.md': CH1,
+      'manuscript/第四卷/第一章.md': CH1,
+      'manuscript/第七卷/第一章.md': CH1,
+      'manuscript/第九卷/第一章.md': CH1,
+      'manuscript/第五卷/第一章.md': CH1,
+      'manuscript/第六卷/第一章.md': CH1,
+      'manuscript/第八卷/第一章.md': CH1,
+    });
+
+    const tree = listStructure(work);
+    expect(tree.map((v) => v.title)).toEqual([
+      '第一卷', '第二卷', '第三卷', '第四卷', '第五卷',
+      '第六卷', '第七卷', '第八卷', '第九卷', '第十卷',
+    ]);
+  });
+
+  it('阿拉伯编号：第1卷..第10卷 按数值升序（10 在 2 之前）', () => {
+    const work = makeWorkDir();
+    writeTree(work, {
+      'manuscript/第2卷/第一章.md': CH1,
+      'manuscript/第10卷/第一章.md': CH1,
+      'manuscript/第1卷/第一章.md': CH1,
+      'manuscript/第9卷/第一章.md': CH1,
+      'manuscript/第3卷/第一章.md': CH1,
+      'manuscript/第8卷/第一章.md': CH1,
+      'manuscript/第4卷/第一章.md': CH1,
+      'manuscript/第7卷/第一章.md': CH1,
+      'manuscript/第5卷/第一章.md': CH1,
+      'manuscript/第6卷/第一章.md': CH1,
+    });
+
+    const tree = listStructure(work);
+    expect(tree.map((v) => v.title)).toEqual([
+      '第1卷', '第2卷', '第3卷', '第4卷', '第5卷',
+      '第6卷', '第7卷', '第8卷', '第9卷', '第10卷',
+    ]);
+  });
+
+  it('汉字/阿拉伯混合：均按编号数值升序', () => {
+    const work = makeWorkDir();
+    writeTree(work, {
+      'manuscript/第10卷/第一章.md': CH1,
+      'manuscript/第二卷/第一章.md': CH1,
+      'manuscript/第1卷/第一章.md': CH1,
+      'manuscript/第三卷/第一章.md': CH1,
+    });
+
+    const tree = listStructure(work);
+    expect(tree.map((v) => v.title)).toEqual(['第1卷', '第二卷', '第三卷', '第10卷']);
+  });
+});
