@@ -6,7 +6,7 @@ export function devPage(token: string, version: string): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>novel core /dev 联调页</title>
+<title>novel core /v1/dev 联调页</title>
 <style>
   :root { --bg:#f6f5f2; --panel:#fff; --line:#e3e1da; --accent:#6b4eff; --text:#2a2723; --muted:#8b867c; --ok:#2e9e5b; }
   * { box-sizing:border-box; }
