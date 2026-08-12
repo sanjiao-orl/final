@@ -96,6 +96,38 @@ export class CandidatesStore {
     }
   }
 
+  /** B1 就地浮层用：/rewrite 流式改写，只回文本不落暂存区；失败报错返回 null。 */
+  async rewriteText(
+    original: string,
+    instruction: string,
+    onProgress?: (text: string) => void,
+  ): Promise<string | null> {
+    let text = '';
+    const failure: { err: Error | null } = { err: null }; // 闭包赋值，TS 收窄不跨闭包，用对象持有
+    try {
+      await this.client.rewriteStream(
+        { original, instruction },
+        {
+          onDelta: (d) => {
+            text += d;
+            onProgress?.(text);
+          },
+          onDone: ({ text: t }) => {
+            text = t;
+          },
+          onError: (err) => {
+            failure.err = err;
+          },
+        },
+      );
+      if (failure.err) throw failure.err;
+      return text;
+    } catch (err) {
+      work.error = `AI 改写失败：${err instanceof Error ? err.message : String(err)}`;
+      return null;
+    }
+  }
+
   /** 批量采纳：编辑器内按 original 定位替换 → 状态落库 → 保存（快照安全阀）。 */
   async adoptSelected(): Promise<void> {
     await this.adopt(this.items.filter((i) => this.selected.has(i.id)));

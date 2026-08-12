@@ -1,4 +1,4 @@
-/* 全局样式：只吃 theme.ts 注入的 CSS 变量（可配置默认否，偏好改 theme.ts）。 */
+/* 全局样式：只吃 theme.ts 注入的 CSS 变量（默认最保守，设置面板可改）。 */
 * {
   box-sizing: border-box;
 }
@@ -12,12 +12,15 @@ body,
 
 body {
   font-family: var(--ui-font);
+  font-size: 13px;
   background: var(--paper);
   color: var(--ink);
   overflow: hidden;
+  -webkit-font-smoothing: antialiased;
 }
 
 button {
+  font-family: var(--ui-font);
   font: inherit;
   color: inherit;
   background: none;
@@ -25,14 +28,44 @@ button {
   cursor: pointer;
 }
 
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+input,
+textarea,
+select {
+  font-family: var(--ui-font);
+  color: var(--ink);
 }
-::-webkit-scrollbar-thumb {
-  background: var(--line);
-  border-radius: 4px;
+
+::selection {
+  background: var(--sel-hl);
+}
+
+/* 细滚动条（6px，圆角 thumb，透明 track） */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--muted) 30%, transparent);
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--muted) 48%, transparent);
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }

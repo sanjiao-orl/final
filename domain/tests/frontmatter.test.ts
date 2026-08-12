@@ -57,4 +57,23 @@ describe('parseFrontmatter', () => {
     expect(frontmatterEnd('---\ntitle: 一\n---\n正文')).toBe('---\ntitle: 一\n---\n'.length);
     expect(frontmatterEnd('没有元数据')).toBe(0);
   });
+
+  it('解析 id 与 goal（number 取整数、字符串数字才收、非法忽略）', () => {
+    // 字符串数字：能 parseInt 成正整数才收
+    const fm = parseFrontmatter('---\nid: ch-0001\ngoal: "3000"\n---\n正文。');
+    expect(fm.id).toBe('ch-0001');
+    expect(fm.goal).toBe(3000);
+    // number 直接收，取整数
+    expect(parseFrontmatter('---\ngoal: 2500\n---\n正文').goal).toBe(2500);
+    expect(parseFrontmatter('---\ngoal: 2500.8\n---\n正文').goal).toBe(2500);
+    // 非法/非正整数忽略
+    expect(parseFrontmatter('---\ngoal: 不是数字\n---\n正文').goal).toBeUndefined();
+    expect(parseFrontmatter('---\ngoal: "-3"\n---\n正文').goal).toBeUndefined();
+    expect(parseFrontmatter('---\ngoal: "0"\n---\n正文').goal).toBeUndefined();
+    // 空 id 不收
+    expect(parseFrontmatter('---\nid: \n---\n正文').id).toBeUndefined();
+    // 缺省不出现
+    expect(parseFrontmatter('---\ntitle: 一\n---\n正文').id).toBeUndefined();
+    expect(parseFrontmatter('---\ntitle: 一\n---\n正文').goal).toBeUndefined();
+  });
 });

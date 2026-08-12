@@ -1,6 +1,9 @@
 <script lang="ts">
-  // 顶栏：作品名、当前章+脏标记、保存/导出/删除、暂存抽屉、打字机/明暗/专注/右栏开关。
+  // 顶栏 42px（v3）：作品名 / 当前章+脏点 / 保存/导出/快照 / 审批模式指示 / 暂存 / 打字机/明暗/专注/AI/设置。
+  import { iconSvg } from '../lib/icons.js';
   import { candidates } from '../lib/candidates.svelte.js';
+  import { settings } from '../lib/settings.svelte.js';
+  import { snapshot } from '../lib/snapshot.svelte.js';
   import { ui } from '../lib/ui.svelte.js';
   import { work } from '../lib/work.svelte.js';
 
@@ -16,120 +19,201 @@
       void work.deleteChapter(cur.relPath);
     }
   }
+
+  /** 快照入口：列当前章快照，有则还原最新（B4）。 */
+  async function openSnapshot(): Promise<void> {
+    const cur = work.current;
+    if (!cur) return;    const list = await snapshot.listForChapter(cur.relPath);
+    if (list.length === 0) {
+      work.notice = '当前章还没有历史快照（保存覆写时自动滚动，最多 20 份）';
+      return;
+    }
+    const name = list[0]?.path.split('/').pop() ?? '';
+    if (window.confirm(`还原到最新快照 ${name}？当前未保存改动会先保留在编辑器里。`)) {
+      void snapshot.restoreLatest(cur.relPath);
+    }
+  }
 </script>
 
-<header>
-  <span class="brand" title={work.workDir}>{work.workName || '小说写作工作台'}</span>
-
-  <span class="chapter">
-    {#if work.current}
-      {work.current.title}
-      {#if work.dirty}<i class="dot" title="未保存"></i>{/if}
-      {#if work.saving}<span class="muted">保存中…</span>{/if}
-    {/if}
+<header data-ai-zone>
+  <span class="tb-work" title={work.workDir}>{work.workName || '小说写作工作台'}</span>
+  <span class="tb-sep"></span>
+  <span class="tb-chapter" title={work.current ? work.current.title : '未打开章节'}>
+    {work.current ? work.current.title : '未打开章节'}
+    {#if work.dirty}<i class="tb-dirty" title="未保存"></i>{/if}
+    {#if work.saving}<span class="saving">保存中…</span>{/if}
   </span>
+  <span class="tb-sep"></span>
 
-  <span class="spacer"></span>
-
-  <button onclick={onSave} disabled={!work.current || work.saving} title="Ctrl+S">保存</button>
-  <button onclick={() => void work.exportAll()} title="全稿导出 txt 到作品文件夹根">导出</button>
-  <button
-    class="danger"
-    onclick={confirmDelete}
-    disabled={!work.current}
-    title="软删当前章进 .novel/trash/">删除</button>
-  <button
-    class:active={candidates.drawerOpen}
-    onclick={() => candidates.toggleDrawer()}
-    title="暂存区：AI 产出候选，批量采纳/整改/丢弃">
-    暂存{#if candidates.pendingCount > 0}<i class="badge">{candidates.pendingCount}</i>{/if}
+  <button class="tb-btn" onclick={onSave} disabled={!work.current || work.saving} title="保存 (Ctrl+S)">
+    {@html iconSvg('save', 15)}
+    保存
   </button>
-  <span class="sep"></span>
-  <button class:active={ui.typewriter} onclick={() => ui.toggleTypewriter()} title="打字机滚动：光标锁 42%">
-    打字机</button>
-  <button onclick={() => ui.toggleMode()} title="明暗切换">{ui.mode === 'light' ? '暗' : '亮'}</button>
-  <button class:active={ui.focus} onclick={() => ui.toggleFocus()} title="F8 专注模式">专注</button>
-  <button class:active={ui.rightOpen} onclick={() => ui.toggleRight()} title="Ctrl+J AI 面板">AI</button>
+  <button class="tb-btn" onclick={() => void work.exportAll()} title="全稿导出 txt 到作品文件夹根">
+    {@html iconSvg('export', 15)}
+    导出
+  </button>
+  <button class="tb-btn" onclick={() => void openSnapshot()} disabled={!work.current} title="历史快照(B4)">
+    {@html iconSvg('snapshot', 15)}
+    快照
+  </button>
+  <button class="tb-btn danger" onclick={confirmDelete} disabled={!work.current} title="软删当前章进 .novel/trash/">
+    删除
+  </button>
+
+  <span class="tb-spacer"></span>
+
+  <button class="tb-mode" title="当前审批模式(B6) — 点击打开设置栏" onclick={() => ui.toggleCol('settings')}>
+    <i class="dot"></i>{settings.approvalMode} 模式
+  </button>
+  <button class="tb-btn" class:on={candidates.drawerOpen} onclick={() => candidates.toggleDrawer()} title="暂存区：AI 产出候选，批量采纳/整改/丢弃">
+    {@html iconSvg('drawer', 15)}
+    暂存{#if candidates.pendingCount > 0}<i class="tb-badge">{candidates.pendingCount}</i>{/if}
+  </button>
+  <button class="tb-btn" class:on={settings.typewriter} onclick={() => settings.setTypewriter(!settings.typewriter)} title="打字机滚动：光标锁 42%">
+    {@html iconSvg('typewriter', 15)}
+    打字机
+  </button>
+  <button class="tb-btn" onclick={() => settings.toggleMode()} title="明暗切换" aria-label="明暗切换">
+    {@html iconSvg('moon', 15)}
+  </button>
+  <button class="tb-btn" class:on={ui.focus} onclick={() => ui.toggleFocus()} title="专注 (F8)">
+    {@html iconSvg('focus', 15)}
+  </button>
+  <button class="tb-btn" class:on={ui.aiOpen} onclick={() => ui.toggleAi()} title="AI 面板 (Ctrl+J)">
+    {@html iconSvg('spark', 15)}
+    AI
+  </button>
+  <button class="tb-btn" class:on={ui.isOpen('settings')} onclick={() => ui.toggleCol('settings')} title="设置">
+    {@html iconSvg('settings', 15)}
+  </button>
 </header>
 
 <style>
   header {
+    height: var(--toolbar-h);
+    flex: none;
     display: flex;
     align-items: center;
-    gap: 6px;
-    height: 42px;
-    padding: 0 12px;
+    gap: 4px;
+    padding: 0 10px;
     background: var(--panel);
     border-bottom: 1px solid var(--line);
-    flex: none;
+    user-select: none;
+    z-index: 30;
   }
-  .brand {
+  .tb-work {
+    font-family: var(--body-font);
+    font-size: 15px;
     font-weight: 600;
-    font-size: 14px;
-    max-width: 220px;
+    letter-spacing: 0.06em;
+    padding: 0 8px 0 4px;
+    white-space: nowrap;
+    max-width: 200px;
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
   }
-  .chapter {
-    margin-left: 12px;
-    font-size: 13px;
-    color: var(--muted);
+  .tb-chapter {
     display: flex;
     align-items: center;
     gap: 6px;
-  }
-  .dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--danger);
-    display: inline-block;
-  }
-  .badge {
-    display: inline-block;
-    min-width: 15px;
-    height: 15px;
-    line-height: 15px;
-    margin-left: 5px;
-    border-radius: 8px;
-    background: var(--accent);
-    color: #fff;
-    font-size: 10px;
-    text-align: center;
-    padding: 0 3px;
-  }
-  .muted {
+    font-size: 12.5px;
     color: var(--muted);
-    font-size: 12px;
+    padding: 3px 8px;
+    border-radius: 5px;
+    max-width: 240px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: background var(--t-hover);
   }
-  .spacer {
-    flex: 1;
+  .tb-chapter:hover {
+    background: color-mix(in srgb, var(--muted) 10%, transparent);
   }
-  button {
-    padding: 4px 10px;
-    border-radius: 6px;
-    font-size: 13px;
-    color: var(--ink);
+  .tb-dirty {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--status-draft);
+    flex: none;
   }
-  button:hover:not(:disabled) {
-    background: var(--paper);
+  .saving {
+    color: var(--muted);
+    font-size: 11px;
   }
-  button:disabled {
-    opacity: 0.4;
-    cursor: default;
-  }
-  button.active {
-    color: var(--accent);
-    font-weight: 600;
-  }
-  button.danger:hover:not(:disabled) {
-    color: var(--danger);
-  }
-  .sep {
+  .tb-sep {
     width: 1px;
     height: 18px;
     background: var(--line);
-    margin: 0 4px;
+    margin: 0 6px;
+    flex: none;
+  }
+  .tb-spacer {
+    flex: 1;
+  }
+  .tb-btn {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    height: 28px;
+    padding: 0 9px;
+    font-size: 12.5px;
+    color: var(--ink);
+    border-radius: 6px;
+    transition: background var(--t-hover);
+    white-space: nowrap;
+  }
+  .tb-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--muted) 10%, transparent);
+  }
+  .tb-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  .tb-btn.on {
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+  .tb-btn.danger:hover:not(:disabled) {
+    color: var(--danger);
+  }
+  .tb-btn :global(svg) {
+    width: 15px;
+    height: 15px;
+    flex: none;
+  }
+  .tb-badge {
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 8px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 10.5px;
+    line-height: 16px;
+    text-align: center;
+  }
+  .tb-mode {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    height: 22px;
+    padding: 0 8px;
+    margin-right: 2px;
+    border: 1px solid var(--line);
+    border-radius: 11px;
+    font-size: 11px;
+    color: var(--muted);
+    transition: border-color var(--t-hover), color var(--t-hover);
+  }
+  .tb-mode:hover {
+    border-color: var(--accent-line);
+    color: var(--accent);
+  }
+  .tb-mode .dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--status-draft);
   }
 </style>

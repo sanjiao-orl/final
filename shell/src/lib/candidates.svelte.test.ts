@@ -131,7 +131,7 @@ describe('CandidatesStore', () => {
     const store = new CandidatesStore();
     store.init(client);
     work.init(client, 'C:/works/demo');
-    work.current = { relPath: '章节A.md', title: '章节A', frontmatterRaw: '---\n---\n', savedMd: '原文X' };
+    work.current = { relPath: '章节A.md', title: '章节A', frontmatter: {}, frontmatterRaw: '---\n---\n', savedMd: '原文X' };
     work.registerEditor({ getMd: () => '原文X改写X', applyEdit: () => 'ok' });
 
     store.items = [CAND];
@@ -148,7 +148,7 @@ describe('CandidatesStore', () => {
     const client = clientOf({ patchCandidate });
     const store = new CandidatesStore();
     store.init(client);
-    work.current = { relPath: '章节A.md', title: '章节A', frontmatterRaw: '---\n---\n', savedMd: 'x' };
+    work.current = { relPath: '章节A.md', title: '章节A', frontmatter: {}, frontmatterRaw: '---\n---\n', savedMd: 'x' };
     work.registerEditor({ getMd: () => 'x', applyEdit: () => 'not-found' });
 
     store.items = [CAND, { ...CAND, id: 'c2' }];
@@ -173,7 +173,7 @@ describe('CandidatesStore', () => {
     store.init(client);
     // 当前在另一章，目标章在结构树里
     work.init(client, 'C:/works/demo');
-    work.current = { relPath: '章节B.md', title: '章节B', frontmatterRaw: '---\n---\n', savedMd: 'b' };
+    work.current = { relPath: '章节B.md', title: '章节B', frontmatter: {}, frontmatterRaw: '---\n---\n', savedMd: 'b' };
     work.structure = [{ type: 'volume', title: '第一卷', children: [{ type: 'chapter', title: '章节A', relPath: '章节A.md', wordCount: 1, scenes: [] }] }];
     work.registerEditor({ getMd: () => '其他正文改', applyEdit: () => 'ok' });
 

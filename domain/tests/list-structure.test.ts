@@ -81,6 +81,19 @@ describe('list_structure', () => {
     expect(listStructure(makeWorkDir())).toEqual([]);
   });
 
+  it('frontmatter 的 id/goal 透出到 ChapterNode（缺省不出现）', () => {
+    const work = makeWorkDir();
+    writeTree(work, {
+      'manuscript/卷一/第一章.md': '---\ntitle: 第一章\nid: ch-0001\ngoal: 5000\n---\n### 场甲',
+      'manuscript/卷一/第二章.md': '---\ntitle: 第二章\n---\n### 场乙',
+    });
+    const [ch1, ch2] = listStructure(work)[0]!.children;
+    expect(ch1!.id).toBe('ch-0001');
+    expect(ch1!.goal).toBe(5000);
+    expect(ch2!.id).toBeUndefined();
+    expect(ch2!.goal).toBeUndefined();
+  });
+
   it('空 manuscript 目录返回空树', () => {
     const work = makeWorkDir();
     fs.mkdirSync(path.join(work, 'manuscript'));
