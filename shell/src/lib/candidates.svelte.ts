@@ -45,8 +45,13 @@ export class CandidatesStore {
   }
 
   toggleDrawer(): void {
-    this.drawerOpen = !this.drawerOpen;
-    if (this.drawerOpen) void this.load();
+    if (this.drawerOpen) {
+      this.drawerOpen = false;
+      return;
+    }
+    this.overviewOpen = false; // 抽屉与全览互斥
+    this.drawerOpen = true;
+    void this.load();
   }
 
   /** 全览：载入全部状态候选并弹出（与抽屉互斥）；关闭时清空选中。 */
