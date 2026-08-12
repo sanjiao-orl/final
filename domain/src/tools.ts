@@ -70,7 +70,7 @@ const H1_RE = /^#(?!#)[ \t]+(.+)$/;
 /**
  * 命名规范：带编号的章文件名/卷目录名（组 1=编号，阿拉伯或汉字均可；组 2=用户标题部分）。
  * 匹配即“带编号”；不匹配的旧文件/旧目录保持原名不动。
- * 新名/重编号一律输出汉字编号（第一章·少年 样式，与既有作品一致）。
+ * 新名/重编号一律输出阿拉伯数字编号（第1章·少年 样式）。
  */
 const CHAPTER_NAME_RE = /^第(\d+|[一二三四五六七八九十百]+)章[·.、\s]*(.*)$/;
 const VOLUME_NAME_RE = /^第(\d+|[一二三四五六七八九十百]+)卷[·.、\s]*(.*)$/;
@@ -96,19 +96,6 @@ function numOf(s: string): number {
     }
   }
   return total + section + num;
-}
-
-/** 数值 → 汉字编号（1..99；超出回落阿拉伯数字）。 */
-function cnNum(n: number): string {
-  if (n <= 0 || !Number.isInteger(n)) return String(n);
-  if (n < 10) return '一二三四五六七八九'[n - 1]!;
-  if (n < 100) {
-    const tens = Math.floor(n / 10);
-    const ones = n % 10;
-    const t = tens === 1 ? '十' : '一二三四五六七八九'[tens - 1]! + '十';
-    return ones === 0 ? t : t + '一二三四五六七八九'[ones - 1]!;
-  }
-  return String(n);
 }
 
 /**
@@ -526,7 +513,7 @@ export function createChapter(
   const msDir = path.join(assertWorkDir(workDir), 'manuscript');
   const dir = vol === '' ? msDir : path.join(msDir, vol);
   const n = maxChapterNumber(dir) + 1;
-  const name = `第${cnNum(n)}章·${t}`;
+  const name = `第${n}章·${t}`;
   const relPath = toPosix(path.join('manuscript', vol, `${name}.md`));
   const abs = resolveInside(workDir, relPath);
   if (fs.existsSync(abs)) {
@@ -547,7 +534,7 @@ export function createVolume(workDir: string, title?: string): { ok: true; volum
   const t = title === undefined || title.trim() === '' ? '新卷' : assertUserTitle('卷', title);
   const msDir = path.join(assertWorkDir(workDir), 'manuscript');
   const n = maxVolumeNumber(msDir) + 1;
-  const name = `第${cnNum(n)}卷·${t}`;
+  const name = `第${n}卷·${t}`;
   const volumePath = toPosix(path.join('manuscript', name));
   const abs = resolveInside(workDir, volumePath);
   if (fs.existsSync(abs)) {
@@ -576,7 +563,7 @@ export function renameChapter(
   const dir = path.dirname(abs);
   const base = path.basename(abs, '.md');
   const m = CHAPTER_NAME_RE.exec(base);
-  const newBase = m ? `第${cnNum(numOf(m[1]!))}章·${t}` : t;
+  const newBase = m ? `第${numOf(m[1]!)}章·${t}` : t;
   const newAbs = path.join(dir, `${newBase}.md`);
   if (newAbs === abs) return { ok: true, relPath: posix }; // 名字没变：无事可做
   if (fs.existsSync(newAbs)) {
@@ -610,7 +597,7 @@ export function renameVolume(
   const parent = path.dirname(abs);
   const base = path.basename(abs);
   const m = VOLUME_NAME_RE.exec(base);
-  const newBase = m ? `第${cnNum(numOf(m[1]!))}卷·${t}` : t;
+  const newBase = m ? `第${numOf(m[1]!)}卷·${t}` : t;
   const newAbs = path.join(parent, newBase);
   if (newAbs === abs) return { ok: true, volumePath: posix };
   if (fs.existsSync(newAbs)) {
@@ -631,7 +618,7 @@ export interface RenumberedChapter {
 export interface RenumberedVolume {
   /** 重排后相对 workDir 的卷路径（正斜杠）。 */
   volumePath: string;
-  /** 卷目录名（如 第一卷·风起）。 */
+  /** 卷目录名（如 第1卷·风起）。 */
   title: string;
 }
 
@@ -666,7 +653,7 @@ function renumberTransactional(
     const noExt = name.replace(/\.md$/i, '');
     const m = nameRe.exec(noExt);
     if (!m) continue; // 不匹配的旧名保持原名不动
-    const newBase = `第${cnNum(i + 1)}${kind === '章' ? '章' : '卷'}·${m[2]!}`;
+    const newBase = `第${i + 1}${kind === '章' ? '章' : '卷'}·${m[2]!}`;
     if (newBase === noExt) continue; // 名字已正确
     plan.push({ from: name, to: kind === '章' ? `${newBase}.md` : newBase });
   }
