@@ -1,6 +1,8 @@
 /**
  * ledger.test.ts —— 四维账本：序列化/解析 round-trip、applyOps、确定性诊断、读写、slice、blocker 计数。
  */
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   applyOps,
@@ -85,9 +87,9 @@ describe('序列化 / 解析 round-trip', () => {
     expect(parseLedger(content)).toEqual(ledger);
   });
 
-  it('无 frontmatter / 非法 YAML 返回空账本', () => {
-    expect(parseLedger('# 只是标题\n正文')).toEqual(emptyLedger());
-    expect(parseLedger('---\n{ 非法 yaml\n---\n正文')).toEqual(emptyLedger());
+  it('无 frontmatter / 非法 YAML 抛「损坏」错误', () => {
+    expect(() => parseLedger('# 只是标题\n正文')).toThrow(/损坏/);
+    expect(() => parseLedger('---\n{ 非法 yaml\n---\n正文')).toThrow(/损坏/);
   });
 
   it('渲染 Markdown 含四维标题', () => {
@@ -107,6 +109,15 @@ describe('applyOps', () => {
     const l2 = applyOps(l1, [{ op: 'clock', entry: { chapters: ['第一章'], thread: '主', storyDay: '第2日' } }]);
     expect(l2.clock).toHaveLength(1);
     expect(l2.clock[0]!.storyDay).toBe('第2日');
+  });
+
+  it('clock 同集合不同顺序的 chapters 视为同一条（顺序无关）', () => {
+    const l = applyOps(emptyLedger(), [
+      { op: 'clock', entry: { chapters: ['第一章', '第二章'], thread: '主', storyDay: '第1日' } },
+      { op: 'clock', entry: { chapters: ['第二章', '第一章'], thread: '主', storyDay: '第2日' } },
+    ]);
+    expect(l.clock).toHaveLength(1);
+    expect(l.clock[0]!.storyDay).toBe('第2日');
   });
 
   it('prop 按 name、promise 按 id、knowledge 按 character 键 upsert', () => {
@@ -148,6 +159,12 @@ describe('applyOps', () => {
     expect(() => applyOps(emptyLedger(), [{ op: 'nope' } as unknown as LedgerOp])).toThrow(/未知 ledger 操作/);
     expect(() => applyOps(emptyLedger(), [{ op: 'clock', entry: { chapters: [] } } as unknown as LedgerOp])).toThrow(/chapters/);
     expect(() => applyOps(emptyLedger(), [{ op: 'promise', entry: { id: 'P1', name: 'x', arc: 'bad', setups: [], payoffs: [] } } as unknown as LedgerOp])).toThrow(/非法 arc/);
+  });
+
+  it('clock.chapters 含非字符串元素抛守卫错误而非 TypeError', () => {
+    expect(() =>
+      applyOps(emptyLedger(), [{ op: 'clock', entry: { chapters: ['第一章', 2 as unknown as string] } } as unknown as LedgerOp]),
+    ).toThrow(/chapters 必须是字符串数组/);
   });
 });
 
@@ -248,10 +265,48 @@ describe('读写（文件系统）', () => {
     expect(ledger.tripwires).toEqual(['铜钱≠茶钱']);
   });
 
+  it('损坏账本：readLedger/upsertLedger 抛「损坏」且不覆盖原文件', () => {
+    const work = makeWorkDir();
+    const corrupt = '---\n{ 非法 yaml\n---\n正文';
+    writeTree(work, { '.novel/ledger.md': corrupt });
+    expect(() => readLedger(work)).toThrow(/损坏/);
+    expect(() => upsertLedger(work, [{ op: 'tripwire', item: 'x' }])).toThrow(/损坏/);
+    expect(fs.readFileSync(path.join(work, '.novel/ledger.md'), 'utf8')).toBe(corrupt);
+  });
+
+  it('upsert 成功路径在 .novel/history/ 留下旧账本快照', () => {
+    const work = makeWorkDir();
+    const ledgerPath = 'editorial_notes/reader_ledger.md';
+    writeLedger(work, sampleLedger(), ledgerPath);
+    upsertLedger(work, [{ op: 'tripwire', item: '新增硬规则' }], ledgerPath);
+    const snapDir = path.join(work, '.novel', 'history', 'editorial_notes__reader_ledger');
+    const snaps = fs.readdirSync(snapDir).filter((n) => n.endsWith('.md'));
+    expect(snaps).toHaveLength(1);
+    const oldContent = fs.readFileSync(path.join(snapDir, snaps[0]!), 'utf8');
+    expect(oldContent).toContain('铜钱');
+    expect(oldContent).not.toContain('新增硬规则');
+  });
+
   it('ledgerPath 覆盖默认位置', () => {
     const work = makeWorkDir();
     writeLedger(work, sampleLedger(), 'editorial_notes/reader_ledger.md');
     expect(readLedger(work).ledger).toEqual(emptyLedger()); // 默认位置为空
+    expect(readLedger(work, 'editorial_notes/reader_ledger.md').ledger).toEqual(sampleLedger());
+  });
+
+  it('ledgerPath 拒绝 manuscript/ 与 .novel/history/、.novel/trash/ 内的 .md', () => {
+    const work = makeWorkDir();
+    expect(() => writeLedger(work, sampleLedger(), 'manuscript/卷一/第1章.md')).toThrow(/只允许/);
+    expect(() => writeLedger(work, sampleLedger(), '.novel/history/ledger.md')).toThrow(/只允许/);
+    expect(() => writeLedger(work, sampleLedger(), '.novel/trash/ledger.md')).toThrow(/只允许/);
+    expect(() => readLedger(work, 'manuscript/卷一/第1章.md')).toThrow(/只允许/);
+  });
+
+  it('ledgerPath 放行 .novel/ledger.md 与 editorial_notes/xxx.md', () => {
+    const work = makeWorkDir();
+    writeLedger(work, sampleLedger(), '.novel/ledger.md');
+    expect(readLedger(work, '.novel/ledger.md').ledger).toEqual(sampleLedger());
+    writeLedger(work, sampleLedger(), 'editorial_notes/reader_ledger.md');
     expect(readLedger(work, 'editorial_notes/reader_ledger.md').ledger).toEqual(sampleLedger());
   });
 });
@@ -284,6 +339,19 @@ describe('ledgerSlice（审阅输入组装，禁止全量注入）', () => {
   it('章节不存在抛错', () => {
     const work = makeWorkDir();
     expect(() => ledgerSlice(work, 'manuscript/不存在.md')).toThrow(/不存在/);
+  });
+
+  it('chapterRelPath 为全稿导出/根目录 txt/.novel 内文件 → 拒绝', () => {
+    const work = makeWorkDir();
+    writeTree(work, { '全稿-20260101.txt': '全稿正文', '.novel/ledger.md': serializeLedger(sampleLedger()) });
+    expect(() => ledgerSlice(work, '全稿-20260101.txt')).toThrow(/manuscript/);
+    expect(() => ledgerSlice(work, '.novel/ledger.md')).toThrow(/manuscript/);
+  });
+
+  it('issueLogPath 为 manuscript/ 内文件 → 拒绝', () => {
+    const work = makeWorkDir();
+    writeTree(work, { 'manuscript/第1章.md': '---\ntitle: 第1章\n---\n正文。' });
+    expect(() => ledgerSlice(work, 'manuscript/第1章.md', undefined, 'manuscript/第1章.md')).toThrow(/issueLogPath/);
   });
 });
 

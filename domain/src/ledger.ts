@@ -12,11 +12,13 @@
  * - 确定性诊断坚持「宁缺毋滥」：无把握自动判定的（如知情权跨章违规），不硬写，留作冷读人工维护项；
  * - 审阅输入组装禁止全量注入正文（ledgerSlice 只注入单章正文 + 账本切片）。
  */
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { atomicWrite, assertWorkDir, collectMdFiles, resolveInside, toPosix } from './fsutil.js';
 import { frontmatterEnd, parseFrontmatter } from './frontmatter.js';
+import { SNAPSHOT_KEEP } from './tools.js';
 
 // ---------- 类型 ----------
 
@@ -143,7 +145,9 @@ export type LedgerOp =
 /** 数组判等（顺序无关的字符串集合相等）。 */
 function sameStringArray(a: string[], b: string[]): boolean {
   if (a.length !== b.length) return false;
-  return a.every((x, i) => x === b[i]);
+  const sa = [...a].sort();
+  const sb = [...b].sort();
+  return sa.every((x, i) => x === sb[i]);
 }
 
 /**
@@ -230,6 +234,9 @@ function assertClockRow(entry: unknown): asserts entry is ClockRow {
   const e = entry as ClockRow;
   if (!e || !Array.isArray(e.chapters) || e.chapters.length === 0) {
     throw new Error('clock 需要非空 chapters 数组');
+  }
+  if (!e.chapters.every((c) => typeof c === 'string')) {
+    throw new Error('clock.chapters 必须是字符串数组');
   }
 }
 function assertProp(entry: unknown): asserts entry is PropEntry {
@@ -462,25 +469,87 @@ export function serializeLedger(ledger: Ledger): string {
 /** 匹配文件开头的 `---` 包裹块（与 frontmatter.ts 同口径，只取内层 YAML）。 */
 const LEDGER_FM_RE = /^---\r?\n([\s\S]*?)\r?\n(?:---|\.\.\.)(?:\r?\n|$)/;
 
-/** 解析账本文件内容 → Ledger；无 frontmatter 或非法时返回空账本。 */
+/** 解析账本文件内容 → Ledger；无 frontmatter、YAML 非法或非映射时抛「损坏」错误（文件不存在的空账本由 readLedger 区分）。 */
 export function parseLedger(content: string): Ledger {
   const m = LEDGER_FM_RE.exec(content);
-  if (!m) return emptyLedger();
+  if (!m) {
+    throw new Error('账本已损坏，需人工修复或删除：缺少 YAML frontmatter');
+  }
   let raw: unknown;
   try {
     raw = parseYaml(m[1] ?? '');
-  } catch {
-    return emptyLedger();
+  } catch (err) {
+    throw new Error(`账本已损坏，需人工修复或删除：YAML 解析失败（${err instanceof Error ? err.message : String(err)}）`);
+  }
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error('账本已损坏，需人工修复或删除：frontmatter 必须是 YAML 映射');
   }
   return normalizeLedger(raw);
 }
 
-/** 账本文件绝对路径（相对 workDir 解析，越界抛错）。 */
+/**
+ * 账本文件绝对路径（相对 workDir 解析，越界抛错）。
+ * 守卫口径：账本是元数据文件——必须是 .md，且不允许落在 manuscript/、.novel/history/、.novel/trash/ 下。
+ */
 function ledgerAbs(workDir: string, ledgerPath: string): string {
-  return resolveInside(workDir, ledgerPath || DEFAULT_LEDGER_PATH);
+  const wd = assertWorkDir(workDir);
+  const rel = ledgerPath || DEFAULT_LEDGER_PATH;
+  const abs = resolveInside(wd, rel); // 越界在此抛错
+  const posix = toPosix(path.relative(wd, abs));
+  if (!posix.toLowerCase().endsWith('.md')) {
+    throw new Error(`ledgerPath 只允许 .md 文件: ${rel}`);
+  }
+  if (posix.startsWith('manuscript/') || posix.startsWith('.novel/history/') || posix.startsWith('.novel/trash/')) {
+    throw new Error(`ledgerPath 只允许 manuscript/、.novel/history/、.novel/trash/ 外的 .md 文件: ${rel}`);
+  }
+  return abs;
 }
 
-/** 读取账本；文件不存在返回空账本（不抛错）。 */
+/** 本地时间戳（毫秒级）+ 随机后缀，避免同刻碰撞；字典序即时间序。 */
+function ledgerStamp(): string {
+  const d = new Date();
+  const p = (n: number, w = 2): string => String(n).padStart(w, '0');
+  const base =
+    `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}` +
+    `-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}${p(d.getMilliseconds(), 3)}`;
+  return `${base}-${randomBytes(2).toString('hex')}`;
+}
+
+/** ledgerPath 拍平成 .novel/history/ 下的单段目录名。 */
+function flattenLedgerRel(relPath: string): string {
+  return relPath.replace(/[:/\\]+/g, '__').replace(/\.md$/i, '');
+}
+
+/** .novel/history 的绝对路径（自动创建）。 */
+function ledgerHistoryDir(workDir: string): string {
+  const dir = path.join(assertWorkDir(workDir), '.novel', 'history');
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/**
+ * 覆盖写账本前把旧内容快照进 .novel/history/<拍平的账本路径>/<时间戳>.md。
+ * 仅当旧文件存在且内容有变化时快照；随后按时间序裁到最近 SNAPSHOT_KEEP 份。
+ */
+function snapshotLedgerBeforeWrite(workDir: string, relPath: string, abs: string, next: string): void {
+  let prev: string;
+  try {
+    prev = fs.readFileSync(abs, 'utf8');
+  } catch {
+    return; // 新文件无旧版可快照
+  }
+  if (prev === next) return; // 内容未变不产生重复快照
+  const dir = path.join(ledgerHistoryDir(workDir), flattenLedgerRel(toPosix(relPath)));
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `${ledgerStamp()}.md`), prev, 'utf8');
+  // 滚动裁剪：文件名以时间戳开头，字典序即时间序
+  const names = fs.readdirSync(dir).filter((n) => n.endsWith('.md')).sort();
+  for (const stale of names.slice(0, Math.max(0, names.length - SNAPSHOT_KEEP))) {
+    fs.rmSync(path.join(dir, stale), { force: true });
+  }
+}
+
+/** 读取账本；文件不存在返回空账本（不抛错），文件存在但解析失败抛「损坏」错误。 */
 export function readLedger(workDir: string, ledgerPath?: string): { ledger: Ledger; path: string } {
   const wd = assertWorkDir(workDir);
   const rel = ledgerPath || DEFAULT_LEDGER_PATH;
@@ -488,22 +557,29 @@ export function readLedger(workDir: string, ledgerPath?: string): { ledger: Ledg
   let content: string;
   try {
     content = fs.readFileSync(abs, 'utf8');
-  } catch {
-    return { ledger: emptyLedger(), path: rel };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { ledger: emptyLedger(), path: rel };
+    throw err;
   }
-  return { ledger: parseLedger(content), path: rel };
+  try {
+    return { ledger: parseLedger(content), path: rel };
+  } catch (err) {
+    throw new Error(`账本已损坏，需人工修复或删除: ${rel}（${err instanceof Error ? err.message : String(err)}）`);
+  }
 }
 
-/** 写账本（原子写）；返回 { ok, path, bytes }。 */
+/** 写账本（原子写，覆盖前对旧账本快照进 .novel/history/）；返回 { ok, path, bytes }。 */
 export function writeLedger(workDir: string, ledger: Ledger, ledgerPath?: string): { ok: true; path: string; bytes: number } {
   const wd = assertWorkDir(workDir);
   const rel = ledgerPath || DEFAULT_LEDGER_PATH;
   const abs = ledgerAbs(wd, rel);
-  const { bytes } = atomicWrite(abs, serializeLedger(ledger));
+  const content = serializeLedger(ledger);
+  snapshotLedgerBeforeWrite(wd, rel, abs, content);
+  const { bytes } = atomicWrite(abs, content);
   return { ok: true, path: rel, bytes };
 }
 
-/** 读 → 应用 ops → 写；返回更新后账本 + 写结果。 */
+/** 读 → 应用 ops → 写；返回更新后账本 + 写结果。账本损坏时拒绝写入（不覆盖）。 */
 export function upsertLedger(
   workDir: string,
   ops: LedgerOp[],
@@ -658,8 +734,12 @@ export function ledgerSlice(
   const wd = assertWorkDir(workDir);
   const { ledger } = readLedger(wd, ledgerPath);
 
-  // 读单章正文
-  const abs = resolveInside(wd, chapterRelPath);
+  // 读单章正文（守卫：只允许 manuscript/ 内的 .md，防止把全稿 txt 或 .novel 内文件当章注入）
+  const abs = resolveInside(wd, chapterRelPath); // 越界在此抛错
+  const chapterPosix = toPosix(path.relative(wd, abs));
+  if (!chapterPosix.startsWith('manuscript/') || !chapterPosix.toLowerCase().endsWith('.md')) {
+    throw new Error(`ledger_slice 的 chapterRelPath 只允许 manuscript/ 内的 .md 文件: ${chapterRelPath}`);
+  }
   let chapterContent: string;
   try {
     chapterContent = fs.readFileSync(abs, 'utf8');
@@ -667,13 +747,18 @@ export function ledgerSlice(
     throw new Error(`ledger_slice 章节不存在: ${chapterRelPath}`);
   }
   const body = chapterContent.slice(frontmatterEnd(chapterContent));
-  const title = chapterRelPath.split('/').pop()?.replace(/\.md$/i, '') ?? chapterRelPath;
+  const title = chapterPosix.split('/').pop()?.replace(/\.md$/i, '') ?? chapterRelPath;
 
-  // 问题日志尾部（WS-9：最后约 40 行）
+  // 问题日志尾部（WS-9：最后约 40 行；守卫：编辑笔记，.md 且不在 manuscript/ 下）
   let issueTail = '';
   if (issueLogPath) {
+    const issueAbs = resolveInside(wd, issueLogPath); // 越界在此抛错
+    const issuePosix = toPosix(path.relative(wd, issueAbs));
+    if (!issuePosix.toLowerCase().endsWith('.md') || issuePosix.startsWith('manuscript/')) {
+      throw new Error(`ledger_slice 的 issueLogPath 只允许 manuscript/ 外的 .md 文件: ${issueLogPath}`);
+    }
     try {
-      const issueContent = fs.readFileSync(resolveInside(wd, issueLogPath), 'utf8');
+      const issueContent = fs.readFileSync(issueAbs, 'utf8');
       const lines = issueContent.split(/\r?\n/);
       issueTail = lines.slice(-40).join('\n');
     } catch {

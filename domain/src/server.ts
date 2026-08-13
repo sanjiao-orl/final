@@ -264,10 +264,10 @@ server.registerTool(
   {
     title: '读取四维账本',
     description:
-      '读取 workDir 下的账本（默认 .novel/ledger.md，可传 ledgerPath 覆盖）：四维 = 时钟表/道具托管/承诺登记(伏笔)/知情地图 + 三张登记表（do-not-re-explain/PROTECT/tripwire）。文件不存在返回空账本。账本机器态在 YAML frontmatter，正文为渲染视图。',
+      '读取 workDir 下的账本（默认 .novel/ledger.md，可传 ledgerPath 覆盖；必须是 .md 且不在 manuscript/、.novel/history/、.novel/trash/ 下）：四维 = 时钟表/道具托管/承诺登记(伏笔)/知情地图 + 三张登记表（do-not-re-explain/PROTECT/tripwire）。文件不存在返回空账本；文件存在但损坏（frontmatter 缺失或 YAML 非法）抛错。账本机器态在 YAML frontmatter，正文为渲染视图。',
     inputSchema: {
       workDir: z.string().describe('作品文件夹的绝对路径'),
-      ledgerPath: z.string().optional().describe('可选：账本文件相对 workDir 路径，默认 .novel/ledger.md'),
+      ledgerPath: z.string().optional().describe('可选：账本文件相对 workDir 路径，必须是 .md 且不在 manuscript/、.novel/history/、.novel/trash/ 下，默认 .novel/ledger.md'),
     },
   },
   async ({ workDir, ledgerPath }) => jsonResult(readLedger(workDir, ledgerPath)),
@@ -278,11 +278,11 @@ server.registerTool(
   {
     title: '更新四维账本',
     description:
-      '把一组操作应用到账本并原子写回。ops 元素按 op 区分：clock/prop/promise/knowledge（传 entry，按 chapters/name/id/character 键 upsert）、doNotReexplain/tripwire（传 item 去重追加）、protect（传 item 去重追加，可带 reason）。章引用（clock.chapters / prop.custody[].chapter / promise.setups[].chapter / promise.payoffs[].chapter）必须用 canonical `manuscript/卷/第N章.md` relPath（正斜杠），否则 overdue-promise 的章序匹配会失效。返回更新后账本与写结果。',
+      '把一组操作应用到账本并原子写回（覆盖前旧账本自动快照进 .novel/history/；账本损坏时拒绝写入）。ops 元素按 op 区分：clock/prop/promise/knowledge（传 entry，按 chapters/name/id/character 键 upsert）、doNotReexplain/tripwire（传 item 去重追加）、protect（传 item 去重追加，可带 reason）。章引用（clock.chapters / prop.custody[].chapter / promise.setups[].chapter / promise.payoffs[].chapter）必须用 canonical `manuscript/卷/第N章.md` relPath（正斜杠），否则 overdue-promise 的章序匹配会失效。ledgerPath 必须是 .md 且不在 manuscript/、.novel/history/、.novel/trash/ 下。返回更新后账本与写结果。',
     inputSchema: {
       workDir: z.string().describe('作品文件夹的绝对路径'),
       ops: z.array(z.record(z.string(), z.unknown())).describe('账本操作数组，每项须含字符串 op 字段'),
-      ledgerPath: z.string().optional().describe('可选：账本文件相对 workDir 路径，默认 .novel/ledger.md'),
+      ledgerPath: z.string().optional().describe('可选：账本文件相对 workDir 路径，必须是 .md 且不在 manuscript/、.novel/history/、.novel/trash/ 下，默认 .novel/ledger.md'),
     },
   },
   async ({ workDir, ops, ledgerPath }) => jsonResult(upsertLedger(workDir, ops as unknown as LedgerOp[], ledgerPath)),
@@ -296,7 +296,7 @@ server.registerTool(
       '对 workDir 跑全量确定性诊断（零 LLM 成本，宁缺毋滥）：账本级 = 悬空伏笔 / 逾期伏笔 / 道具双位冲突；章级 = 章首时间跳变 / 季节冲突。返回 findings（code/chapter/severity/category/message）、hasBlockers（是否存在 BLOCKER）与 blockerCount（问题日志里 `| BLOCKER |` 条数）——BLOCKER 计数已接进 hasBlockers，供暂存区入口标红，不做硬拦截。',
     inputSchema: {
       workDir: z.string().describe('作品文件夹的绝对路径'),
-      ledgerPath: z.string().optional().describe('可选：账本文件相对 workDir 路径，默认 .novel/ledger.md'),
+      ledgerPath: z.string().optional().describe('可选：账本文件相对 workDir 路径，必须是 .md 且不在 manuscript/、.novel/history/、.novel/trash/ 下，默认 .novel/ledger.md'),
       issueLogPath: z.string().optional().describe('可选：问题日志（issues.md，CR 格式）相对 workDir 路径，用于统计 BLOCKER 条数'),
     },
   },
@@ -308,12 +308,12 @@ server.registerTool(
   {
     title: '组装冷读输入（单章 + 账本切片）',
     description:
-      '组装贵档模型冷读输入：读者契约摘要 + 账本切片 + 单章正文（唯一注入章）+ 问题日志尾部。纪律：绝不注入其他章全文（AGENTS.md 禁令），只注入当前章。返回 { slice, injectedChapters }。',
+      '组装贵档模型冷读输入：读者契约摘要 + 账本切片 + 单章正文（唯一注入章）+ 问题日志尾部。纪律：绝不注入其他章全文（AGENTS.md 禁令），只注入当前章；chapterRelPath 必须是 manuscript/ 内的 .md，issueLogPath 必须是 manuscript/ 外的 .md（编辑笔记）。返回 { slice, injectedChapters }。',
     inputSchema: {
       workDir: z.string().describe('作品文件夹的绝对路径'),
-      chapterRelPath: z.string().describe('当前审阅章相对 workDir 路径，如 manuscript/卷一/第1章.md'),
-      ledgerPath: z.string().optional().describe('可选：账本文件相对 workDir 路径'),
-      issueLogPath: z.string().optional().describe('可选：问题日志相对 workDir 路径（注入最后约 40 行作续读上下文）'),
+      chapterRelPath: z.string().describe('当前审阅章相对 workDir 路径，必须是 manuscript/ 内的 .md，如 manuscript/卷一/第1章.md'),
+      ledgerPath: z.string().optional().describe('可选：账本文件相对 workDir 路径，必须是 .md 且不在 manuscript/、.novel/history/、.novel/trash/ 下'),
+      issueLogPath: z.string().optional().describe('可选：问题日志相对 workDir 路径，必须是 manuscript/ 外的 .md（注入最后约 40 行作续读上下文）'),
     },
   },
   async ({ workDir, chapterRelPath, ledgerPath, issueLogPath }) =>

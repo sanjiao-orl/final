@@ -40,5 +40,5 @@ node core/scripts/e2e.mjs   # 真实 LLM e2e(key 在场才跑)
 
 ## 验收口径
 
-- `npm run check` / `npm test`(245 用例:core 64 + domain 101 + shell 80)
+- `npm run check` / `npm test`(295 用例:core 74 + domain 140 + shell 81)
 - 每周出口 = 作者用本仓真实写作;不以测试绿为验收
