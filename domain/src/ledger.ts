@@ -123,6 +123,8 @@ export interface Ledger {
   doNotReexplain: string[];
   protect: ProtectEntry[];
   tripwires: string[];
+  /** 未知 frontmatter 字段（人工增补/未来新字段）：parse 时原样透传保留，serialize 时写回；不解析不校验。 */
+  extra?: Record<string, unknown>;
 }
 
 /** 空账本。 */
@@ -132,7 +134,7 @@ export function emptyLedger(): Ledger {
 
 // ---------- 账本操作（纯函数，可独立测试） ----------
 
-/** 单个 upsert 操作。op 决定操作维度；语义见 applyOps。 */
+/** 单个操作。op 决定操作维度：upsert（clock/prop/promise/knowledge/三张登记表）与 remove（按各维自然键删除）。语义见 applyOps。 */
 export type LedgerOp =
   | { op: 'clock'; entry: ClockRow }
   | { op: 'prop'; entry: PropEntry }
@@ -140,7 +142,13 @@ export type LedgerOp =
   | { op: 'knowledge'; entry: KnowledgeEntry }
   | { op: 'doNotReexplain'; fact: string }
   | { op: 'protect'; item: string; reason?: string }
-  | { op: 'tripwire'; item: string };
+  | { op: 'tripwire'; item: string }
+  /** remove：按各维自然键删除一条匹配条目（键语义与 upsert 判重键一致）；找不到目标静默 no-op（幂等）。 */
+  | { op: 'remove'; dimension: 'clock'; chapters: string[] }
+  | { op: 'remove'; dimension: 'prop'; name: string }
+  | { op: 'remove'; dimension: 'promise'; id: string }
+  | { op: 'remove'; dimension: 'knowledge'; character: string }
+  | { op: 'remove'; dimension: 'doNotReexplain' | 'protect' | 'tripwire'; item: string };
 
 /** 数组判等（顺序无关的字符串集合相等）。 */
 function sameStringArray(a: string[], b: string[]): boolean {
@@ -154,7 +162,11 @@ function sameStringArray(a: string[], b: string[]): boolean {
  * applyOps：把一组操作应用到账本（纯函数，返回新对象）。
  * - clock：按 chapters 键 upsert（同名章节跨度替换，否则追加）；
  * - prop/promise/knowledge：按 name/id/character 键 upsert；
- * - doNotReexplain/tripwire：字符串去重追加；protect：按 item 去重追加。
+ * - doNotReexplain/tripwire：字符串去重追加；protect：按 item 去重追加；
+ * - remove：按各维自然键删除匹配条目（键语义与 upsert 判重键一致：clock 按 chapters 集合、
+ *   prop 按 name、promise 按 id、knowledge 按 character、三张登记表按文本精确匹配）；
+ *   找不到目标时静默 no-op（幂等，与登记表去重追加风格一致），不报错；
+ * - 校验失败统一抛「ledger_upsert 的 ops 不合法: …」（对齐 tools.ts 守卫中文风格）。
  */
 export function applyOps(ledger: Ledger, ops: LedgerOp[]): Ledger {
   const out: Ledger = {
@@ -165,67 +177,128 @@ export function applyOps(ledger: Ledger, ops: LedgerOp[]): Ledger {
     doNotReexplain: [...ledger.doNotReexplain],
     protect: [...ledger.protect],
     tripwires: [...ledger.tripwires],
+    ...(ledger.extra ? { extra: ledger.extra } : {}), // 未知字段透传：读改写不丢
   };
-  for (const raw of ops) {
-    const op = raw as { op?: unknown };
-    if (typeof op.op !== 'string') throw new Error(`ledger 操作缺 op: ${JSON.stringify(raw)}`);
-    switch (op.op) {
-      case 'clock': {
-        const entry = (raw as { entry: ClockRow }).entry;
-        assertClockRow(entry);
-        const i = out.clock.findIndex((r) => sameStringArray(r.chapters, entry.chapters));
-        if (i >= 0) out.clock[i] = entry;
-        else out.clock.push(entry);
-        break;
-      }
-      case 'prop': {
-        const entry = (raw as { entry: PropEntry }).entry;
-        assertProp(entry);
-        const i = out.props.findIndex((p) => p.name === entry.name);
-        if (i >= 0) out.props[i] = entry;
-        else out.props.push(entry);
-        break;
-      }
-      case 'promise': {
-        const entry = (raw as { entry: PromiseEntry }).entry;
-        assertPromise(entry);
-        const i = out.promises.findIndex((p) => p.id === entry.id);
-        if (i >= 0) out.promises[i] = entry;
-        else out.promises.push(entry);
-        break;
-      }
-      case 'knowledge': {
-        const entry = (raw as { entry: KnowledgeEntry }).entry;
-        assertKnowledge(entry);
-        const i = out.knowledge.findIndex((k) => k.character === entry.character);
-        if (i >= 0) out.knowledge[i] = entry;
-        else out.knowledge.push(entry);
-        break;
-      }
-      case 'doNotReexplain': {
-        const fact = (raw as { fact: unknown }).fact;
-        if (typeof fact !== 'string' || fact.trim() === '') throw new Error('doNotReexplain 需要非空 fact');
-        if (!out.doNotReexplain.includes(fact)) out.doNotReexplain.push(fact);
-        break;
-      }
-      case 'protect': {
-        const item = (raw as { item: unknown }).item;
-        const reason = (raw as { reason?: unknown }).reason;
-        if (typeof item !== 'string' || item.trim() === '') throw new Error('protect 需要非空 item');
-        if (!out.protect.some((p) => p.item === item)) {
-          out.protect.push({ item, ...(typeof reason === 'string' && reason.trim() !== '' ? { reason } : {}) });
+  try {
+    if (!Array.isArray(ops)) throw new Error('ops 必须是数组');
+    for (const raw of ops) {
+      const op = raw as { op?: unknown };
+      if (typeof op.op !== 'string') throw new Error(`ledger 操作缺 op: ${JSON.stringify(raw)}`);
+      switch (op.op) {
+        case 'clock': {
+          const entry = (raw as { entry: ClockRow }).entry;
+          assertClockRow(entry);
+          const i = out.clock.findIndex((r) => sameStringArray(r.chapters, entry.chapters));
+          if (i >= 0) out.clock[i] = entry;
+          else out.clock.push(entry);
+          break;
         }
-        break;
+        case 'prop': {
+          const entry = (raw as { entry: PropEntry }).entry;
+          assertProp(entry);
+          const i = out.props.findIndex((p) => p.name === entry.name);
+          if (i >= 0) out.props[i] = entry;
+          else out.props.push(entry);
+          break;
+        }
+        case 'promise': {
+          const entry = (raw as { entry: PromiseEntry }).entry;
+          assertPromise(entry);
+          const i = out.promises.findIndex((p) => p.id === entry.id);
+          if (i >= 0) out.promises[i] = entry;
+          else out.promises.push(entry);
+          break;
+        }
+        case 'knowledge': {
+          const entry = (raw as { entry: KnowledgeEntry }).entry;
+          assertKnowledge(entry);
+          const i = out.knowledge.findIndex((k) => k.character === entry.character);
+          if (i >= 0) out.knowledge[i] = entry;
+          else out.knowledge.push(entry);
+          break;
+        }
+        case 'doNotReexplain': {
+          const fact = (raw as { fact: unknown }).fact;
+          if (typeof fact !== 'string' || fact.trim() === '') throw new Error('doNotReexplain 需要非空 fact');
+          if (!out.doNotReexplain.includes(fact)) out.doNotReexplain.push(fact);
+          break;
+        }
+        case 'protect': {
+          const item = (raw as { item: unknown }).item;
+          const reason = (raw as { reason?: unknown }).reason;
+          if (typeof item !== 'string' || item.trim() === '') throw new Error('protect 需要非空 item');
+          if (!out.protect.some((p) => p.item === item)) {
+            out.protect.push({ item, ...(typeof reason === 'string' && reason.trim() !== '' ? { reason } : {}) });
+          }
+          break;
+        }
+        case 'tripwire': {
+          const item = (raw as { item: unknown }).item;
+          if (typeof item !== 'string' || item.trim() === '') throw new Error('tripwire 需要非空 item');
+          if (!out.tripwires.includes(item)) out.tripwires.push(item);
+          break;
+        }
+        case 'remove': {
+          const d = (raw as { dimension?: unknown }).dimension;
+          if (typeof d !== 'string') throw new Error('remove 缺少 dimension');
+          switch (d) {
+            case 'clock': {
+              const chapters = (raw as { chapters?: unknown }).chapters;
+              if (!Array.isArray(chapters) || chapters.length === 0 || !chapters.every((c) => typeof c === 'string')) {
+                throw new Error('remove clock 需要非空 chapters 字符串数组');
+              }
+              const keys = chapters as string[];
+              out.clock = out.clock.filter((r) => !sameStringArray(r.chapters, keys));
+              break;
+            }
+            case 'prop': {
+              const name = (raw as { name?: unknown }).name;
+              if (typeof name !== 'string' || name.trim() === '') throw new Error('remove prop 需要非空 name');
+              out.props = out.props.filter((p) => p.name !== name);
+              break;
+            }
+            case 'promise': {
+              const id = (raw as { id?: unknown }).id;
+              if (typeof id !== 'string' || id.trim() === '') throw new Error('remove promise 需要非空 id');
+              out.promises = out.promises.filter((p) => p.id !== id);
+              break;
+            }
+            case 'knowledge': {
+              const character = (raw as { character?: unknown }).character;
+              if (typeof character !== 'string' || character.trim() === '') throw new Error('remove knowledge 需要非空 character');
+              out.knowledge = out.knowledge.filter((k) => k.character !== character);
+              break;
+            }
+            case 'doNotReexplain': {
+              const item = (raw as { item?: unknown }).item;
+              if (typeof item !== 'string' || item.trim() === '') throw new Error('remove doNotReexplain 需要非空 item');
+              out.doNotReexplain = out.doNotReexplain.filter((x) => x !== item);
+              break;
+            }
+            case 'protect': {
+              const item = (raw as { item?: unknown }).item;
+              if (typeof item !== 'string' || item.trim() === '') throw new Error('remove protect 需要非空 item');
+              out.protect = out.protect.filter((p) => p.item !== item);
+              break;
+            }
+            case 'tripwire': {
+              const item = (raw as { item?: unknown }).item;
+              if (typeof item !== 'string' || item.trim() === '') throw new Error('remove tripwire 需要非空 item');
+              out.tripwires = out.tripwires.filter((x) => x !== item);
+              break;
+            }
+            default:
+              throw new Error(`未知 remove 维度: ${String(d)}`);
+          }
+          break;
+        }
+        default:
+          throw new Error(`未知 ledger 操作: ${String(op.op)}`);
       }
-      case 'tripwire': {
-        const item = (raw as { item: unknown }).item;
-        if (typeof item !== 'string' || item.trim() === '') throw new Error('tripwire 需要非空 item');
-        if (!out.tripwires.includes(item)) out.tripwires.push(item);
-        break;
-      }
-      default:
-        throw new Error(`未知 ledger 操作: ${String(op.op)}`);
     }
+  } catch (err) {
+    // 校验错误统一包装成 tools.ts 守卫风格（如「ledger_upsert 的 ops 不合法: …」）
+    throw new Error(`ledger_upsert 的 ops 不合法: ${err instanceof Error ? err.message : String(err)}`);
   }
   return out;
 }
@@ -350,11 +423,20 @@ export function renderLedgerMarkdown(ledger: Ledger): string {
   ].join('\n') + '\n';
 }
 
+/** 账本 frontmatter 的已知键；其余键视为未知字段（人工增补/未来新字段）透传保留。 */
+const LEDGER_KNOWN_KEYS = ['clock', 'props', 'promises', 'knowledge', 'doNotReexplain', 'protect', 'tripwires'];
+
 /** 把解析出的 YAML 原始对象规范化为 Ledger（容错：缺失字段补默认值）。 */
 function normalizeLedger(raw: unknown): Ledger {
   const base = emptyLedger();
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return base;
   const r = raw as Record<string, unknown>;
+  // 未知字段透传：非已知键原样保留（不解析不校验，仅透传），serialize 时写回；与已知字段冲突时已知字段优先
+  const extra: Record<string, unknown> = {};
+  for (const k of Object.keys(r)) {
+    if (!LEDGER_KNOWN_KEYS.includes(k)) extra[k] = r[k];
+  }
+  if (Object.keys(extra).length > 0) base.extra = extra;
   const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
   const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() !== '' ? v : undefined);
   const strArr = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.trim() !== '') : []);
@@ -458,9 +540,21 @@ function normalizeLedger(raw: unknown): Ledger {
   return base;
 }
 
-/** 账本序列化为完整文件内容（YAML frontmatter + 渲染正文）。 */
+/** 账本序列化为完整文件内容（YAML frontmatter + 渲染正文）；未知字段（extra）原样写回，与已知字段冲突时已知字段优先。 */
 export function serializeLedger(ledger: Ledger): string {
-  const yaml = stringifyYaml(ledger, { lineWidth: 0 });
+  const yaml = stringifyYaml(
+    {
+      ...(ledger.extra ?? {}), // 未知字段先展开，已知字段后覆盖 → 冲突时已知字段优先
+      clock: ledger.clock,
+      props: ledger.props,
+      promises: ledger.promises,
+      knowledge: ledger.knowledge,
+      doNotReexplain: ledger.doNotReexplain,
+      protect: ledger.protect,
+      tripwires: ledger.tripwires,
+    },
+    { lineWidth: 0 },
+  );
   return `---\n${yaml}---\n\n${renderLedgerMarkdown(ledger)}`;
 }
 
@@ -579,14 +673,42 @@ export function writeLedger(workDir: string, ledger: Ledger, ledgerPath?: string
   return { ok: true, path: rel, bytes };
 }
 
-/** 读 → 应用 ops → 写；返回更新后账本 + 写结果。账本损坏时拒绝写入（不覆盖）。 */
+/** 读文件当前状态（存在性 + mtimeMs + 内容摘要），供 upsert 的写前复核；文件不存在返回 exists=false。 */
+function ledgerFileState(abs: string): { exists: boolean; mtimeMs: number; content: string } {
+  try {
+    const st = fs.statSync(abs);
+    return { exists: true, mtimeMs: st.mtimeMs, content: fs.readFileSync(abs, 'utf8') };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { exists: false, mtimeMs: 0, content: '' };
+    throw err;
+  }
+}
+
+/** 写前复核：文件状态与读时一致才放行；被其他进程改动（存在性/mtimeMs/内容摘要任一变化）则抛错且不写入。 */
+function assertLedgerUnchanged(abs: string, before: { exists: boolean; mtimeMs: number; content: string }): void {
+  const now = ledgerFileState(abs);
+  if (now.exists !== before.exists || now.mtimeMs !== before.mtimeMs || now.content !== before.content) {
+    throw new Error('账本已被其他进程修改，请重读后再试');
+  }
+}
+
+/**
+ * 读 → 应用 ops → 写；返回更新后账本 + 写结果。账本损坏时拒绝写入（不覆盖）。
+ * 轻量并发备注（不做锁）：读旧账本时记录其 mtimeMs/内容摘要，写前复核发现文件已被其他进程改动
+ * 则抛「账本已被其他进程修改，请重读后再试」且不写入（read-modify-write 无 CAS 的兜底）。
+ */
 export function upsertLedger(
   workDir: string,
   ops: LedgerOp[],
   ledgerPath?: string,
 ): { ledger: Ledger; path: string; bytes: number } {
-  const { ledger, path } = readLedger(workDir, ledgerPath);
+  const wd = assertWorkDir(workDir);
+  const rel = ledgerPath || DEFAULT_LEDGER_PATH;
+  const abs = ledgerAbs(wd, rel);
+  const before = ledgerFileState(abs);
+  const { ledger, path } = readLedger(workDir, rel);
   const next = applyOps(ledger, ops);
+  assertLedgerUnchanged(abs, before);
   const { bytes } = writeLedger(workDir, next, path);
   return { ledger: next, path, bytes };
 }
@@ -802,13 +924,13 @@ export interface WorkDiagnostics {
   findings: LedgerFinding[];
   /** 是否存在 BLOCKER 级发现（确定性诊断 BLOCKER + 问题日志 BLOCKER 计数），供暂存区入口标红提示；不做硬拦截。 */
   hasBlockers: boolean;
-  /** 问题日志（issues.md，CR 格式）里按 `| BLOCKER |` 统计的条数；未提供 issueLogPath 或日志缺失时为 0。 */
+  /** 问题日志（issues.md，CR 格式）里 severity 列为 BLOCKER 的条数；未提供 issueLogPath 或日志缺失时为 0。 */
   blockerCount: number;
 }
 
 /**
  * 对 workDir 跑全量确定性诊断：账本级（悬空/逾期/双位）+ 章级（章首跳变/季节冲突），
- * 并把问题日志（issues.md，CR 格式）的 BLOCKER 计数折叠进 hasBlockers——
+ * 并把问题日志（issues.md，CR 格式）的 BLOCKER 计数（severity 列判定）折叠进 hasBlockers——
  * 冷读产出的 BLOCKER 条目由本函数统一汇总，接进「暂存区入口标红提示」出口。
  */
 export function diagnosticsForWork(workDir: string, ledgerPath?: string, issueLogPath?: string): WorkDiagnostics {
@@ -870,11 +992,15 @@ export function diagnosticsForWork(workDir: string, ledgerPath?: string, issueLo
 
 // ---------- BLOCKER 清零提示出口 ----------
 
-/** 解析 issue 日志里的 BLOCKER 条数（行内含 "| BLOCKER |" 即计一条）。 */
+/**
+ * 解析 issue 日志（CR 格式：`|` 分隔列）里 BLOCKER 条数：只看第 3 个字段（severity 列）恰为 BLOCKER 的行。
+ * 不按行内任意位置的 "| BLOCKER |" 子串匹配——quote/why 字段含同样片段会多计。
+ */
 export function countBlockers(issueLogContent: string): { blockers: number; hasBlockers: boolean } {
   let n = 0;
   for (const line of issueLogContent.split(/\r?\n/)) {
-    if (/\|\s*BLOCKER\s*\|/.test(line)) n += 1;
+    const fields = line.split('|').map((f) => f.trim());
+    if (fields.length >= 3 && fields[2] === 'BLOCKER') n += 1;
   }
   return { blockers: n, hasBlockers: n > 0 };
 }

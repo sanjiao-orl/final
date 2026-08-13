@@ -238,4 +238,23 @@ describe('scanWork 书级指标', () => {
     const res = scanWork(work);
     expect(res.chapters.map((c) => c.title)).toEqual(['少年', '第二章']);
   });
+
+  it('12 章（阿拉伯编号）时按编号序而非字典序：连续章判定顺序正确', () => {
+    const work = makeWorkDir();
+    const files: Record<string, string> = {};
+    for (let i = 1; i <= 12; i++) {
+      // 每章同场景「密室」：连续 12 章 → 违规，chapters 必须按 第1章..第12章 阅读序
+      files[`manuscript/卷一/第${i}章.md`] = `### 密室\n\n第${i}章正文。`;
+    }
+    writeTree(work, files);
+    const res = scanWork(work);
+    // 字典序会把 第10/11/12章 排到 第1章 前；compareNames 重排后 chapters 输出也按编号序
+    expect(res.chapters.map((c) => c.relPath)).toEqual(
+      Array.from({ length: 12 }, (_, i) => `manuscript/卷一/第${i + 1}章.md`),
+    );
+    expect(res.book.sceneContinuity).toHaveLength(1);
+    expect(res.book.sceneContinuity[0]!.chapters).toEqual(
+      Array.from({ length: 12 }, (_, i) => `manuscript/卷一/第${i + 1}章.md`),
+    );
+  });
 });

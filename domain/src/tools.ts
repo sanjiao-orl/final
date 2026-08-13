@@ -74,8 +74,8 @@ const H1_RE = /^#(?!#)[ \t]+(.+)$/;
  * 匹配即“带编号”；不匹配的旧文件/旧目录保持原名不动。
  * 新名/重编号一律输出阿拉伯数字编号（第1章·少年 样式）。
  */
-const CHAPTER_NAME_RE = /^第(\d+|[一二三四五六七八九十百]+)章[·.、\s]*(.*)$/;
-const VOLUME_NAME_RE = /^第(\d+|[一二三四五六七八九十百]+)卷[·.、\s]*(.*)$/;
+export const CHAPTER_NAME_RE = /^第(\d+|[一二三四五六七八九十百]+)章[·.、\s]*(.*)$/;
+export const VOLUME_NAME_RE = /^第(\d+|[一二三四五六七八九十百]+)卷[·.、\s]*(.*)$/;
 
 const CN_DIGIT: Record<string, number> = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
 
@@ -103,9 +103,9 @@ function numOf(s: string): number {
 /**
  * 章/卷文件名比较：编号感知（汉字/阿拉伯编号按数值排，第一章 < 第二章），
  * 未匹配编号模式的名字按字典序兜底。注意：纯字典序会把 三(U+4E09) 排在 二(U+4E8C) 前，
- * 顺序真相必须按编号数值，否则结构树/重排会乱序。
+ * 顺序真相必须按编号数值，否则结构树/重排会乱序。scan_quality 的书级连续章判定也复用此比较器。
  */
-function compareNames(a: string, b: string, re: RegExp): number {
+export function compareNames(a: string, b: string, re: RegExp): number {
   const ma = re.exec(a);
   const mb = re.exec(b);
   if (ma && mb) {

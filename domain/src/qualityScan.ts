@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { frontmatterEnd, parseFrontmatter } from './frontmatter.js';
 import { assertWorkDir, collectMdFiles, toPosix } from './fsutil.js';
+import { CHAPTER_NAME_RE, VOLUME_NAME_RE, compareNames } from './tools.js';
 
 export type Severity = 'pass' | 'warn' | 'fail' | 'info';
 
@@ -88,6 +89,8 @@ export const PARA_FAIL = 300;
 /** 高频词：同词 >5 次/章 = 异常（writing-novel 阶段三清单）；novel-improver 重复形容词标准 ≤3。 */
 export const NGRAM_FAIL = 6;
 export const NGRAM_WARN = 4;
+/** 高频词候选阈值：同词 ≥3 次/章进入候选（novel-improver 重复形容词 ≤3 口径；候选≠判决，供人工复核）。 */
+export const NGRAM_CANDIDATE = 3;
 /** 场景轮换池建议 ≥5 个（writing-novel 场景多样性）。 */
 export const SCENE_POOL_MIN = 5;
 /** 同一场景连续出现 ≤3 章（writing-novel/piqie 场景多样性）。 */
@@ -387,7 +390,7 @@ export function isFilteredNgram(ng: string): boolean {
 
 /**
  * 高频词：CJK 双字/三字 n-gram 词频（无分词器的确定性近似）。
- * >5 次/章 = 异常（writing-novel 阶段三清单）；3–5 次为候选（novel-improver 重复形容词 ≤3）。
+ * 口径统一（NGRAM_CANDIDATE）：同词 ≥3 次/章进入候选；≥4 次（NGRAM_WARN）警告；>5 次（NGRAM_FAIL）异常。
  * 人名/称谓/功能词碎片先经 isFilteredNgram 过滤（WS-7 顺手改良），其余仍为候选而非判决。
  */
 function metricHighFreq(lines: BodyLine[]): Metric {
@@ -406,7 +409,7 @@ function metricHighFreq(lines: BodyLine[]): Metric {
     freq.set(trigram, (freq.get(trigram) ?? 0) + 1);
   }
   const flagged = [...freq.entries()]
-    .filter(([ng, n]) => n >= 3 && !isFilteredNgram(ng))
+    .filter(([ng, n]) => n >= NGRAM_CANDIDATE && !isFilteredNgram(ng))
     .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
     .slice(0, 15);
   let worst = 0;
@@ -418,17 +421,19 @@ function metricHighFreq(lines: BodyLine[]): Metric {
       more += 1;
       continue;
     }
+    // n-gram 由「跨行去标点拼接的 CJK 流」生成，可能不存在于任何单行 → 跳过该 hit，不产生 line:0
     const hitLine = lines.find((l) => !HEADING_RE.test(l.text.trim()) && l.text.includes(ng));
+    if (!hitLine) continue;
     hits.push({
-      line: hitLine?.line ?? 0,
-      text: `${ng} ×${n}：${hitLine ? hitLine.text.slice(0, EXCERPT_LEN) : ''}`,
+      line: hitLine.line,
+      text: `${ng} ×${n}：${hitLine.text.slice(0, EXCERPT_LEN)}`,
     });
   }
   const severity: Severity = worst >= NGRAM_FAIL ? 'fail' : worst >= NGRAM_WARN ? 'warn' : 'pass';
   return {
     key: 'highFreq',
     label: '高频词（n-gram 候选）',
-    standard: `同词 >${NGRAM_FAIL - 1} 次/章 = 异常；≥${NGRAM_WARN} 次为候选（人名/称谓/功能词碎片已过滤）`,
+    standard: `同词 ≥${NGRAM_CANDIDATE} 次/章为候选；≥${NGRAM_WARN} 次警告；>${NGRAM_FAIL - 1} 次异常（人名/称谓/功能词碎片已过滤）`,
     count: flagged.length,
     severity,
     hits,
@@ -586,14 +591,36 @@ function computeBook(raws: RawChapter[]): BookScan {
 }
 
 /**
+ * 章文件阅读序：按路径段逐段编号感知比较（卷段用 VOLUME_NAME_RE、文件名用 CHAPTER_NAME_RE，
+ * 复用 tools.ts 的 compareNames）。collectMdFiles 的字典序在 >9 章阿拉伯编号或汉字编号时错序，
+ * sceneContinuity/templateParagraphs 的「连续章」判定必须按真实阅读顺序。
+ */
+function compareChapterFiles(a: string, b: string): number {
+  const sa = a.split(path.sep);
+  const sb = b.split(path.sep);
+  const len = Math.max(sa.length, sb.length);
+  for (let i = 0; i < len; i++) {
+    const pa = sa[i];
+    const pb = sb[i];
+    if (pa === undefined) return -1;
+    if (pb === undefined) return 1;
+    if (pa === pb) continue;
+    const c = compareNames(pa, pb, i === len - 1 ? CHAPTER_NAME_RE : VOLUME_NAME_RE);
+    if (c !== 0) return c;
+  }
+  return 0;
+}
+
+/**
  * scanWork：扫描 workDir/manuscript 下全部章（逐章读文件，只读不写）。
  * 输出逐章指标 + 书级指标。manuscript 不存在或为空时返回空结果。
  */
 export function scanWork(workDir: string): WorkScanResult {
   const wd = assertWorkDir(workDir);
   const files = collectMdFiles(path.join(wd, 'manuscript'));
+  // scan 前按编号感知阅读序重排章列表（字典序会在 >9 章/汉字编号时错序，见 compareChapterFiles）
   const raws: RawChapter[] = [];
-  for (const f of files) {
+  for (const f of [...files].sort((a, b) => compareChapterFiles(a.rel, b.rel))) {
     let content: string;
     try {
       content = fs.readFileSync(f.abs, 'utf8');
