@@ -45,6 +45,7 @@ node core/scripts/e2e.mjs   # 真实 LLM e2e(key 在场才跑)
   脚本 `scripts/release.mjs` 会同步 `shell/src-tauri/tauri.conf.json`、`shell/package.json`、`shell/src-tauri/Cargo.toml` 三处版本号 → 带签名私钥跑 `npx tauri build --ci` → 收集 NSIS/MSI 与 `.sig` → 生成 `latest.json` → `gh release create/upload` 上传资产。
 - 签名密钥在仓外 `%USERPROFILE%\.tauri\novel-ws.key`(本仓为空密码;pubkey 已写入 tauri.conf.json,私钥绝不入库)。可用 `TAURI_SIGNING_PRIVATE_KEY_PATH` 覆盖路径,或 `TAURI_SIGNING_PRIVATE_KEY` 直接给密钥内容;密码用 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。
 - 发布后需手动提交版本号变更并打 tag:`git add shell/src-tauri/tauri.conf.json shell/package.json shell/src-tauri/Cargo.toml shell/src-tauri/Cargo.lock && git commit -m "chore: bump vX.Y.Z" && git tag vX.Y.Z && git push origin main vX.Y.Z`。
+- 发布记录:v0.1.0 首发(真实更新通道基线);v0.1.1 升级通道闭环验证(README 增补本行,无功能变更)。
 
 ## production 打包（sidecar 随安装包分发）
 

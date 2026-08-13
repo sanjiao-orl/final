@@ -7,7 +7,7 @@
 // 签名私钥：默认 <用户目录>/.tauri/novel-ws.key；可用 TAURI_SIGNING_PRIVATE_KEY_PATH 覆盖路径，
 // 或 TAURI_SIGNING_PRIVATE_KEY 直接给密钥内容；密码用 TAURI_SIGNING_PRIVATE_KEY_PASSWORD（本仓密钥为空密码）。
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -159,7 +159,10 @@ function ensureGh(repo) {
 
 function cleanBundles() {
   for (const dir of ['nsis', 'msi']) {
-    rmSync(path.join(bundleDir, dir), { recursive: true, force: true });
+    const p = path.join(bundleDir, dir);
+    rmSync(p, { recursive: true, force: true });
+    // Tauri bundler 复制产物时不会创建已删除的 bundle 子目录，这里立即补回。
+    mkdirSync(p, { recursive: true });
   }
 }
 
