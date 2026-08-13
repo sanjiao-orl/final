@@ -3,6 +3,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { streamText, type LanguageModel } from 'ai';
 import { z } from 'zod';
+import { getLlmTimeoutSeconds } from './config.js';
 import { EventPump } from './event-pump.js';
 import { writeJson } from './http.js';
 
@@ -49,6 +50,10 @@ export async function handleRewriteRequest(
   req.on('close', onClose);
   res.on('close', onClose);
 
+  // 服务端超时：provider 挂起时也强制中止，避免请求无限挂着（客户端断连信号仍优先）。
+  const timeoutSeconds = getLlmTimeoutSeconds();
+  const timeoutSignal = AbortSignal.timeout(timeoutSeconds * 1000);
+
   const pump = new EventPump(res);
   pump.start();
   try {
@@ -56,7 +61,7 @@ export async function handleRewriteRequest(
       model: deps.modelForTier('writing'),
       system: SYSTEM_PROMPT,
       prompt: `【原文】\n${original}\n\n【改写指令】\n${instruction || '（无）'}`,
-      abortSignal: abort.signal,
+      abortSignal: AbortSignal.any([abort.signal, timeoutSignal]),
     });
 
     let text = '';
@@ -70,6 +75,11 @@ export async function handleRewriteRequest(
     }
 
     if (abort.signal.aborted) {
+      pump.end();
+      return;
+    }
+    if (timeoutSignal.aborted) {
+      pump.emit('error', { message: `LLM 请求超时（超过 ${timeoutSeconds} 秒）` });
       pump.end();
       return;
     }
@@ -90,6 +100,11 @@ export async function handleRewriteRequest(
     pump.end();
   } catch (err) {
     if (abort.signal.aborted) {
+      pump.end();
+      return;
+    }
+    if (timeoutSignal.aborted) {
+      pump.emit('error', { message: `LLM 请求超时（超过 ${timeoutSeconds} 秒）` });
       pump.end();
       return;
     }

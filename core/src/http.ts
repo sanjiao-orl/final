@@ -47,8 +47,8 @@ export function readJsonBody(req: IncomingMessage, limit = 1_000_000): Promise<u
     req.on('data', (chunk: Buffer) => {
       size += chunk.length;
       if (size > limit) {
+        // 只拒绝读取器：让路由能正常写出 413 JSON；此处不 destroy socket，否则响应发不出去。
         reject(new HttpError(413, '请求体过大'));
-        req.destroy();
         return;
       }
       chunks.push(chunk);

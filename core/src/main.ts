@@ -12,7 +12,7 @@ import {
   VERSION,
   type Tier,
 } from './config.js';
-import { connectDomainMcp } from './mcp.js';
+import { startDomainMcp } from './mcp.js';
 import { createAppServer } from './server.js';
 import { CandidateStore } from './candidate-store.js';
 import { SessionStore } from './session-store.js';
@@ -54,7 +54,8 @@ async function main(): Promise<void> {
   const dbPath = path.join(getNovelDir(), 'sessions.sqlite');
   const store = new SessionStore(dbPath);
   const candidates = new CandidateStore(dbPath); // 与 sessions 同库（FK 到 sessions）
-  const mcp = await connectDomainMcp(); // 连不上为 null（已 warn），聊天走无工具模式
+  const mcp = startDomainMcp(); // 连不上自动重连（已 warn）；重连期间工具代理回 503
+  await mcp.start();
 
   const token = randomUUID();
   const server = createAppServer({
@@ -65,7 +66,8 @@ async function main(): Promise<void> {
     chat: {
       store,
       modelForTier: (tier: Tier) => createModelForTier(llm, tier),
-      tools: mcp?.tools,
+      tools: mcp.tools,
+      toolsAvailable: () => mcp.isConnected(),
     },
     rewrite: {
       modelForTier: (tier: Tier) => createModelForTier(llm, tier),
@@ -101,7 +103,7 @@ async function main(): Promise<void> {
     console.log(`[core] 收到 ${reason}，优雅关闭`);
     if (orphanTimer) clearInterval(orphanTimer);
     try {
-      await mcp?.close();
+      await mcp.close();
     } catch {
       // 忽略关闭失败
     }

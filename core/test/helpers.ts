@@ -21,6 +21,7 @@ export interface TestServer {
 export async function startTestServer(overrides: {
   modelForTier?: ChatDeps['modelForTier'];
   tools?: ChatDeps['tools'];
+  toolsAvailable?: ChatDeps['toolsAvailable'];
 } = {}): Promise<TestServer> {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'novel-core-test-'));
   const dbPath = path.join(dir, 'sessions.sqlite');
@@ -36,6 +37,7 @@ export async function startTestServer(overrides: {
       }),
     tools: overrides.tools,
   };
+  if (overrides.toolsAvailable) chat.toolsAvailable = overrides.toolsAvailable;
   const server = createAppServer({
     token,
     store,

@@ -22,6 +22,9 @@ export interface LlmConfig {
   modelCheap: string;
 }
 
+/** LLM 服务端超时秒数缺省值：provider 挂起时请求最多挂这么久。 */
+export const DEFAULT_LLM_TIMEOUT_SECONDS = 120;
+
 /** 构造即校验：LLM_BASE_URL / LLM_API_KEY / LLM_MODEL 缺任一即抛错。 */
 export function loadLlmConfig(env: NodeJS.ProcessEnv = process.env): LlmConfig {
   const baseUrl = env.LLM_BASE_URL;
@@ -31,6 +34,17 @@ export function loadLlmConfig(env: NodeJS.ProcessEnv = process.env): LlmConfig {
     throw new Error('缺少 LLM 环境变量：需要 LLM_BASE_URL、LLM_API_KEY、LLM_MODEL（LLM_MODEL_CHEAP 可选）');
   }
   return { baseUrl, apiKey, model, modelCheap: env.LLM_MODEL_CHEAP || model };
+}
+
+/** LLM 服务端超时秒数：LLM_TIMEOUT_SECONDS 可覆盖，缺省 DEFAULT_LLM_TIMEOUT_SECONDS；取值必须为正数秒数。 */
+export function getLlmTimeoutSeconds(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.LLM_TIMEOUT_SECONDS;
+  if (!raw) return DEFAULT_LLM_TIMEOUT_SECONDS;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`LLM_TIMEOUT_SECONDS 取值非法: ${raw}（需为正数秒数）`);
+  }
+  return value;
 }
 
 /** 按档位创建模型：writing 用 LLM_MODEL，background 用 LLM_MODEL_CHEAP。 */

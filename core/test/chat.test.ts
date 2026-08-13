@@ -1,7 +1,7 @@
 // 测试：/v1/chat SSE 管道——mock 模型（ai/test 的 MockLanguageModelV3）驱动的事件序列、落库、工具多轮、断连中止。
 import { tool, type ToolSet } from 'ai';
 import { z } from 'zod';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { readSse, startTestServer, stepModel, textResult, toolCallResult, hangingModel } from './helpers.js';
 
 /** 与 domain 约定对齐的示例领域工具（透传语义，参数细节 core 不关心）。 */
@@ -144,6 +144,23 @@ describe('/v1/chat SSE 管道', () => {
       const sys = first.prompt.find((m) => m.role === 'system');
       expect(JSON.stringify(sys?.content)).toContain('C:\\\\works\\\\demo');
     } finally {
+      await s.close();
+    }
+  });
+
+  it('服务端超时：provider 挂起时 SSE 收到 error 且连接正常结束', async () => {
+    vi.stubEnv('LLM_TIMEOUT_SECONDS', '1');
+    let aborted = false;
+    const s = await startTestServer({ modelForTier: () => hangingModel(() => (aborted = true)) });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '超时测试' });
+      expect(res.status).toBe(200);
+      const events = await readSse(res);
+      expect(events.map((e) => e.event)).toEqual(['text-delta', 'error']);
+      expect(String(events.at(-1)?.data.message)).toContain('LLM 请求超时');
+      expect(aborted).toBe(true); // 服务端超时信号送达 provider，LLM 请求被中止
+    } finally {
+      vi.unstubAllEnvs();
       await s.close();
     }
   });

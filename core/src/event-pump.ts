@@ -14,7 +14,10 @@ export class EventPump {
     private readonly res: ServerResponse,
     /** 绑定的会话 id（/chat 有；/rewrite 等无状态流为 undefined）。 */
     readonly sessionId?: string,
-  ) {}
+  ) {
+    // 连接级 error 有监听即可避免进程崩溃；具体写失败由 writeFrame 的 Promise 捕获兜底。
+    this.res.on('error', () => {});
+  }
 
   /** 进入 SSE 响应（响应头 + 保活注释帧）。 */
   start(): void {
@@ -25,16 +28,14 @@ export class EventPump {
   emit(event: string, data: unknown): void {
     if (this.ended || this.res.destroyed || this.res.writableEnded) return;
     const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-    this.tail = this.tail.then(() => {
-      if (!this.res.destroyed && !this.res.writableEnded) this.res.write(frame);
-    });
+    this.enqueue(() => this.writeFrame(frame));
   }
 
   /** 结束流：排在已入队帧之后，保证 done/error 为流的最后一帧。 */
   end(): void {
     if (this.ended) return;
     this.ended = true;
-    this.tail = this.tail.then(() => {
+    this.enqueue(() => {
       if (!this.res.destroyed && !this.res.writableEnded) this.res.end();
     });
   }
@@ -42,5 +43,48 @@ export class EventPump {
   /** 等待已入队帧全部写完（测试与关闭路径用）。 */
   flush(): Promise<void> {
     return this.tail;
+  }
+
+  /** 把一步写入排到队尾；任一步失败只丢弃该步，后续帧/end 仍继续，避免流挂起。 */
+  private enqueue(task: () => void | Promise<void>): void {
+    this.tail = this.tail.then(task).catch(() => undefined);
+  }
+
+  /** 尊重 res.write 返回值：false 表示背压，等 drain 后再写下一帧；写失败 reject 交 enqueue 兜底。 */
+  private writeFrame(frame: string): Promise<void> {
+    if (this.res.destroyed || this.res.writableEnded) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const cleanup = (): void => {
+        this.res.off('error', onError);
+        this.res.off('close', onClose);
+        this.res.off('drain', onDrain);
+      };
+      const onError = (err: Error): void => {
+        cleanup();
+        reject(err);
+      };
+      const onClose = (): void => {
+        cleanup();
+        reject(new Error('SSE 连接已关闭'));
+      };
+      const onDrain = (): void => {
+        cleanup();
+        resolve();
+      };
+      this.res.once('error', onError);
+      this.res.once('close', onClose);
+      try {
+        const accepted = this.res.write(frame);
+        if (accepted) {
+          cleanup();
+          resolve();
+        } else {
+          this.res.once('drain', onDrain);
+        }
+      } catch (err) {
+        cleanup();
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
   }
 }

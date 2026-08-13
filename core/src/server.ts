@@ -1,6 +1,7 @@
 // 模块职责：本地 HTTP 服务——路由（协议版本化：全部业务路由在 /v1/ 前缀下，契约见 docs/decisions/0007）、
 // Bearer 鉴权（/v1/health、/v1/dev 豁免）、CORS；业务委托给 chat 管道与 session-store。
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { asSchema, type FlexibleSchema } from 'ai';
 import { z } from 'zod';
 import { handleChatRequest, type ChatDeps } from './chat.js';
 import { devPage } from './dev.js';
@@ -105,12 +106,20 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
   if (req.method === 'POST' && pathname.startsWith('/v1/tools/')) {
     const name = decodeURIComponent(pathname.slice('/v1/tools/'.length));
     if (!name || name.includes('/')) throw new HttpError(404, `工具名非法: ${name}`);
+    // MCP 重连期间无论工具对象是否残留，一律 503；连接恢复后缺工具才回 404。
+    if (deps.chat.toolsAvailable && !deps.chat.toolsAvailable()) {
+      throw new HttpError(503, `工具暂不可用: ${name}（domain MCP 重连中，请稍后重试）`);
+    }
     const tool = deps.chat.tools?.[name];
     if (!tool?.execute) {
       throw new HttpError(404, `工具不可用: ${name}（domain MCP 未连接或工具不存在）`);
     }
     const args = await readJsonBody(req);
-    const result: unknown = await tool.execute(args as never, {
+    const validated = await validateToolInput(tool, args);
+    if (!validated.ok) {
+      throw new HttpError(400, '请求体不合法: ' + validated.error);
+    }
+    const result: unknown = await tool.execute(validated.value as never, {
       toolCallId: 'http-proxy',
       messages: [],
       context: undefined,
@@ -137,6 +146,53 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
   }
 
   writeJson(res, 404, { error: `未找到: ${req.method} ${pathname}` });
+}
+
+type ToolInputValidation =
+  | { ok: true; value: unknown }
+  | { ok: false; error: string };
+
+/** 把 zod/AI SDK 校验错误格式化成与 chat/rewrite 一致的 issues 文本。 */
+function formatValidationIssues(error: unknown): string {
+  const issues = (error as { issues?: Array<{ message?: string }> } | undefined)?.issues;
+  return issues?.map((i) => i.message ?? '').join('; ') || '工具入参不合法';
+}
+
+/**
+ * /v1/tools/:name 代理前的入参校验：本地 zod 工具走 safeParse；
+ * MCP 工具的 JSON Schema 经 asSchema/z.fromJSONSchema 校验，不再把原始 body 直接塞给 execute。
+ */
+async function validateToolInput(
+  tool: { inputSchema?: unknown },
+  args: unknown
+): Promise<ToolInputValidation> {
+  const schema = tool.inputSchema;
+  if (!schema) return { ok: true, value: args };
+
+  // zod 3/4 都暴露 safeParse；本地领域工具经 ai tool() 注入时 inputSchema 即 ZodType。
+  const zodLike = schema as {
+    safeParse?: (value: unknown) => { success: boolean; data?: unknown; error?: unknown };
+  };
+  if (typeof zodLike.safeParse === 'function') {
+    const parsed = zodLike.safeParse(args);
+    if (parsed.success) return { ok: true, value: parsed.data ?? args };
+    return { ok: false, error: formatValidationIssues(parsed.error) };
+  }
+
+  try {
+    const aiSchema = asSchema(schema as FlexibleSchema<unknown>);
+    if (aiSchema.validate) {
+      const result = await aiSchema.validate(args);
+      if (result.success) return { ok: true, value: result.value };
+      return { ok: false, error: result.error.message };
+    }
+    const json = await aiSchema.jsonSchema;
+    const parsed = z.fromJSONSchema(json).safeParse(args);
+    if (parsed.success) return { ok: true, value: parsed.data ?? args };
+    return { ok: false, error: formatValidationIssues(parsed.error) };
+  } catch (err) {
+    return { ok: false, error: `工具入参 schema 校验失败: ${err instanceof Error ? err.message : String(err)}` };
+  }
 }
 
 /** /v1/candidates 路由：GET 列表（?status=&chapter=）、POST 新建、PATCH 状态/整改。 */

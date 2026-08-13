@@ -1,7 +1,8 @@
 // 测试：POST /v1/tools/:name —— core 对 domain MCP 工具的 HTTP 代理（壳的数据面）。
 // 覆盖：JSON 文本结果解析回对象、structuredContent 优先、isError → 502、工具缺失/未注入 → 404、非 JSON 文本原样返回。
 import { describe, expect, it } from 'vitest';
-import type { ToolSet } from 'ai';
+import { jsonSchema, tool, type ToolSet } from 'ai';
+import { z } from 'zod';
 import { startTestServer } from './helpers.js';
 
 function fakeTools(): ToolSet {
@@ -74,6 +75,18 @@ describe('POST /v1/tools/:name 工具代理', () => {
     }
   });
 
+  it('MCP 重连中（toolsAvailable=false）→ 503 而非 404 或执行工具', async () => {
+    const s = await startTestServer({ tools: fakeTools(), toolsAvailable: () => false });
+    try {
+      const res = await postTool(s.baseUrl, s.token, 'echo_json', {});
+      expect(res.status).toBe(503);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain('重连中');
+    } finally {
+      await s.close();
+    }
+  });
+
   it('工具不存在、无 execute、未注入 tools 三种情况都 404', async () => {
     const s = await startTestServer({ tools: fakeTools() });
     try {
@@ -87,6 +100,55 @@ describe('POST /v1/tools/:name 工具代理', () => {
       expect((await postTool(bare.baseUrl, bare.token, 'echo_json', {})).status).toBe(404);
     } finally {
       await bare.close();
+    }
+  });
+
+  it('带 inputSchema 的工具：坏入参 → 400，好入参照常执行', async () => {
+    const tools: ToolSet = {
+      count_words: tool({
+        description: '统计字数',
+        inputSchema: z.object({ relPath: z.string().min(1) }),
+        execute: async ({ relPath }) => ({ relPath, count: relPath.length }),
+      }),
+    };
+    const s = await startTestServer({ tools });
+    try {
+      const bad = await postTool(s.baseUrl, s.token, 'count_words', { relPath: 123 });
+      expect(bad.status).toBe(400);
+      const badBody = (await bad.json()) as { error: string };
+      expect(badBody.error).toContain('请求体不合法');
+
+      const good = await postTool(s.baseUrl, s.token, 'count_words', { relPath: 'ch01.md' });
+      expect(good.status).toBe(200);
+      expect(await good.json()).toEqual({ relPath: 'ch01.md', count: 7 });
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('MCP JSON Schema 入参也经代理前校验', async () => {
+    const tools: ToolSet = {
+      add_one: tool({
+        description: '数字加一',
+        inputSchema: jsonSchema<{ n: number }>({
+          type: 'object',
+          properties: { n: { type: 'number' } },
+          required: ['n'],
+        }),
+        execute: async ({ n }) => ({ n: n + 1 }),
+      }),
+    };
+    const s = await startTestServer({ tools });
+    try {
+      const bad = await postTool(s.baseUrl, s.token, 'add_one', { n: '不是数字' });
+      expect(bad.status).toBe(400);
+      expect(((await bad.json()) as { error: string }).error).toContain('请求体不合法');
+
+      const good = await postTool(s.baseUrl, s.token, 'add_one', { n: 1 });
+      expect(good.status).toBe(200);
+      expect(await good.json()).toEqual({ n: 2 });
+    } finally {
+      await s.close();
     }
   });
 

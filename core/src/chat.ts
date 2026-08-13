@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { stepCountIs, streamText, type LanguageModel, type ToolSet } from 'ai';
 import { z } from 'zod';
 import type { MessageRow, SessionRow, SessionStore } from './session-store.js';
+import { getLlmTimeoutSeconds } from './config.js';
 import { EventPump } from './event-pump.js';
 import { writeJson } from './http.js';
 
@@ -23,6 +24,8 @@ export interface ChatDeps {
   modelForTier: (tier: 'writing' | 'background') => LanguageModel;
   /** MCP 领域工具，连不上时为 undefined。 */
   tools: ToolSet | undefined;
+  /** MCP 当前是否可用；缺省视为可用（保持无 MCP 注入时的旧行为）。 */
+  toolsAvailable?: () => boolean;
 }
 
 const SYSTEM_PROMPT =
@@ -117,6 +120,10 @@ export async function handleChatRequest(
   req.on('close', onClose);
   res.on('close', onClose);
 
+  // 服务端超时：provider 挂起时也强制中止，避免请求无限挂着（客户端断连信号仍优先）。
+  const timeoutSeconds = getLlmTimeoutSeconds();
+  const timeoutSignal = AbortSignal.timeout(timeoutSeconds * 1000);
+
   const pump = new EventPump(res, sessionId);
   pump.start();
   try {
@@ -126,7 +133,7 @@ export async function handleChatRequest(
       system: systemPrompt(parsed.data.workDir),
       messages: buildReplayMessages(deps.store.listMessages(sessionId)),
       stopWhen: stepCountIs(MAX_STEPS),
-      abortSignal: abort.signal,
+      abortSignal: AbortSignal.any([abort.signal, timeoutSignal]),
     };
     if (deps.tools) options.tools = deps.tools;
     const result = streamText(options);
@@ -161,6 +168,11 @@ export async function handleChatRequest(
       pump.end();
       return;
     }
+    if (timeoutSignal.aborted) {
+      pump.emit('error', { message: `LLM 请求超时（超过 ${timeoutSeconds} 秒）` });
+      pump.end();
+      return;
+    }
 
     // done 前把完整 assistant 消息落库。
     const assistantMsg = deps.store.addMessage(sessionId, {
@@ -172,6 +184,11 @@ export async function handleChatRequest(
     pump.end();
   } catch (err) {
     if (abort.signal.aborted) {
+      pump.end();
+      return;
+    }
+    if (timeoutSignal.aborted) {
+      pump.emit('error', { message: `LLM 请求超时（超过 ${timeoutSeconds} 秒）` });
       pump.end();
       return;
     }

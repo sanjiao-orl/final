@@ -4,8 +4,10 @@ import { describe, expect, it } from 'vitest';
 import {
   assertNodeVersion,
   createModelForTier,
+  DEFAULT_LLM_TIMEOUT_SECONDS,
   getDomainMcpCommand,
   getGitCommit,
+  getLlmTimeoutSeconds,
   getNovelDir,
   getRuntimeFilePath,
   loadLlmConfig,
@@ -26,6 +28,14 @@ describe('config', () => {
     const config = loadLlmConfig({ LLM_BASE_URL: 'http://x', LLM_API_KEY: 'k', LLM_MODEL: 'm' });
     expect(config.modelCheap).toBe('m');
     expect(loadLlmConfig(FULL_ENV).modelCheap).toBe('m2');
+  });
+
+  it('LLM 超时秒数：默认 120s，可用 LLM_TIMEOUT_SECONDS 覆盖，非法取值抛错', () => {
+    expect(getLlmTimeoutSeconds({})).toBe(DEFAULT_LLM_TIMEOUT_SECONDS);
+    expect(getLlmTimeoutSeconds({ LLM_TIMEOUT_SECONDS: '30' })).toBe(30);
+    expect(getLlmTimeoutSeconds({ LLM_TIMEOUT_SECONDS: '0.1' })).toBe(0.1);
+    expect(() => getLlmTimeoutSeconds({ LLM_TIMEOUT_SECONDS: '0' })).toThrow(/LLM_TIMEOUT_SECONDS 取值非法/);
+    expect(() => getLlmTimeoutSeconds({ LLM_TIMEOUT_SECONDS: 'abc' })).toThrow(/LLM_TIMEOUT_SECONDS 取值非法/);
   });
 
   it('双档模型映射：writing 用 LLM_MODEL，background 用 LLM_MODEL_CHEAP', () => {

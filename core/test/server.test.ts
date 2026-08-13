@@ -90,6 +90,23 @@ describe('core HTTP 服务', () => {
     }
   });
 
+  it('请求体超限 → 413 JSON 响应，连接不重置', async () => {
+    const s = await startTestServer();
+    try {
+      const res = await fetch(`${s.baseUrl}/v1/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.token}` },
+        body: 'x'.repeat(1_000_001),
+      });
+      expect(res.status).toBe(413);
+      expect(res.headers.get('content-type')).toContain('application/json');
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain('请求体过大');
+    } finally {
+      await s.close();
+    }
+  });
+
   it('带 token 访问 /v1/sessions 与 /v1/sessions/:id', async () => {
     const s = await startTestServer();
     try {
