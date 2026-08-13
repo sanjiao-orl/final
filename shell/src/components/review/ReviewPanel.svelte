@@ -3,6 +3,7 @@
   // 形态对齐暂存全览：右侧固定全览覆盖层，Esc/× 关闭；BLOCKER 标红，关掉后顶栏徽标仍在。
   import { iconSvg } from '../../lib/icons.js';
   import { review, SCENE_POOL_MIN, type FindingSeverity, type ScanSeverity } from '../../lib/review.svelte.js';
+  import { work } from '../../lib/work.svelte.js';
 
   const SEV_LABEL: Record<FindingSeverity, string> = {
     BLOCKER: 'BLOCKER',
@@ -66,6 +67,16 @@
         {/if}
         <span class="pill scan" class:off={r.scanFail === 0}>指标超标 {r.scanFail}</span>
         <span class="pill scan-warn" class:off={r.scanWarn === 0}>指标临界 {r.scanWarn}</span>
+        {#if work.current}
+          <button
+            class="btn sm premium"
+            disabled={review.running}
+            onclick={() => void review.runPremium(work.current!.relPath)}
+            title="贵档审阅当前章（LLM 冷读，只注入单章，按章计费）"
+          >
+            {review.running ? '处理中…' : '贵档审阅当前章'}
+          </button>
+        {/if}
       </div>
 
       {#if r.clean}
@@ -109,17 +120,17 @@
 
       <!-- 逐章 -->
       {#each r.chapters as c (c.relPath)}
-        <div class="card" class:clean-ch={c.metrics.length === 0 && c.findings.length === 0}>
+        <div class="card" class:clean-ch={c.metrics.length === 0 && c.findings.length === 0 && c.premium.length === 0}>
           <div class="card-head">
             <span class="ch">{c.title}</span>
-            {#if c.findings.some((f) => f.severity === 'BLOCKER')}
+            {#if c.findings.some((f) => f.severity === 'BLOCKER') || c.premium.some((f) => f.severity === 'BLOCKER')}
               <span class="pill sev-BLOCKER">BLOCKER</span>
             {/if}
-            {#if c.metrics.length === 0 && c.findings.length === 0}
+            {#if c.metrics.length === 0 && c.findings.length === 0 && c.premium.length === 0}
               <span class="meta-note">干净</span>
             {/if}
           </div>
-          {#if c.metrics.length > 0 || c.findings.length > 0}
+          {#if c.metrics.length > 0 || c.findings.length > 0 || c.premium.length > 0}
             <div class="card-body">
               {#each c.findings as f (f.code + f.message)}
                 <div class="finding">
@@ -127,6 +138,18 @@
                   <span class="fmsg">{f.message}</span>
                 </div>
               {/each}
+              {#if c.premium.length > 0}
+                <div class="premium-head">贵档审阅</div>
+                {#each c.premium as f, i (`${f.severity}-${f.quote}-${i}`)}
+                  <div class="finding premium">
+                    <span class="pill sev-{f.severity}">{SEV_LABEL[f.severity]}</span>
+                    <span class="fmsg">
+                      <span class="quote">「{f.quote}」</span> {f.why}
+                      {#if f.suggestion}<span class="sug">建议：{f.suggestion}</span>{/if}
+                    </span>
+                  </div>
+                {/each}
+              {/if}
               {#each c.metrics as m (m.key)}
                 <div class="metric">
                   <span class="pill scan-{m.severity}">{SCAN_SEV_LABEL[m.severity]}</span>
@@ -143,7 +166,21 @@
         </div>
       {/each}
     {:else}
-      <div class="empty">尚无报告。点击右上角「重跑」开始扫描。</div>
+      <div class="empty">
+        尚无报告。点击右上角「重跑」开始扫描。
+        {#if work.current}
+          <div class="empty-actions">
+            <button
+              class="btn sm premium"
+              disabled={review.running}
+              onclick={() => void review.runPremium(work.current!.relPath)}
+              title="不跑便宜档，直接贵档审阅当前章（LLM 冷读，只注入单章，按章计费）"
+            >
+              {review.running ? '处理中…' : '贵档审阅当前章'}
+            </button>
+          </div>
+        {/if}
+      </div>
     {/if}
   </div>
 </div>
@@ -311,6 +348,31 @@
   .pill.scan-warn {
     color: var(--status-draft);
     border-color: color-mix(in srgb, var(--status-draft) 45%, var(--line));
+  }
+  .summary .btn.premium {
+    margin-left: 4px;
+  }
+  .empty-actions {
+    margin-top: 10px;
+  }
+  .premium-head {
+    margin-top: 2px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--status-draft);
+    letter-spacing: 0.05em;
+  }
+  .finding.premium .quote {
+    color: var(--ink);
+    background: color-mix(in srgb, var(--status-draft) 10%, transparent);
+    border-radius: 4px;
+    padding: 0 4px;
+  }
+  .finding.premium .sug {
+    display: block;
+    margin-left: 26px;
+    color: var(--muted);
+    font-size: 11px;
   }
   .card {
     border: 1px solid var(--line);

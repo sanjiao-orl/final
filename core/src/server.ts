@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { handleChatRequest, type ChatDeps } from './chat.js';
 import { devPage } from './dev.js';
 import { CORS_HEADERS, HttpError, readJsonBody, toPublicErrorMessage, writeJson } from './http.js';
+import { handleReviewRequest } from './review.js';
 import { handleRewriteRequest, type RewriteDeps } from './rewrite.js';
 import { PROTOCOL_VERSION } from './runtime.js';
 import type { CandidateStore, CandidateStatus } from './candidate-store.js';
@@ -133,6 +134,16 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
   if (req.method === 'POST' && pathname === '/v1/chat') {
     const body = await readJsonBody(req);
     await handleChatRequest(body, deps.chat, req, res);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/v1/review') {
+    const body = await readJsonBody(req);
+    await handleReviewRequest(body, {
+      modelForTier: deps.chat.modelForTier,
+      tools: deps.chat.tools,
+      ...(deps.chat.toolsAvailable ? { toolsAvailable: deps.chat.toolsAvailable } : {}),
+    }, req, res);
     return;
   }
 

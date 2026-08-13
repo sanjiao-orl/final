@@ -31,6 +31,14 @@ export interface RewriteStreamHandlers {
   onError?: (err: Error) => void;
 }
 
+/** POST /v1/review 的贵档审阅发现（契约镜像）。 */
+export interface ReviewFinding {
+  severity: 'BLOCKER' | 'MAJOR' | 'MODERATE';
+  quote: string;
+  why: string;
+  suggestion?: string;
+}
+
 export class CoreClient {
   constructor(
     private readonly baseUrl: string,
@@ -62,6 +70,15 @@ export class CoreClient {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(args),
+    });
+  }
+
+  /** 贵档冷读审阅当前章（一次性 JSON，非 SSE）。 */
+  review(workDir: string, chapterRelPath: string): Promise<{ findings: ReviewFinding[] }> {
+    return this.request(`${API_PREFIX}/review`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workDir, chapterRelPath }),
     });
   }
 

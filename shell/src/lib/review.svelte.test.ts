@@ -2,10 +2,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CoreClient } from './core.js';
 import {
+  applyPremiumFindings,
   buildReviewReport,
+  emptyReviewReport,
   isExceeded,
   ReviewStore,
   ISSUE_LOG_PATH,
+  type PremiumFinding,
   type WorkDiagnostics,
   type WorkScanResult,
 } from './review.svelte.js';
@@ -16,8 +19,8 @@ beforeEach(() => {
   work.notice = null;
 });
 
-function mockClient(callTool: ReturnType<typeof vi.fn>): CoreClient {
-  return { callTool } as unknown as CoreClient;
+function mockClient(callTool: ReturnType<typeof vi.fn>, review?: ReturnType<typeof vi.fn>): CoreClient {
+  return { callTool, review: review ?? vi.fn() } as unknown as CoreClient;
 }
 
 function scanFixture(): WorkScanResult {
@@ -129,6 +132,44 @@ describe('buildReviewReport', () => {
   });
 });
 
+describe('applyPremiumFindings', () => {
+  const premium: PremiumFinding[] = [
+    { severity: 'BLOCKER', quote: '他死了。', why: '与账本冲突' },
+    { severity: 'MAJOR', quote: '少年握拳。', why: '动作可更具体', suggestion: '补一句心理' },
+  ];
+
+  it('合并贵档发现进逐章行，并同步 counts/blockerTotal/hasBlockers/clean', () => {
+    const base = buildReviewReport(scanFixture(), diagFixture());
+    const r = applyPremiumFindings(base, new Map([['manuscript/卷一/第1章.md', premium]]));
+    expect(r.chapters[0]!.premium).toEqual(premium);
+    expect(r.counts.BLOCKER).toBe(1);
+    expect(r.counts.MAJOR).toBe(2);
+    expect(r.blockerTotal).toBe(1);
+    expect(r.hasBlockers).toBe(true);
+    expect(r.clean).toBe(false);
+  });
+
+  it('无确定性报告底座也能单独展示贵档章', () => {
+    const r = applyPremiumFindings(emptyReviewReport(), new Map([['manuscript/卷一/第1章.md', premium]]));
+    expect(r.chapters).toHaveLength(1);
+    expect(r.chapters[0]!.relPath).toBe('manuscript/卷一/第1章.md');
+    expect(r.chapters[0]!.premium).toEqual(premium);
+    expect(r.counts.BLOCKER).toBe(1);
+    expect(r.blockerTotal).toBe(1);
+    expect(r.hasBlockers).toBe(true);
+    expect(r.clean).toBe(false);
+  });
+
+  it('幂等：对同一报告重复 apply 不重复计数', () => {
+    const base = buildReviewReport(scanFixture(), diagFixture());
+    const map = new Map([['manuscript/卷一/第1章.md', premium]]);
+    const once = applyPremiumFindings(base, map);
+    const twice = applyPremiumFindings(once, map);
+    expect(twice.counts).toEqual(once.counts);
+    expect(twice.chapters[0]!.premium).toEqual(premium);
+  });
+});
+
 describe('ReviewStore', () => {
   it('run：并行调 scan_quality + ledger_diagnostics，产出报告与徽标', async () => {
     const callTool = vi.fn((name: string) =>
@@ -187,5 +228,67 @@ describe('ReviewStore', () => {
     resolveScan(scanFixture());
     await Promise.all([p1, p2]);
     expect(callTool).toHaveBeenCalledTimes(2); // scan + diag 各一次
+  });
+
+  it('runPremium：调 client.review 合并进报告，BLOCKER 计数上升', async () => {
+    const callTool = vi.fn((name: string) =>
+      Promise.resolve(name === 'scan_quality' ? scanFixture() : diagFixture()),
+    );
+    const review = vi.fn().mockResolvedValue({
+      findings: [{ severity: 'BLOCKER', quote: '他死了。', why: '与账本冲突' }],
+    });
+    const s = new ReviewStore();
+    s.init(mockClient(callTool, review), 'C:/works/demo');
+    await s.run();
+    const before = s.blockerTotal;
+
+    await s.runPremium('manuscript/卷一/第1章.md');
+    expect(review).toHaveBeenCalledWith('C:/works/demo', 'manuscript/卷一/第1章.md');
+    const row = s.report!.chapters.find((c) => c.relPath === 'manuscript/卷一/第1章.md')!;
+    expect(row.premium).toHaveLength(1);
+    expect(row.premium[0]!.severity).toBe('BLOCKER');
+    expect(s.blockerTotal).toBe(before + 1);
+    expect(s.running).toBe(false);
+  });
+
+  it('runPremium：不先跑便宜档也能单独展示贵档结果', async () => {
+    const premium: PremiumFinding[] = [
+      { severity: 'BLOCKER', quote: '他死了。', why: '与账本冲突' },
+      { severity: 'MODERATE', quote: '少年握拳。', why: '动作可更具体' },
+    ];
+    const review = vi.fn().mockResolvedValue({ findings: premium });
+    const s = new ReviewStore();
+    s.init(mockClient(vi.fn(), review), 'C:/works/demo');
+
+    await s.runPremium('manuscript/卷一/第1章.md');
+    expect(s.report).not.toBeNull();
+    expect(s.report!.chapters).toHaveLength(1);
+    expect(s.report!.chapters[0]!.relPath).toBe('manuscript/卷一/第1章.md');
+    expect(s.report!.chapters[0]!.premium).toEqual(premium);
+    expect(s.blockerTotal).toBe(1);
+    expect(s.running).toBe(false);
+  });
+
+  it('runPremium 失败：work.error 红条，report 不变', async () => {
+    const review = vi.fn().mockRejectedValue(new Error('模型输出非法 JSON'));
+    const s = new ReviewStore();
+    s.init(mockClient(vi.fn(), review), 'd');
+    await s.runPremium('manuscript/卷一/第1章.md');
+    expect(work.error).toContain('贵档审阅失败');
+    expect(work.error).toContain('模型输出非法 JSON');
+    expect(s.report).toBeNull();
+    expect(s.blockerTotal).toBe(0);
+    expect(s.running).toBe(false);
+  });
+
+  it('runPremium：无打开章时报错且不调 client.review', async () => {
+    const review = vi.fn();
+    const s = new ReviewStore();
+    s.init(mockClient(vi.fn(), review), 'd');
+    await s.runPremium('');
+    expect(review).not.toHaveBeenCalled();
+    expect(work.error).toContain('请先打开一个章节');
+    expect(s.report).toBeNull();
+    expect(s.running).toBe(false);
   });
 });

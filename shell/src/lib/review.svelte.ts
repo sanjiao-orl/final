@@ -5,7 +5,7 @@
  * 作者处理完重跑，徽标消失）。贵档 ledger_slice 不在此出口（后续单独做）。
  * 壳不 import domain：返回形状以 JSON 契约为准，这里镜像类型。
  */
-import type { CoreClient } from './core.js';
+import type { CoreClient, ReviewFinding } from './core.js';
 import { work } from './work.svelte.js';
 
 // ---------- domain 返回形状镜像（契约以 JSON 为准） ----------
@@ -57,6 +57,9 @@ export interface WorkScanResult {
 
 export type FindingSeverity = 'BLOCKER' | 'MAJOR' | 'MODERATE' | 'MINOR';
 
+/** 贵档冷读发现（core /v1/review 契约镜像）。 */
+export type PremiumFinding = ReviewFinding;
+
 export interface LedgerFinding {
   code: string;
   chapter?: string;
@@ -81,6 +84,8 @@ export interface ChapterReviewRow {
   title: string;
   metrics: ScanMetric[];
   findings: LedgerFinding[];
+  /** 贵档冷读发现（与确定性诊断分区展示）。 */
+  premium: PremiumFinding[];
 }
 
 export type SeverityCounts = Record<FindingSeverity, number>;
@@ -136,7 +141,7 @@ export function buildReviewReport(scan: WorkScanResult, diag: WorkDiagnostics): 
       if (m.severity === 'fail') scanFail += 1;
       else scanWarn += 1;
     }
-    return { relPath: c.relPath, title: c.title, metrics, findings: byChapter.get(c.relPath) ?? [] };
+    return { relPath: c.relPath, title: c.title, metrics, findings: byChapter.get(c.relPath) ?? [], premium: [] };
   });
   const book = scan.book ?? { scenePool: [], sceneContinuity: [], templateParagraphs: [] };
   const blockerTotal = counts.BLOCKER + (diag.blockerCount ?? 0);
@@ -160,6 +165,69 @@ export function buildReviewReport(scan: WorkScanResult, diag: WorkDiagnostics): 
   };
 }
 
+function chapterTitleFromRelPath(relPath: string): string {
+  return relPath.split(/[\\/]/).pop()?.replace(/\.md$/, '') ?? relPath;
+}
+
+function emptySeverityCounts(): SeverityCounts {
+  return { BLOCKER: 0, MAJOR: 0, MODERATE: 0, MINOR: 0 };
+}
+
+/** 空报告：仅用于「不先跑便宜档、直接贵档审阅当前章」的底座；clean 恒为 false，避免把单章结果当全书结论。 */
+export function emptyReviewReport(): ReviewReport {
+  return {
+    chapters: [],
+    bookFindings: [],
+    book: { scenePool: [], sceneContinuity: [], templateParagraphs: [] },
+    counts: emptySeverityCounts(),
+    scanFail: 0,
+    scanWarn: 0,
+    issueLogBlockers: 0,
+    blockerTotal: 0,
+    hasBlockers: false,
+    clean: false,
+    ranAt: Date.now(),
+  };
+}
+
+/**
+ * 把贵档发现按章合并进报告：确定性诊断计数 + 贵档计数一起进 counts/blockerTotal；
+ * 贵档章不在报告章列表时（未跑便宜档或结构树尚未包含）补一章行单独展示。
+ */
+export function applyPremiumFindings(
+  report: ReviewReport,
+  premiumByChapter: ReadonlyMap<string, PremiumFinding[]>,
+): ReviewReport {
+  const counts = emptySeverityCounts();
+  for (const f of report.bookFindings) counts[f.severity] = (counts[f.severity] ?? 0) + 1;
+
+  const remaining = new Map(premiumByChapter);
+  const chapters = report.chapters.map((c) => {
+    for (const f of c.findings) counts[f.severity] = (counts[f.severity] ?? 0) + 1;
+    const premium = remaining.get(c.relPath) ?? [];
+    for (const f of premium) counts[f.severity] = (counts[f.severity] ?? 0) + 1;
+    remaining.delete(c.relPath);
+    return { ...c, premium };
+  });
+
+  for (const [relPath, premium] of remaining) {
+    for (const f of premium) counts[f.severity] = (counts[f.severity] ?? 0) + 1;
+    chapters.push({ relPath, title: chapterTitleFromRelPath(relPath), metrics: [], findings: [], premium });
+  }
+
+  const hasPremium = chapters.some((c) => c.premium.length > 0);
+  const blockerTotal = counts.BLOCKER + (report.issueLogBlockers ?? 0);
+  return {
+    ...report,
+    chapters,
+    counts,
+    blockerTotal,
+    hasBlockers: report.hasBlockers || blockerTotal > 0,
+    clean: report.clean && !hasPremium,
+    ranAt: Date.now(),
+  };
+}
+
 // ---------- store ----------
 
 /** 问题日志约定路径（CR 格式 BLOCKER 计数；缺失时 domain 计 0，不报错）。 */
@@ -176,6 +244,8 @@ export class ReviewStore {
 
   private client!: CoreClient;
   private workDir = '';
+  /** 贵档发现按章缓存：重跑便宜档后仍合并保留。 */
+  private premium = new Map<string, PremiumFinding[]>();
 
   init(client: CoreClient, workDir: string): void {
     this.client = client;
@@ -208,9 +278,31 @@ export class ReviewStore {
           issueLogPath: ISSUE_LOG_PATH,
         }),
       ]);
-      this.report = buildReviewReport(scan, diag);
+      this.report = applyPremiumFindings(buildReviewReport(scan, diag), this.premium);
     } catch (err) {
       work.error = `审阅扫描失败：${err instanceof Error ? err.message : String(err)}`;
+    } finally {
+      this.running = false;
+    }
+  }
+
+  /**
+   * 贵档审阅当前章：调 core /v1/review（ledger_slice + main 档模型），把 findings 合并进报告。
+   * 允许不先跑便宜档：无确定性报告时用空报告底座单独展示贵档结果。
+   */
+  async runPremium(chapterRelPath: string): Promise<void> {
+    if (this.running) return;
+    if (!chapterRelPath) {
+      work.error = '请先打开一个章节';
+      return;
+    }
+    this.running = true;
+    try {
+      const { findings } = await this.client.review(this.workDir, chapterRelPath);
+      this.premium.set(chapterRelPath, findings);
+      this.report = applyPremiumFindings(this.report ?? emptyReviewReport(), this.premium);
+    } catch (err) {
+      work.error = `贵档审阅失败：${err instanceof Error ? err.message : String(err)}`;
     } finally {
       this.running = false;
     }
