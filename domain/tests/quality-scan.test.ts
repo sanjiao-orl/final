@@ -2,7 +2,7 @@
  * quality_scan.test.ts —— LAY 量化指标扫描器：单项指标口径、阈值判定、书级指标、空作品。
  */
 import { describe, expect, it } from 'vitest';
-import { scanChapter, scanWork } from '../src/qualityScan.js';
+import { isFilteredNgram, scanChapter, scanWork } from '../src/qualityScan.js';
 import { makeWorkDir, writeTree } from './helpers.js';
 
 function metricOf(content: string, key: string, relPath = '', title = '') {
@@ -130,6 +130,33 @@ describe('高频词（n-gram 候选）', () => {
 
   it('无重复词通过', () => {
     expect(metricOf('山高水远路长人稀。', 'highFreq').severity).toBe('pass');
+  });
+});
+
+describe('高频词误报过滤（人名/停用词）', () => {
+  it('人名/称谓/功能词碎片被过滤', () => {
+    expect(isFilteredNgram('林渡')).toBe(true); // 人名（姓氏锚定）
+    expect(isFilteredNgram('师父')).toBe(true); // 称谓
+    expect(isFilteredNgram('的茶')).toBe(true); // 功能词碎片
+  });
+
+  it('真词癖/有意义词不被过滤', () => {
+    expect(isFilteredNgram('作响')).toBe(false);
+    expect(isFilteredNgram('像是')).toBe(false);
+    expect(isFilteredNgram('十六年')).toBe(false);
+    expect(isFilteredNgram('铜钱')).toBe(false);
+  });
+
+  it('高频词候选不再包含人名', () => {
+    const body = '林渡看着林渡，林渡转身，林渡沉默，林渡离开，林渡回头，林渡不见。';
+    const m = metricOf(body, 'highFreq');
+    expect(m.hits.some((h) => h.text.startsWith('林渡'))).toBe(false);
+  });
+
+  it('真词癖仍被高频词候选保留', () => {
+    const body = '风声作响，水声作响，木门作响，帘子作响。';
+    const m = metricOf(body, 'highFreq');
+    expect(m.hits.some((h) => h.text.startsWith('作响'))).toBe(true);
   });
 });
 

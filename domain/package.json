@@ -8,6 +8,7 @@
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
     "scan": "tsx scripts/scan-report.ts",
+    "ledger": "tsx scripts/ledger-report.ts",
     "check": "tsc --noEmit -p .",
     "test": "vitest run"
   },

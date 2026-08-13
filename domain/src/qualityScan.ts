@@ -347,10 +347,48 @@ function metricAiFiller(lines: BodyLine[]): Metric {
   };
 }
 
+// ---------- 高频词误报过滤（WS-7 顺手改良：人名/停用词） ----------
+
+/** 常见姓氏（百家姓子集，人名锚定用，T2 R5 思路的自研子集）。 */
+const SURNAME_CHARS = new Set(
+  '赵钱孙李周吴郑王冯陈褚卫蒋沈韩杨朱秦尤许何吕施张孔曹严华金魏陶姜戚谢邹喻柏水窦章云苏潘葛奚范彭郎鲁韦昌马苗凤花方俞任袁柳酆鲍史唐费廉岑薛雷贺倪汤滕殷罗毕郝邬安常乐于时傅皮卞齐康伍余元卜顾孟平黄和穆萧尹姚邵湛汪祁毛禹狄米贝明臧计伏成戴谈宋茅庞熊纪舒屈项祝董梁杜阮蓝闵席季麻强贾路娄危江童颜郭梅盛林刁钟徐邱骆高夏蔡田樊胡凌霍虞万支柯昝管卢莫经房裘缪干解应宗丁宣贲邓郁单杭洪包诸左石崔吉钮龚程嵇邢滑裴陆荣翁荀羊於惠甄曲家封芮羿储靳汲邴糜松井段富巫乌焦巴弓牧隗山谷车侯宓蓬全郗班仰秋仲伊宫宁仇栾暴甘钭厉戎祖武符刘景詹束龙叶幸司韶郜黎蓟薄印宿白怀蒲邰从鄂索咸籍赖卓蔺屠蒙池乔阴郁胥能苍双闻莘党翟谭贡劳逄姬申扶堵冉宰郦雍郤璩桑桂濮牛寿通边扈燕冀郏浦尚农温别庄晏柴瞿阎充慕连茹习宦艾鱼容向古易慎戈廖庾终暨居衡步都耿满弘匡国文寇广禄阙东欧殳沃利蔚越夔隆师巩厍聂晁勾敖融冷訾辛阚那简饶空曾毋沙乜养鞠须丰巢关蒯相查后荆红游竺权逯盖益桓公'.split(''),
+);
+
+/** 常见称谓/敬称（结构性重复，非词癖）。 */
+const TITLE_WORDS = new Set([
+  '师父', '师傅', '先生', '小姐', '少爷', '夫人', '老爷', '大人', '公子', '姑娘',
+  '掌门', '长老', '师兄', '师姐', '师弟', '师妹', '前辈', '阁下', '殿下',
+]);
+
+/** 语气助词/虚词（n-gram 含此类字多为「的+名词」类功能词碎片，非内容重复）。 */
+const GLUE_CHARS = new Set('的了着得地吗呢吧啊之乎者也'.split(''));
+
+/**
+ * 判定一个 CJK n-gram 是否应被高频词候选过滤（人名/称谓/功能词碎片）。
+ * 仅过滤确定性高的结构重复，保留真正的词癖（作响/像是/十六年 等）。
+ *
+ * 已知误伤面（诚实标注，非缺陷修复项）：
+ * - 姓氏锚定只认单字姓，复姓（司马/欧阳/上官/诸葛…）人名不会命中，仍会进候选；
+ * - 凡以常见姓氏字开头的普通内容词（夏天/白天/黄沙/钟声/长江…）会被误当人名过滤，
+ *   即使高频重复也不再进候选——这是「无分词器 + 无实体库」的确定性近似代价。
+ *   此类结构性词由冷读（账本 PROTECT/do-not-re-explain）兜底判定，扫描器不承担最终裁决。
+ */
+export function isFilteredNgram(ng: string): boolean {
+  if (TITLE_WORDS.has(ng)) return true;
+  // 人名锚定：2–3 字、首字为姓氏、其余字不是虚词/姓氏（避免「的茶」「了之」误判）
+  if (ng.length >= 2 && ng.length <= 3 && SURNAME_CHARS.has(ng[0]!)) {
+    const rest = [...ng.slice(1)];
+    if (rest.every((c) => !GLUE_CHARS.has(c) && !SURNAME_CHARS.has(c))) return true;
+  }
+  // 功能词碎片：含虚词（的/了/着/得/地…）
+  if ([...ng].some((c) => GLUE_CHARS.has(c))) return true;
+  return false;
+}
+
 /**
  * 高频词：CJK 双字/三字 n-gram 词频（无分词器的确定性近似）。
  * >5 次/章 = 异常（writing-novel 阶段三清单）；3–5 次为候选（novel-improver 重复形容词 ≤3）。
- * 输出为候选清单而非判决——是否“异常”由人确认。
+ * 人名/称谓/功能词碎片先经 isFilteredNgram 过滤（WS-7 顺手改良），其余仍为候选而非判决。
  */
 function metricHighFreq(lines: BodyLine[]): Metric {
   // 去掉标题行后取纯 CJK 序列
@@ -368,7 +406,7 @@ function metricHighFreq(lines: BodyLine[]): Metric {
     freq.set(trigram, (freq.get(trigram) ?? 0) + 1);
   }
   const flagged = [...freq.entries()]
-    .filter(([, n]) => n >= 3)
+    .filter(([ng, n]) => n >= 3 && !isFilteredNgram(ng))
     .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
     .slice(0, 15);
   let worst = 0;
@@ -390,7 +428,7 @@ function metricHighFreq(lines: BodyLine[]): Metric {
   return {
     key: 'highFreq',
     label: '高频词（n-gram 候选）',
-    standard: `同词 >${NGRAM_FAIL - 1} 次/章 = 异常；≥${NGRAM_WARN} 次为候选（无分词器近似）`,
+    standard: `同词 >${NGRAM_FAIL - 1} 次/章 = 异常；≥${NGRAM_WARN} 次为候选（人名/称谓/功能词碎片已过滤）`,
     count: flagged.length,
     severity,
     hits,
