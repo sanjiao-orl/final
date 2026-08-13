@@ -9,6 +9,7 @@
   import { candidates } from './lib/candidates.svelte.js';
   import { settings } from './lib/settings.svelte.js';
   import { snapshot } from './lib/snapshot.svelte.js';
+  import { review } from './lib/review.svelte.js';
   import { ui } from './lib/ui.svelte.js';
   import { mdToHtml } from './lib/markdown.js';
   import { approval } from './lib/approval.svelte.js';
@@ -21,6 +22,7 @@
   import AiPanel from './components/ai/AiPanel.svelte';
   import ApprovalCard from './components/approval/ApprovalCard.svelte';
   import SnapshotToast from './components/SnapshotToast.svelte';
+  import ReviewPanel from './components/review/ReviewPanel.svelte';
   import DialogHost from './components/DialogHost.svelte';
 
   let booted = $state(false);
@@ -33,6 +35,7 @@
       chat.init(client);
       candidates.init(client);
       snapshot.init(client, workDir);
+      review.init(client, workDir);
       await work.loadStructure();
       await chat.setScope(''); // 默认无归属讨论
       await candidates.load();
@@ -139,6 +142,9 @@
     </div>
 
     <ApprovalCard />
+    {#if review.open}
+      <ReviewPanel />
+    {/if}
     <SnapshotToast />
     <DialogHost />
   </div>

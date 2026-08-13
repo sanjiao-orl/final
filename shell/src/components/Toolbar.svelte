@@ -5,6 +5,7 @@
   import { settings } from '../lib/settings.svelte.js';
   import { snapshot } from '../lib/snapshot.svelte.js';
   import { dialog } from '../lib/dialog.svelte.js';
+  import { review } from '../lib/review.svelte.js';
   import { ui } from '../lib/ui.svelte.js';
   import { work } from '../lib/work.svelte.js';
 
@@ -72,6 +73,10 @@
 
   <button class="tb-mode" title="当前审批模式(B6) — 点击打开设置栏" onclick={() => ui.toggleCol('settings')}>
     <i class="dot"></i>{settings.approvalMode} 模式
+  </button>
+  <button class="tb-btn" class:on={review.open} disabled={review.running} onclick={() => void review.toggle()} title="审阅：全书去AI味扫描 + 账本确定性诊断（零 LLM 成本）；BLOCKER 未清零时徽标常显">
+    {@html iconSvg('search', 15)}
+    {review.running ? '扫描中…' : '审阅'}{#if review.blockerTotal > 0}<i class="tb-badge danger" title="BLOCKER 未清零">{review.blockerTotal}</i>{/if}
   </button>
   <button class="tb-btn" class:on={candidates.drawerOpen} onclick={() => candidates.toggleDrawer()} title="暂存区：AI 产出候选，批量采纳/整改/丢弃">
     {@html iconSvg('drawer', 15)}
@@ -199,6 +204,9 @@
     font-size: 10.5px;
     line-height: 16px;
     text-align: center;
+  }
+  .tb-badge.danger {
+    background: var(--danger);
   }
   .tb-mode {
     display: flex;

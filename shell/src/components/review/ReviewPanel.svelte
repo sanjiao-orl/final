@@ -1,0 +1,396 @@
+<script lang="ts">
+  // 审阅报告（WS-17 壳内审阅出口）：全书 scan_quality + 账本确定性诊断的逐章报告。
+  // 形态对齐暂存全览：右侧固定全览覆盖层，Esc/× 关闭；BLOCKER 标红，关掉后顶栏徽标仍在。
+  import { iconSvg } from '../../lib/icons.js';
+  import { review, SCENE_POOL_MIN, type FindingSeverity, type ScanSeverity } from '../../lib/review.svelte.js';
+
+  const SEV_LABEL: Record<FindingSeverity, string> = {
+    BLOCKER: 'BLOCKER',
+    MAJOR: 'MAJOR',
+    MODERATE: 'MODERATE',
+    MINOR: 'MINOR',
+  };
+  const SCAN_SEV_LABEL: Record<ScanSeverity, string> = {
+    fail: '超标',
+    warn: '临界',
+    pass: '达标',
+    info: '参考',
+  };
+
+  function chapterBase(relPath: string): string {
+    return relPath.split(/[\\/]/).pop()?.replace(/\.md$/, '') ?? relPath;
+  }
+
+  function timeOf(ts: number): string {
+    const d = new Date(ts);
+    const p = (n: number) => String(n).padStart(2, '0');
+    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
+
+  function onKeydown(e: KeyboardEvent): void {
+    if (e.key === 'Escape') review.close();
+  }
+</script>
+
+<svelte:window onkeydown={onKeydown} />
+
+<div class="overview" role="dialog" aria-modal="true" aria-label="审阅报告">
+  <div class="head">
+    <span class="title">
+      审阅报告{#if review.blockerTotal > 0}<i class="n danger">{review.blockerTotal}</i>{/if}
+    </span>
+    {#if review.report}
+      <span class="hint">扫于 {timeOf(review.report.ranAt)} · 确定性检查（零 LLM 成本）</span>
+    {:else}
+      <span class="hint">全书扫描 + 账本诊断 · 确定性检查（零 LLM 成本）</span>
+    {/if}
+    <div class="actions">
+      {#if review.running}<span class="busy">扫描中…</span>{/if}
+      <button class="btn sm" disabled={review.running} onclick={() => void review.run()} title="重跑全书扫描与账本诊断（处理完问题后重跑，BLOCKER 清零徽标即消失）">重跑</button>
+      <button class="icon-btn" onclick={() => review.close()} aria-label="关闭审阅报告">{@html iconSvg('close', 14, 2)}</button>
+    </div>
+  </div>
+
+  <div class="body">
+    {#if review.running && !review.report}
+      <div class="empty">正在扫描全书与账本…</div>
+    {:else if review.report}
+      {@const r = review.report}
+
+      <div class="summary">
+        <span class="pill sev-BLOCKER" class:off={r.counts.BLOCKER === 0}>BLOCKER {r.counts.BLOCKER}</span>
+        <span class="pill sev-MAJOR" class:off={r.counts.MAJOR === 0}>MAJOR {r.counts.MAJOR}</span>
+        <span class="pill sev-MODERATE" class:off={r.counts.MODERATE === 0}>MODERATE {r.counts.MODERATE}</span>
+        {#if r.issueLogBlockers > 0}
+          <span class="pill sev-BLOCKER" title="问题日志（CR 格式）里的 BLOCKER 条数">日志 BLOCKER {r.issueLogBlockers}</span>
+        {/if}
+        <span class="pill scan" class:off={r.scanFail === 0}>指标超标 {r.scanFail}</span>
+        <span class="pill scan-warn" class:off={r.scanWarn === 0}>指标临界 {r.scanWarn}</span>
+      </div>
+
+      {#if r.clean}
+        <div class="empty clean">
+          干净 ✓ —— 无超标扫描指标、无账本诊断条目、无书级违规。
+        </div>
+      {/if}
+
+      <!-- 书级：场景轮换池 / 连续同场景 / 跨章模板段落 / 账本级诊断 -->
+      <div class="card">
+        <div class="card-head">
+          <span class="ch">书级指标</span>
+          <span class="meta-note" class:warn={r.book.scenePool.length < SCENE_POOL_MIN}>
+            场景轮换池 {r.book.scenePool.length} 个{#if r.book.scenePool.length < SCENE_POOL_MIN}（建议 ≥{SCENE_POOL_MIN}）{/if}
+          </span>
+        </div>
+        <div class="card-body">
+          {#each r.bookFindings as f (f.code + f.message)}
+            <div class="finding">
+              <span class="pill sev-{f.severity}">{SEV_LABEL[f.severity]}</span>
+              <span class="fmsg">{f.message}</span>
+            </div>
+          {/each}
+          {#each r.book.sceneContinuity as v (v.scene)}
+            <div class="finding">
+              <span class="pill sev-MAJOR">连续同场景</span>
+              <span class="fmsg">「{v.scene}」连续出现 {v.chapters.length} 章：{v.chapters.map(chapterBase).join('、')}</span>
+            </div>
+          {/each}
+          {#each r.book.templateParagraphs as t (t.opening)}
+            <div class="finding">
+              <span class="pill sev-MAJOR">模板段落</span>
+              <span class="fmsg">「{t.opening}…」跨章重复：{t.chapters.map(chapterBase).join('、')}</span>
+            </div>
+          {/each}
+          {#if r.bookFindings.length === 0 && r.book.sceneContinuity.length === 0 && r.book.templateParagraphs.length === 0}
+            <div class="ok-line">书级无违规。</div>
+          {/if}
+        </div>
+      </div>
+
+      <!-- 逐章 -->
+      {#each r.chapters as c (c.relPath)}
+        <div class="card" class:clean-ch={c.metrics.length === 0 && c.findings.length === 0}>
+          <div class="card-head">
+            <span class="ch">{c.title}</span>
+            {#if c.findings.some((f) => f.severity === 'BLOCKER')}
+              <span class="pill sev-BLOCKER">BLOCKER</span>
+            {/if}
+            {#if c.metrics.length === 0 && c.findings.length === 0}
+              <span class="meta-note">干净</span>
+            {/if}
+          </div>
+          {#if c.metrics.length > 0 || c.findings.length > 0}
+            <div class="card-body">
+              {#each c.findings as f (f.code + f.message)}
+                <div class="finding">
+                  <span class="pill sev-{f.severity}">{SEV_LABEL[f.severity]}</span>
+                  <span class="fmsg">{f.message}</span>
+                </div>
+              {/each}
+              {#each c.metrics as m (m.key)}
+                <div class="metric">
+                  <span class="pill scan-{m.severity}">{SCAN_SEV_LABEL[m.severity]}</span>
+                  <span class="mlabel">{m.label} <b>{m.count}</b></span>
+                  <span class="mstd">{m.standard}</span>
+                </div>
+                {#each m.hits.slice(0, 3) as h (h.line)}
+                  <div class="hit">L{h.line} · {h.text}</div>
+                {/each}
+                {#if m.more}<div class="hit">…另有 {m.more} 条命中</div>{/if}
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {/each}
+    {:else}
+      <div class="empty">尚无报告。点击右上角「重跑」开始扫描。</div>
+    {/if}
+  </div>
+</div>
+
+<style>
+  .overview {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(760px, calc(100vw - var(--tree-w) - var(--rail-w) - 80px));
+    z-index: 90;
+    display: flex;
+    flex-direction: column;
+    background: var(--panel);
+    border-left: 1px solid var(--line);
+    box-shadow: var(--shadow-pop);
+    font-family: var(--ui-font);
+  }
+  .head {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 14px;
+    height: 46px;
+    border-bottom: 1px solid var(--line);
+    user-select: none;
+  }
+  .title {
+    font-size: 13px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .title .n {
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    color: #fff;
+    font-size: 10.5px;
+    line-height: 18px;
+    text-align: center;
+  }
+  .title .n.danger {
+    background: var(--danger);
+  }
+  .hint {
+    font-size: 11px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .actions {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .busy {
+    color: var(--accent);
+    font-size: 12px;
+  }
+  .btn {
+    height: 26px;
+    padding: 0 10px;
+    font-size: 12px;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+    transition: all var(--t-hover);
+    white-space: nowrap;
+  }
+  .btn:hover:not(:disabled) {
+    background: var(--paper);
+  }
+  .btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  .icon-btn {
+    width: 26px;
+    height: 26px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 5px;
+    color: var(--muted);
+    transition: background var(--t-hover), color var(--t-hover);
+  }
+  .icon-btn:hover {
+    background: color-mix(in srgb, var(--muted) 12%, transparent);
+    color: var(--ink);
+  }
+  .body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .empty {
+    border: 1px dashed color-mix(in srgb, var(--muted) 40%, var(--line));
+    border-radius: 8px;
+    padding: 30px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.9;
+  }
+  .empty.clean {
+    border-color: color-mix(in srgb, var(--ok) 45%, var(--line));
+    color: var(--ok);
+  }
+  .summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .pill {
+    flex: none;
+    height: 18px;
+    padding: 0 7px;
+    border-radius: 9px;
+    font-size: 10.5px;
+    line-height: 18px;
+    border: 1px solid var(--line);
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .pill.off {
+    opacity: 0.45;
+  }
+  .pill.sev-BLOCKER {
+    background: var(--danger);
+    border-color: var(--danger);
+    color: #fff;
+    font-weight: 600;
+  }
+  .pill.sev-BLOCKER.off {
+    background: transparent;
+    color: var(--muted);
+    border-color: var(--line);
+    font-weight: 400;
+  }
+  .pill.sev-MAJOR {
+    color: var(--status-draft);
+    border-color: color-mix(in srgb, var(--status-draft) 45%, var(--line));
+  }
+  .pill.sev-MAJOR:not(.off) {
+    background: var(--warn-bg);
+  }
+  .pill.sev-MODERATE,
+  .pill.sev-MINOR {
+    color: var(--muted);
+  }
+  .pill.scan,
+  .pill.scan-fail {
+    color: var(--danger);
+    border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+  }
+  .pill.scan-warn {
+    color: var(--status-draft);
+    border-color: color-mix(in srgb, var(--status-draft) 45%, var(--line));
+  }
+  .card {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--panel);
+  }
+  .card.clean-ch {
+    opacity: 0.72;
+  }
+  .card-head {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--line);
+    font-size: 11.5px;
+    color: var(--muted);
+  }
+  .card.clean-ch .card-head {
+    border-bottom: none;
+  }
+  .ch {
+    font-family: var(--body-font);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ink);
+    letter-spacing: 0.04em;
+  }
+  .meta-note {
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .meta-note.warn {
+    color: var(--status-draft);
+  }
+  .card-body {
+    padding: 8px 12px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .finding {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 12px;
+    line-height: 1.7;
+  }
+  .fmsg {
+    color: var(--ink);
+    word-break: break-word;
+  }
+  .ok-line {
+    font-size: 12px;
+    color: var(--ok);
+  }
+  .metric {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 12px;
+    line-height: 1.7;
+  }
+  .mlabel {
+    color: var(--ink);
+  }
+  .mlabel b {
+    font-variant-numeric: tabular-nums;
+  }
+  .mstd {
+    color: var(--muted);
+    font-size: 11px;
+  }
+  .hit {
+    margin-left: 26px;
+    font-size: 11px;
+    color: var(--muted);
+    font-family: var(--body-font);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+</style>
