@@ -210,9 +210,16 @@ export interface ReadChapterResult {
   body: string;
 }
 
-/** read_chapter：读取 workDir 内任意文件原文并解析 frontmatter；文件缺失抛错。 */
+/** read_chapter：读取 manuscript/ 内的 .md 章文件原文并解析 frontmatter；文件缺失抛错。
+ *  例外放开 .novel/trash/ 内的 .md（软删副本），供「拒绝 AI 删章」补偿找回原文用。 */
 export function readChapter(workDir: string, relPath: string): ReadChapterResult {
-  const abs = resolveInside(workDir, relPath);
+  const abs = resolveInside(workDir, relPath); // 越界在此抛错
+  const posix = toPosix(path.relative(assertWorkDir(workDir), abs));
+  const isChapter = posix.startsWith('manuscript/');
+  const isTrashCopy = posix.startsWith('.novel/trash/');
+  if ((!isChapter && !isTrashCopy) || !posix.toLowerCase().endsWith('.md')) {
+    throw new Error(`read_chapter 只允许 manuscript/ 或 .novel/trash/ 内的 .md 文件: ${relPath}`);
+  }
   const content = fs.readFileSync(abs, 'utf8');
   const fmEnd = frontmatterEnd(content);
   return {
@@ -223,17 +230,21 @@ export function readChapter(workDir: string, relPath: string): ReadChapterResult
   };
 }
 
-/** write_chapter：仅允许 .md 后缀，原子写（tmp + rename），父目录自动创建。
+/** write_chapter：仅允许 manuscript/ 内的 .md 文件，原子写（tmp + rename），父目录自动创建。
  *  覆盖已存在且内容有变化的文件前，先把旧内容滚动快照进 .novel/history/（安全阀）。 */
 export function writeChapter(
   workDir: string,
   relPath: string,
   content: string,
 ): { ok: true; bytes: number } {
+  const abs = resolveInside(workDir, relPath); // 越界在此抛错
+  const posix = toPosix(path.relative(assertWorkDir(workDir), abs));
+  if (!posix.startsWith('manuscript/')) {
+    throw new Error(`write_chapter 只允许 manuscript/ 内的 .md 文件: ${relPath}`);
+  }
   if (!relPath.toLowerCase().endsWith('.md')) {
     throw new Error(`write_chapter 只允许 .md 文件: ${relPath}`);
   }
-  const abs = resolveInside(workDir, relPath);
   snapshotBeforeWrite(workDir, relPath, abs, content);
   return atomicWrite(abs, content);
 }

@@ -55,7 +55,7 @@ describe('core HTTP 服务', () => {
     }
   });
 
-  it('/v1/dev 免鉴权返回内嵌联调页，且带 /v1/chat 与 token 占位', async () => {
+  it('/v1/dev 免鉴权返回内嵌联调页，不内嵌 token 且提供 token 输入框', async () => {
     const s = await startTestServer();
     try {
       const res = await fetch(`${s.baseUrl}/v1/dev`);
@@ -63,7 +63,10 @@ describe('core HTTP 服务', () => {
       const html = await res.text();
       expect(html).toContain('novel core /v1/dev');
       expect(html).toContain('/v1/chat');
-      expect(html).toContain(s.token);
+      expect(html).not.toContain(s.token);
+      // 页面改为让开发者粘贴 token 并 localStorage 记忆，不再自动内嵌
+      expect(html).toContain('id="token"');
+      expect(html).toContain("localStorage.getItem('devToken')");
       // 回归：新会话 sessionId 为 null 时不得下发该字段（服务端 optional 不接受 null）
       expect(html).not.toContain('JSON.stringify({ sessionId: state.sessionId, text: text })');
       expect(html).toContain('state.sessionId ? { sessionId: state.sessionId, text: text } : { text: text }');

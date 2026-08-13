@@ -1,6 +1,6 @@
 // 模块职责：GET /v1/dev 的内嵌联调页（无外部资源）：会话选择/新建、消息列表、输入框，用 fetch POST /v1/chat + ReadableStream 手工解析 SSE。
-// token 由服务端直接内嵌（页面本身免鉴权、仅本地服务），供浏览器裸联调用。
-export function devPage(token: string, version: string): string {
+// 页面本身免鉴权、仅本地服务；token 不再由服务端内嵌，由开发者粘贴到页面输入框（localStorage 记忆），浏览器裸联时据此带 Bearer 头。
+export function devPage(version: string): string {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -17,6 +17,7 @@ export function devPage(token: string, version: string): string {
   header h1 { font-size:15px; margin:0; font-weight:600; }
   header .meta { font-size:12px; color:var(--muted); }
   header .meta.on { color:var(--ok); }
+  #token { flex:0 1 280px; border:1px solid var(--line); border-radius:8px; padding:6px 8px; font:inherit; font-size:12px; }
   main { flex:1; display:flex; min-height:0; }
   aside { width:260px; border-right:1px solid var(--line); background:var(--panel); overflow-y:auto; }
   aside .new { display:block; width:100%; padding:10px 12px; border:none; border-bottom:1px solid var(--line);
@@ -45,6 +46,7 @@ export function devPage(token: string, version: string): string {
 <header>
   <h1>novel core /v1/dev</h1>
   <span class="meta">协议 v1 · core __VERSION__</span>
+  <input id="token" type="password" placeholder="粘贴 Bearer token（localStorage 记忆）" autocomplete="off">
   <span class="meta" id="status">连接中…</span>
 </header>
 <main>
@@ -58,10 +60,16 @@ export function devPage(token: string, version: string): string {
   </section>
 </main>
 <script>
-var TOKEN = '__TOKEN__';
+var TOKEN = localStorage.getItem('devToken') || '';
 var WORKDIR = new URLSearchParams(window.location.search).get('workDir') || null;
 var state = { sessionId: null, streaming: false, toolLines: {} };
 var $ = function (id) { return document.getElementById(id); };
+
+if (TOKEN) $('token').value = TOKEN;
+$('token').addEventListener('input', function () {
+  TOKEN = $('token').value.trim();
+  try { localStorage.setItem('devToken', TOKEN); } catch (e) { /* 隐私模式等场景下忽略 */ }
+});
 
 function setStatus(text, on) {
   var el = $('status');
@@ -251,5 +259,5 @@ loadSessions();
 </script>
 </body>
 </html>
-`.replace('__TOKEN__', token).replace('__VERSION__', version);
+`.replace('__VERSION__', version);
 }

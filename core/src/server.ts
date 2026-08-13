@@ -65,7 +65,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
   }
   if (req.method === 'GET' && pathname === '/v1/dev') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...CORS_HEADERS });
-    res.end(devPage(deps.token, deps.version));
+    res.end(devPage(deps.version));
     return;
   }
 

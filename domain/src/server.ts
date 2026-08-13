@@ -51,7 +51,7 @@ server.registerTool(
   {
     title: '读取一章',
     description:
-      '读取 workDir 内 relPath 指向的文件，返回原文 content（含 frontmatter）与解析出的 frontmatter。relPath 必须解析后仍在 workDir 内。',
+      '读取 workDir/manuscript/ 内的 .md 章文件，返回原文 content（含 frontmatter）与解析出的 frontmatter。relPath 必须解析后仍在 workDir 内且位于 manuscript/ 下；唯一例外是 .novel/trash/ 内的 .md 软删副本（供找回被删章节）。',
     inputSchema: {
       workDir: z.string().describe('作品文件夹的绝对路径'),
       relPath: z.string().describe('相对 workDir 的文件路径，如 manuscript/卷一/第一章.md'),
@@ -65,10 +65,10 @@ server.registerTool(
   {
     title: '原子写入一章',
     description:
-      '把 content 原子写入 workDir 内 relPath（同目录临时文件+rename），父目录自动创建；只允许 .md 后缀。返回 { ok, bytes }。',
+      '把 content 原子写入 workDir/manuscript/ 内的 relPath（同目录临时文件+rename），父目录自动创建；只允许 .md 后缀。返回 { ok, bytes }。',
     inputSchema: {
       workDir: z.string().describe('作品文件夹的绝对路径'),
-      relPath: z.string().describe('相对 workDir 的目标路径，必须以 .md 结尾'),
+      relPath: z.string().describe('相对 workDir 的目标路径，必须位于 manuscript/ 下且以 .md 结尾'),
       content: z.string().describe('章文件完整内容（可含 frontmatter）'),
     },
   },

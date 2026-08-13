@@ -31,6 +31,34 @@ describe('路径守卫', () => {
     expect(fs.existsSync(outside)).toBe(false); // 越界写入必须未发生
   });
 
+  it('read_chapter 拒绝 manuscript/ 外的路径（含 .novel 内部与根目录 .md）', () => {
+    const work = makeWorkDir();
+    writeTree(work, {
+      'manuscript/第一章.md': '正文',
+      'notes.md': '根目录笔记',
+      '.novel/sessions.sqlite': '内部状态',
+    });
+    for (const rel of ['notes.md', 'manuscript/../notes.md', '.novel/sessions.sqlite', 'manuscript/笔记.txt', '.novel/history/第一章.md']) {
+      expect(() => readChapter(work, rel), rel).toThrow(/manuscript|trash/);
+    }
+    expect(readChapter(work, 'manuscript/第一章.md').content).toBe('正文');
+  });
+
+  it('read_chapter 放开 .novel/trash/ 内的 .md 软删副本（拒绝删章补偿找回用）', () => {
+    const work = makeWorkDir();
+    writeTree(work, { '.novel/trash/第一章.md': '被删正文' });
+    expect(readChapter(work, '.novel/trash/第一章.md').content).toBe('被删正文');
+    expect(() => readChapter(work, '.novel/trash/notes.txt')).toThrow(/manuscript|trash/);
+  });
+
+  it('write_chapter 拒绝 manuscript/ 外的路径且不会落盘', () => {
+    const work = makeWorkDir();
+    for (const rel of ['notes.md', 'manuscript/../notes.md', '.novel/history/第一章.md']) {
+      expect(() => writeChapter(work, rel, 'x'), rel).toThrow(/manuscript/);
+      expect(fs.existsSync(path.join(work, rel))).toBe(false);
+    }
+  });
+
   it('word_count 的 relPath 同样受守卫约束', () => {
     const work = makeWorkDir();
     expect(() => wordCount(work, '../外部.md')).toThrow(/越界|绝对路径/);
