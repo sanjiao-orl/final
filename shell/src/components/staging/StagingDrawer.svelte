@@ -1,14 +1,17 @@
 <script lang="ts">
   // 暂存抽屉（≤40% 高）：AI 产出候选批量勾选——采纳（落进正文）/整改（按新要求重改）/丢弃。
   // B4：采纳前自动快照（write_chapter 安全阀）+ 采纳 toast 一键还原；B8：采纳留痕（instruction 展示）。
+  // 缺陷修复：改写生成过程在此实时流式显示（generating 卡，30–50ms 批次）；「全览」弹出全部候选视图。
   import { iconSvg } from '../../lib/icons.js';
   import { candidates } from '../../lib/candidates.svelte.js';
   import { settings } from '../../lib/settings.svelte.js';
   import { snapshot } from '../../lib/snapshot.svelte.js';
   import { work } from '../../lib/work.svelte.js';
+  import StagingOverview from './StagingOverview.svelte';
 
   let rectifying = $state(false);
   let rectifyText = $state('');
+  let bodyEl = $state<HTMLDivElement | null>(null);
 
   function startRectify(): void {
     rectifyText = '';
@@ -51,7 +54,17 @@
     const last = c.chapter || work.current?.relPath;
     if (last) void snapshot.showAdoptedToast(`已采纳 1 条候选 · ${last.split('/').pop()?.replace(/\.md$/, '')}`, last);
   }
+
+  // 流式生成内容跟视：生成卡固定在列表顶部，生成期间滚回顶部让正在生成的内容始终可见
+  $effect(() => {
+    const el = bodyEl;
+    if (el && candidates.generating) el.scrollTop = 0;
+  });
 </script>
+
+{#if candidates.overviewOpen}
+  <StagingOverview />
+{/if}
 
 {#if candidates.drawerOpen}
   <div class="drawer">
@@ -63,6 +76,7 @@
       </span>
       <div class="actions">
         {#if candidates.busy}<span class="busy">处理中…</span>{/if}
+        <button class="btn sm" onclick={() => void candidates.openOverview()} title="弹出全览：全部候选列表、双栏对照、批量采纳/整改/丢弃、快照还原">全览</button>
         <label class="chk">
           <input
             type="checkbox"
@@ -95,8 +109,31 @@
       </div>
     {/if}
 
-    <div class="body">
-      {#if candidates.items.length === 0}
+    <div class="body" bind:this={bodyEl}>
+      {#if candidates.generating}
+        <div class="card gen">
+          <div class="meta">
+            <span class="pulse-dot"></span>
+            <span class="ch">AI 改写中 · {chapterLabel(candidates.generating)}</span>
+            {#if settings.showInstruction}
+              <span class="instr">指令(B8)：<b>{candidates.generating.instruction || '润色'}</b></span>
+            {/if}
+            <span class="time">{candidates.generating.text.length > 0 ? `已生成 ${candidates.generating.text.length} 字` : '连接模型…'}</span>
+          </div>
+          <div class="diff">
+            <div class="col">
+              <div class="lbl">原 文</div>
+              <div class="old">{candidates.generating.original || '（新增段：此处原本没有内容）'}</div>
+            </div>
+            <svg class="arrow" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+            <div class="col">
+              <div class="lbl">正 在 生 成</div>
+              <div class="new gen-text">{candidates.generating.text || '…'}</div>
+            </div>
+          </div>
+        </div>
+      {/if}
+      {#if candidates.items.length === 0 && !candidates.generating}
         <div class="empty">
           暂存区空。选中正文里的文字，用浮动条发起 AI 改写，产出会先到这里。
           <div class="hint">大改进进暂存裁决；小改可就地浮层打磨（设置可切分流）。</div>
@@ -288,6 +325,32 @@
   }
   .card:hover {
     border-color: color-mix(in srgb, var(--muted) 45%, var(--line));
+  }
+  /* 流式生成卡：脉冲指示 + 生成中文本高亮 */
+  .card.gen {
+    border-color: var(--accent-line);
+    background: color-mix(in srgb, var(--accent) 3%, var(--panel));
+  }
+  .gen-text {
+    background: transparent;
+    color: var(--accent);
+  }
+  .pulse-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: pulse 1.5s ease-in-out infinite;
+    flex: none;
+  }
+  @keyframes pulse {
+    0%,
+    100% {
+      opacity: 0.35;
+    }
+    50% {
+      opacity: 1;
+    }
   }
   .meta {
     display: flex;

@@ -57,6 +57,8 @@
 <style>
   .ai {
     width: 0;
+    /* 固定高度面板：与窗口等高，列内 body 滚动，面板本身永不拉长 */
+    height: 100%;
     /* 小窗口兜底：面板总宽不挤压正文到不可用（列内 overflow 裁切，仍可滚轮增减） */
     max-width: calc(100vw - var(--tree-w) - var(--rail-w) - 160px);
     flex: none;
