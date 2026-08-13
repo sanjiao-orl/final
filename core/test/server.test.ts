@@ -1,6 +1,6 @@
 // 测试：HTTP 服务层——鉴权 401、/v1/health 200、CORS 预检、/v1/dev 免鉴权、会话路由、旧路径 404。
 import { describe, expect, it } from 'vitest';
-import { startTestServer } from './helpers.js';
+import { readSse, startTestServer } from './helpers.js';
 
 describe('core HTTP 服务', () => {
   it('GET /v1/health → 200 { ok, version, protocol }', async () => {
@@ -162,6 +162,76 @@ describe('core HTTP 服务', () => {
       expect(res.status).toBe(200);
       const body = await res.text();
       expect(body).toContain('event: error');
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('内部错误脱敏：非 HttpError 的原始错误（含路径）不透传进 500 响应体', async () => {
+    const secretPath = 'C:\\Users\\secret\\works\\novel\\sessions.sqlite';
+    const s = await startTestServer({
+      toolsAvailable: () => {
+        throw new Error(`读取失败: ${secretPath}`);
+      },
+    });
+    try {
+      const res = await fetch(`${s.baseUrl}/v1/tools/word_count`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.token}` },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(500);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).not.toContain(secretPath);
+      expect(body.error).toContain('内部错误');
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('SSE 内部错误脱敏：模型抛原始 Error（含路径）时 error 帧消息不含路径', async () => {
+    const secretPath = 'C:\\Users\\secret\\works\\novel\\sessions.sqlite';
+    const s = await startTestServer({
+      modelForTier: () => {
+        throw new Error(`LLM 调用失败: ${secretPath}`);
+      },
+    });
+    try {
+      const res = await fetch(`${s.baseUrl}/v1/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.token}` },
+        body: JSON.stringify({ text: 'hi' }),
+      });
+      expect(res.status).toBe(200);
+      const events = await readSse(res);
+      expect(events.at(-1)?.event).toBe('error');
+      expect(String(events.at(-1)?.data.message)).not.toContain(secretPath);
+      expect(String(events.at(-1)?.data.message)).toContain('内部错误');
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('非法 URL 编码的路径段 → 400（decodeURIComponent 的 URIError 不落入 500）', async () => {
+    const s = await startTestServer();
+    try {
+      const auth = { Authorization: `Bearer ${s.token}` };
+      // %E0%A4%A 是不完整的 UTF-8 序列，decodeURIComponent 会抛 URIError
+      const res = await fetch(`${s.baseUrl}/v1/tools/%E0%A4%A`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...auth },
+        body: '{}',
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain('URL 编码');
+
+      const patch = await fetch(`${s.baseUrl}/v1/candidates/%E0%A4%A`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...auth },
+        body: '{}',
+      });
+      expect(patch.status).toBe(400);
     } finally {
       await s.close();
     }

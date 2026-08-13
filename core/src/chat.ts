@@ -5,7 +5,7 @@ import { z } from 'zod';
 import type { MessageRow, SessionRow, SessionStore } from './session-store.js';
 import { getLlmTimeoutSeconds } from './config.js';
 import { EventPump } from './event-pump.js';
-import { writeJson } from './http.js';
+import { toPublicErrorMessage, writeJson } from './http.js';
 
 export const chatBodySchema = z.object({
   sessionId: z.string().uuid().optional(),
@@ -115,9 +115,10 @@ export async function handleChatRequest(
   // 用户消息先落库：即使客户端中途断连也不丢。
   deps.store.addMessage(sessionId, { role: 'user', content: text });
 
+  // 断连中止：只挂 res.on('close')——请求体在进入本函数前已被路由层读完，
+  // 此刻再注册 req.on('close') 已无意义（request 侧事件早已完成），只会误导排查。
   const abort = new AbortController();
   const onClose = () => abort.abort();
-  req.on('close', onClose);
   res.on('close', onClose);
 
   // 服务端超时：provider 挂起时也强制中止，避免请求无限挂着（客户端断连信号仍优先）。
@@ -192,11 +193,10 @@ export async function handleChatRequest(
       pump.end();
       return;
     }
-    const message = err instanceof Error ? err.message : String(err);
-    pump.emit('error', { message });
+    // 错误脱敏：非业务错误（provider 内部异常等）只回稳定占位，原始细节已写 stderr。
+    pump.emit('error', { message: toPublicErrorMessage(err) });
     pump.end();
   } finally {
-    req.off('close', onClose);
     res.off('close', onClose);
   }
 }

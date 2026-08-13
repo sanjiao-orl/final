@@ -58,6 +58,20 @@ describe('config', () => {
     expect(over.args).toEqual(['C:/server.js']);
   });
 
+  it('MCP 命令支持双引号分段：带空格路径的 command/参数不被拆碎', () => {
+    const quotedCmd = getDomainMcpCommand({ MCP_DOMAIN_CMD: '"C:\\Program Files\\node.exe" script.js' });
+    expect(quotedCmd.command).toBe('C:\\Program Files\\node.exe');
+    expect(quotedCmd.args).toEqual(['script.js']);
+
+    const quotedArg = getDomainMcpCommand({ MCP_DOMAIN_CMD: 'node "C:/my tools/server.js" --flag "a b"' });
+    expect(quotedArg.command).toBe('node');
+    expect(quotedArg.args).toEqual(['C:/my tools/server.js', '--flag', 'a b']);
+
+    // 连续空白/空引号对不产出多余片段
+    const messy = getDomainMcpCommand({ MCP_DOMAIN_CMD: 'node  ""  "x y"   z' });
+    expect(messy.args).toEqual(['x y', 'z']);
+  });
+
   it('runtime 文件路径默认落到仓库根，可用 CORE_RUNTIME_FILE 覆盖', () => {
     expect(getRuntimeFilePath({})).toMatch(/core-runtime\.local\.json$/);
     expect(getRuntimeFilePath({ CORE_RUNTIME_FILE: 'C:/tmp/r.json' })).toBe('C:/tmp/r.json');
@@ -72,9 +86,10 @@ describe('config', () => {
     expect(() => assertNodeVersion('v24.1.0')).toThrow();
   });
 
-  it('git commit 自报：仓库内取到短 commit，非 git 目录回退 unknown', () => {
+  it('git commit 自报：仓库内取到短 commit，非 git 目录回退 unknown（不抛错）', () => {
     const commit = getGitCommit();
-    expect(commit).toMatch(/^[0-9a-f]{4,}$/);
+    // 无 .git 的环境（CI 检出/打包产物）不报错，回退稳定占位 'unknown'
+    expect(commit).toMatch(/^(unknown|[0-9a-f]{4,})$/);
     const fallback = getGitCommit(path.join(process.cwd(), '不存在的目录'));
     expect(fallback).toBe('unknown');
   });

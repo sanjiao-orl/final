@@ -18,6 +18,20 @@ export class HttpError extends Error {
   }
 }
 
+/** 内部错误兜底消息：对客户端只给稳定占位，不泄露内部细节（路径/栈等）。 */
+export const INTERNAL_ERROR_MESSAGE = '内部错误，详见 core 日志';
+
+/**
+ * 对外错误消息映射：HttpError（业务错误）透传自带 message；
+ * 其余一律视为内部错误——响应体用稳定占位，原始细节（message/stack）写 stderr 供排查。
+ */
+export function toPublicErrorMessage(err: unknown): string {
+  if (err instanceof HttpError) return err.message;
+  const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
+  console.error(`[core] 内部错误: ${detail}`);
+  return INTERNAL_ERROR_MESSAGE;
+}
+
 export function writeJson(res: ServerResponse, status: number, data: unknown): void {
   if (res.writableEnded || res.destroyed) return;
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', ...CORS_HEADERS });

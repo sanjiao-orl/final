@@ -5,8 +5,9 @@ import { asSchema, type FlexibleSchema } from 'ai';
 import { z } from 'zod';
 import { handleChatRequest, type ChatDeps } from './chat.js';
 import { devPage } from './dev.js';
-import { CORS_HEADERS, HttpError, readJsonBody, writeJson } from './http.js';
+import { CORS_HEADERS, HttpError, readJsonBody, toPublicErrorMessage, writeJson } from './http.js';
 import { handleRewriteRequest, type RewriteDeps } from './rewrite.js';
+import { PROTOCOL_VERSION } from './runtime.js';
 import type { CandidateStore, CandidateStatus } from './candidate-store.js';
 import type { SessionStore } from './session-store.js';
 
@@ -41,7 +42,8 @@ export function createAppServer(deps: ServerDeps): Server {
   return createHttpServer((req, res) => {
     void route(req, res, deps).catch((err: unknown) => {
       const status = err instanceof HttpError ? err.status : 500;
-      const message = err instanceof Error ? err.message : String(err);
+      // 错误脱敏：HttpError 透传业务消息；其余内部错误只回稳定占位，原始细节已写 stderr。
+      const message = toPublicErrorMessage(err);
       if (!res.headersSent) writeJson(res, status, { error: message });
       else res.end();
     });
@@ -61,7 +63,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
 
   // 公开端点（免鉴权）
   if (req.method === 'GET' && pathname === '/v1/health') {
-    writeJson(res, 200, { ok: true, version: deps.version, protocol: 1 });
+    writeJson(res, 200, { ok: true, version: deps.version, protocol: PROTOCOL_VERSION });
     return;
   }
   if (req.method === 'GET' && pathname === '/v1/dev') {
@@ -104,7 +106,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
   }
 
   if (req.method === 'POST' && pathname.startsWith('/v1/tools/')) {
-    const name = decodeURIComponent(pathname.slice('/v1/tools/'.length));
+    const name = decodePathSegment(pathname.slice('/v1/tools/'.length));
     if (!name || name.includes('/')) throw new HttpError(404, `工具名非法: ${name}`);
     // MCP 重连期间无论工具对象是否残留，一律 503；连接恢复后缺工具才回 404。
     if (deps.chat.toolsAvailable && !deps.chat.toolsAvailable()) {
@@ -151,6 +153,15 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
 type ToolInputValidation =
   | { ok: true; value: unknown }
   | { ok: false; error: string };
+
+/** 解码 URL 路径段；非法百分号编码（decodeURIComponent 抛 URIError）按客户端入参错误回 400，而不是 500。 */
+function decodePathSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    throw new HttpError(400, '路径含非法 URL 编码');
+  }
+}
 
 /** 把 zod/AI SDK 校验错误格式化成与 chat/rewrite 一致的 issues 文本。 */
 function formatValidationIssues(error: unknown): string {
@@ -230,7 +241,7 @@ async function routeCandidates(
 
   const patchMatch = /^\/v1\/candidates\/([^/]+)$/.exec(pathname);
   if (req.method === 'PATCH' && patchMatch) {
-    const id = decodeURIComponent(patchMatch[1]!);
+    const id = decodePathSegment(patchMatch[1]!);
     const parsed = candidatePatchSchema.safeParse(await readJsonBody(req));
     if (!parsed.success) {
       throw new HttpError(400, '请求体不合法: ' + parsed.error.issues.map((i) => i.message).join('; '));

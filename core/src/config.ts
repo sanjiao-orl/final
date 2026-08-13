@@ -65,12 +65,36 @@ export function getNovelDir(env: NodeJS.ProcessEnv = process.env): string {
 /**
  * domain MCP 启动命令：MCP_DOMAIN_CMD 可覆盖，缺省 "npx tsx ../domain/src/server.ts"，
  * 相对路径以 core 包目录为基准解析（见 mcp.ts 的 cwd 设置）。
+ * 按空白拆分成 command+args，支持双引号分段（如 "C:\Program Files\node.exe" script.js），
+ * 引号内空白不分割、引号本身剥掉；不处理转义引号——本场景只有本地命令路径。
  */
 export function getDomainMcpCommand(env: NodeJS.ProcessEnv = process.env): { command: string; args: string[] } {
   const raw = (env.MCP_DOMAIN_CMD || 'npx tsx ../domain/src/server.ts').trim();
-  const parts = raw.split(/\s+/).filter(Boolean);
+  const parts = splitCommandLine(raw);
   const command = parts[0] ?? 'npx tsx ../domain/src/server.ts';
   return { command, args: parts.slice(1) };
+}
+
+/** 按空白拆分命令行，支持双引号分段；连续空白跳过，空串（含空引号对）不产出片段。 */
+function splitCommandLine(raw: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let inQuote = false;
+  for (const ch of raw) {
+    if (ch === '"') {
+      inQuote = !inQuote;
+    } else if (ch === ' ' || ch === '\t') {
+      if (inQuote) current += ch;
+      else if (current) {
+        parts.push(current);
+        current = '';
+      }
+    } else {
+      current += ch;
+    }
+  }
+  if (current) parts.push(current);
+  return parts;
 }
 
 /** runtime 信息文件：默认仓库根 core-runtime.local.json（根 .gitignore 的 *.local 已覆盖）。 */

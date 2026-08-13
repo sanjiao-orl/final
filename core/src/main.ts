@@ -77,8 +77,8 @@ async function main(): Promise<void> {
   await listen(server, args.port);
   const port = getPort(server);
 
-  // 握手自报（D2）：ready 行（stdout，壳接线用）与 runtime 文件携带同一组版本/commit/协议字段，
-  // 消费者按 protocol 校验兼容性（壳侧校验见 shell/src-tauri/src/lib.rs）。
+  // 握手自报（D2）：先落盘 runtime 文件、成功后才打印 ready 行——壳解析到 ready 即认为 core 已就绪，
+  // 两者携带同一组版本/commit/协议字段，消费者按 protocol 校验兼容性（壳侧校验见 shell/src-tauri/src/lib.rs）。
   const info: RuntimeInfo = {
     port,
     token,
@@ -88,8 +88,8 @@ async function main(): Promise<void> {
     commit: getGitCommit(),
     protocol: PROTOCOL_VERSION,
   };
-  console.log(readyLine(info));
   writeRuntimeFile(getRuntimeFilePath(), info);
+  console.log(readyLine(info));
   console.log(`[core] 已就绪：http://127.0.0.1:${port}（/v1/dev 联调页免鉴权，其余端点需 Bearer token，协议 v${PROTOCOL_VERSION}）`);
 
   // 孤儿守护：每 5s 探测父进程，不在则退出。

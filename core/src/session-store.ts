@@ -74,6 +74,7 @@ export class SessionStore {
     mkdirSync(path.dirname(dbPath), { recursive: true });
     const db = new DatabaseSync(dbPath);
     db.exec('PRAGMA foreign_keys = ON;');
+    db.exec('PRAGMA busy_timeout = 2000;'); // 与 CandidateStore 同库双连接，写操作瞬时，兜底防锁
     db.exec(SCHEMA);
     // 旧库迁移：第 2 周的 sessions 表没有 scope 列，缺则补上（默认 ''=无归属）。
     const cols = db.prepare('PRAGMA table_info(sessions)').all() as unknown as { name: string }[];

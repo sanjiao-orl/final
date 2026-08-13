@@ -152,16 +152,18 @@ describe('POST /v1/tools/:name 工具代理', () => {
     }
   });
 
-  it('execute 抛错 → 500 且带错误消息', async () => {
+  it('execute 抛错 → 500，且原始错误消息不泄露（脱敏为稳定占位）', async () => {
     const s = await startTestServer({
       tools: {
-        boom: { execute: async () => { throw new Error('越界路径'); } },
+        boom: { execute: async () => { throw new Error('越界路径 C:\\secret'); } },
       } as unknown as ToolSet,
     });
     try {
       const res = await postTool(s.baseUrl, s.token, 'boom', {});
       expect(res.status).toBe(500);
-      expect(((await res.json()) as { error: string }).error).toContain('越界路径');
+      const body = (await res.json()) as { error: string };
+      expect(body.error).not.toContain('C:\\secret');
+      expect(body.error).toContain('内部错误');
     } finally {
       await s.close();
     }

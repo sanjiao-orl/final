@@ -40,4 +40,12 @@ describe('进程握手（D2）', () => {
     expect(typeof parsed.commit).toBe('string');
     expect(typeof parsed.version).toBe('string');
   });
+
+  it('runtime 文件：目标目录不存在时先递归创建再写入（main 在打印 ready 前调用，失败即启动失败）', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'novel-runtime-test-'));
+    const filePath = path.join(dir, 'a', 'b', 'core-runtime.local.json');
+    writeRuntimeFile(filePath, SAMPLE);
+    const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as RuntimeInfo;
+    expect(parsed).toEqual(SAMPLE);
+  });
 });
