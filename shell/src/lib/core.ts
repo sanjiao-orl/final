@@ -227,11 +227,12 @@ export class CoreClient {
   }
 }
 
-interface TauriInternals {
+export interface TauriInternals {
   invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T>;
 }
 
-function tauriInvoke(): TauriInternals['invoke'] | undefined {
+export function tauriInvoke(): TauriInternals['invoke'] | undefined {
+  if (typeof window === 'undefined') return undefined;
   const w = window as unknown as { __TAURI_INTERNALS__?: { invoke?: TauriInternals['invoke'] } };
   return w.__TAURI_INTERNALS__?.invoke?.bind(w.__TAURI_INTERNALS__);
 }

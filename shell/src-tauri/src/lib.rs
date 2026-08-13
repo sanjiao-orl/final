@@ -1,14 +1,59 @@
 // 壳进程职责（docs/decisions/0002）：拉起 core sidecar（node 直起，--parent-pid 交给 core 孤儿守护），
 // 从 stdout 解析 {event:"ready",port,token} 供前端 core_info 取用；Tauri updater Day-1 接入（占位端点，失败静默）。
+// 应用配置持久化（第二步）：config.json（app_config_dir）存作品目录 + LLM 双档模型，字段可空=回落环境变量/缺省；
+// 设置面板经 read_config/write_config/config_status 读写，restart_core 杀旧起新让配置立即生效。
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
 use tauri_plugin_updater::UpdaterExt;
 
 /// 协议契约版本（core 侧自报，docs/decisions/0007）。壳只认这个版本，不匹配即拒接。
 const EXPECTED_PROTOCOL: u64 = 1;
+
+/// 应用配置文件（app_config_dir 下）。字段可空：空=回落环境变量/缺省。
+const CONFIG_FILE: &str = "config.json";
+
+// ---------- 应用配置（serde JSON，字段可空=回落环境变量） ----------
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AppConfig {
+  /// 作品目录；空=缺省（dev 仓库 .demo-work / prod app_data_dir/.demo-work）。
+  work_dir: Option<String>,
+  llm: Option<LlmConfig>,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmConfig {
+  base_url: Option<String>,
+  api_key: Option<String>,
+  model: Option<String>,
+  model_cheap: Option<String>,
+}
+
+/// 单字段当前生效值与来源（config/env/default），设置面板占位符展示用。
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolvedField {
+  value: String,
+  source: String,
+}
+
+/// config_status 返回值：已存配置 + 各字段生效值/来源（apiKey 打码）。
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfigStatus {
+  config: AppConfig,
+  work_dir: ResolvedField,
+  base_url: ResolvedField,
+  api_key: ResolvedField,
+  model: ResolvedField,
+  model_cheap: ResolvedField,
+}
 
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,6 +86,12 @@ enum CoreState {
 
 type Shared = Arc<Mutex<CoreState>>;
 
+/// core 子进程句柄 + 换代计数：restart_core 杀旧起新；watcher 按代判断归属，防旧管道 EOF 误报失败。
+struct CoreProcess {
+  child: Mutex<Option<Child>>,
+  generation: Arc<AtomicU64>,
+}
+
 #[tauri::command]
 fn core_info(state: tauri::State<'_, Shared>) -> Result<CoreInfo, String> {
   match &*state.inner().lock().map_err(|e| e.to_string())? {
@@ -48,6 +99,97 @@ fn core_info(state: tauri::State<'_, Shared>) -> Result<CoreInfo, String> {
     CoreState::Starting => Err("core sidecar 启动中".to_string()),
     CoreState::Failed(msg) => Err(format!("core sidecar 启动失败: {msg}")),
   }
+}
+
+// ---------- 配置读写（app_config_dir/config.json；写=tmp+rename 原子替换） ----------
+
+fn config_file(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+  let dir = plain_path(
+    &app
+      .path()
+      .app_config_dir()
+      .map_err(|e| format!("定位应用配置目录失败: {e}"))?,
+  );
+  Ok(dir.join(CONFIG_FILE))
+}
+
+fn read_config_at(file: &Path) -> Result<AppConfig, String> {
+  if !file.is_file() {
+    return Ok(AppConfig::default());
+  }
+  let raw = std::fs::read_to_string(file).map_err(|e| format!("读取配置文件失败: {e}"))?;
+  serde_json::from_str(&raw).map_err(|e| format!("配置文件格式非法: {e}"))
+}
+
+/// 原子写配置：先写同目录 .tmp 再 rename 覆盖，避免写一半断电/崩溃留下半截 JSON。
+fn write_config_at(file: &Path, cfg: &AppConfig) -> Result<(), String> {
+  if let Some(dir) = file.parent() {
+    std::fs::create_dir_all(dir).map_err(|e| format!("创建配置目录失败: {e}"))?;
+  }
+  let raw = serde_json::to_string_pretty(cfg).map_err(|e| format!("序列化配置失败: {e}"))?;
+  let tmp = file.with_extension("json.tmp");
+  std::fs::write(&tmp, raw).map_err(|e| format!("写入配置失败: {e}"))?;
+  std::fs::rename(&tmp, file).map_err(|e| format!("替换配置失败: {e}"))?;
+  Ok(())
+}
+
+#[tauri::command]
+fn read_config(app: tauri::AppHandle) -> Result<AppConfig, String> {
+  read_config_at(&config_file(&app)?)
+}
+
+#[tauri::command]
+fn write_config(app: tauri::AppHandle, config: AppConfig) -> Result<(), String> {
+  write_config_at(&config_file(&app)?, &config)
+}
+
+/// 单字段生效值解析：配置 > 环境变量 > 缺省（空）；source 供面板标注来源。
+fn resolve_field(cfg_value: Option<&str>, env_key: &str) -> ResolvedField {
+  if let Some(v) = cfg_value.filter(|s| !s.trim().is_empty()) {
+    return ResolvedField { value: v.to_string(), source: "config".into() };
+  }
+  if let Ok(v) = std::env::var(env_key) {
+    if !v.is_empty() {
+      return ResolvedField { value: v, source: "env".into() };
+    }
+  }
+  ResolvedField { value: String::new(), source: "default".into() }
+}
+
+/// apiKey 打码：占位符只回显前 4 位，不把整把 key 摊在面板上。
+fn resolve_field_masked(cfg_value: Option<&str>, env_key: &str) -> ResolvedField {
+  let f = resolve_field(cfg_value, env_key);
+  if f.value.is_empty() {
+    return f;
+  }
+  let head: String = f.value.chars().take(4).collect();
+  ResolvedField { value: format!("{head}••••"), source: f.source }
+}
+
+/// 设置面板一次拿全：已存配置 + 各字段生效值/来源（apiKey 打码）。
+#[tauri::command]
+fn config_status(app: tauri::AppHandle) -> Result<ConfigStatus, String> {
+  let cfg = read_config_at(&config_file(&app)?)?;
+  let work = resolve_work_dir(&app, &cfg)?;
+  let work_source = if cfg.work_dir.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+    "config"
+  } else if std::env::var_os("NOVEL_WORK_DIR").is_some_and(|v| !v.is_empty()) {
+    "env"
+  } else {
+    "default"
+  };
+  let llm = cfg.llm.clone().unwrap_or_default();
+  Ok(ConfigStatus {
+    config: cfg,
+    work_dir: ResolvedField {
+      value: work.to_string_lossy().to_string(),
+      source: work_source.into(),
+    },
+    base_url: resolve_field(llm.base_url.as_deref(), "LLM_BASE_URL"),
+    api_key: resolve_field_masked(llm.api_key.as_deref(), "LLM_API_KEY"),
+    model: resolve_field(llm.model.as_deref(), "LLM_MODEL"),
+    model_cheap: resolve_field(llm.model_cheap.as_deref(), "LLM_MODEL_CHEAP"),
+  })
 }
 
 /// 仓库根（shell/src-tauri 的上两级）。用 std::path::absolute 词法归一化，
@@ -67,19 +209,88 @@ fn plain_path(path: &Path) -> PathBuf {
   }
 }
 
-/// 作品目录：NOVEL_WORK_DIR 可覆盖，缺省 <repo>/.demo-work。
-fn work_dir() -> Result<PathBuf, String> {
-  if let Ok(dir) = std::env::var("NOVEL_WORK_DIR") {
-    return std::path::absolute(PathBuf::from(dir)).map_err(|e| format!("NOVEL_WORK_DIR 非法: {e}"));
-  }
+/// dev 缺省作品目录：<repo>/.demo-work（prod 用 app_data_dir，见 default_work_dir）。
+fn repo_default_work_dir() -> Result<PathBuf, String> {
   Ok(repo_root()?.join(".demo-work"))
+}
+
+/// 无配置无环境变量时的缺省作品目录：dev 仓库 .demo-work；prod 应用数据目录 .demo-work。
+fn default_work_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+  if cfg!(debug_assertions) {
+    return repo_default_work_dir();
+  }
+  let data_dir = plain_path(
+    &app
+      .path()
+      .app_data_dir()
+      .map_err(|e| format!("定位应用数据目录失败: {e}"))?,
+  );
+  Ok(data_dir.join(".demo-work"))
+}
+
+/// 作品目录优先级：配置 workDir > NOVEL_WORK_DIR 环境变量 > 缺省（纯函数，便于单测）。
+fn pick_work_dir(cfg_work: Option<&str>, env_work: Option<&str>, default: &Path) -> Result<PathBuf, String> {
+  if let Some(d) = cfg_work.filter(|s| !s.trim().is_empty()) {
+    return std::path::absolute(PathBuf::from(d)).map_err(|e| format!("配置 workDir 非法: {e}"));
+  }
+  if let Some(d) = env_work.filter(|s| !s.trim().is_empty()) {
+    return std::path::absolute(PathBuf::from(d)).map_err(|e| format!("NOVEL_WORK_DIR 非法: {e}"));
+  }
+  Ok(default.to_path_buf())
+}
+
+fn resolve_work_dir(app: &tauri::AppHandle, cfg: &AppConfig) -> Result<PathBuf, String> {
+  pick_work_dir(
+    cfg.work_dir.as_deref(),
+    std::env::var("NOVEL_WORK_DIR").ok().as_deref(),
+    &default_work_dir(app)?,
+  )
+}
+
+/// 计算 core 启动所需的 work 目录与（生产模式下的）资源目录。
+/// dev 保持现状（仓库 .demo-work，无资源目录）；prod 用 Tauri 应用数据目录做作品根，资源目录指向安装包 resources。
+fn resolve_startup_paths(app: &tauri::AppHandle, cfg: &AppConfig) -> Result<(PathBuf, Option<PathBuf>), String> {
+  let work = resolve_work_dir(app, cfg)?;
+  if cfg!(debug_assertions) {
+    return Ok((work, None));
+  }
+  let resource_dir = plain_path(
+    &app
+      .path()
+      .resource_dir()
+      .map_err(|e| format!("定位资源目录失败: {e}"))?,
+  );
+  Ok((work, Some(resource_dir)))
+}
+
+/// 配置里的 LLM 字段转成 core 子进程环境变量覆盖：仅非空值（空=继承壳进程环境变量，即"环境变量档"）。
+fn llm_env_overrides(cfg: &AppConfig) -> Vec<(&'static str, String)> {
+  let Some(llm) = &cfg.llm else {
+    return Vec::new();
+  };
+  let mut out = Vec::new();
+  if let Some(v) = llm.base_url.as_deref().filter(|s| !s.trim().is_empty()) {
+    out.push(("LLM_BASE_URL", v.to_string()));
+  }
+  if let Some(v) = llm.api_key.as_deref().filter(|s| !s.trim().is_empty()) {
+    out.push(("LLM_API_KEY", v.to_string()));
+  }
+  if let Some(v) = llm.model.as_deref().filter(|s| !s.trim().is_empty()) {
+    out.push(("LLM_MODEL", v.to_string()));
+  }
+  if let Some(v) = llm.model_cheap.as_deref().filter(|s| !s.trim().is_empty()) {
+    out.push(("LLM_MODEL_CHEAP", v.to_string()));
+  }
+  out
 }
 
 /// 拉起 core。
 /// dev（debug build）保持现状：node --import tsx core/src/main.ts，cwd=仓库根解析依赖。
 /// prod（release build）：从 Tauri resource_dir 找 node.exe + core/domain 编译产物，
 /// 并通过 MCP_DOMAIN_CMD 让 core 拉起资源目录里的 domain bundle；CORE_RUNTIME_FILE 落到作品目录。
-fn spawn_core(resource_dir: Option<PathBuf>, work: &Path) -> Result<Child, String> {
+/// 环境变量组装遵循 配置 > 环境变量 > 默认：作品目录已由 resolve_work_dir 落定（NOVEL_WORK_DIR 透传子进程），
+/// LLM_* 仅在配置非空时覆盖。
+fn spawn_core(resource_dir: Option<PathBuf>, work: &Path, cfg: &AppConfig) -> Result<Child, String> {
   let novel_dir = work.join(".novel");
   std::fs::create_dir_all(&novel_dir).map_err(|e| format!("创建 .novel 目录失败: {e}"))?;
   log::info!("[shell] 作品目录: {}", work.display());
@@ -130,6 +341,13 @@ fn spawn_core(resource_dir: Option<PathBuf>, work: &Path) -> Result<Child, Strin
       .env("NOVEL_DIR", &novel_dir);
   }
 
+  // 配置 > 环境变量 > 默认 的优先级已由 resolve_work_dir 落定；NOVEL_WORK_DIR 透传子进程，
+  // LLM_* 仅配置非空时覆盖（空=继承壳进程环境变量）。
+  cmd.env("NOVEL_WORK_DIR", work);
+  for (key, value) in llm_env_overrides(cfg) {
+    cmd.env(key, value);
+  }
+
   cmd.stdout(Stdio::piped()).stderr(Stdio::inherit());
   #[cfg(windows)]
   {
@@ -144,8 +362,10 @@ fn spawn_core(resource_dir: Option<PathBuf>, work: &Path) -> Result<Child, Strin
 }
 
 /// 读 core stdout：首个 {"event":"ready"} 行给出 port+token；EOF 且未就绪视为启动失败。
-fn watch_core(child: &mut Child, shared: Shared, work_dir: String) {
+/// generation 换代防串台：restart_core 后旧 watcher 的 EOF/ready 不再写状态（归新 watcher 管）。
+fn watch_core(child: &mut Child, shared: Shared, generation: Arc<AtomicU64>, work_dir: String) {
   let stdout = child.stdout.take().expect("core stdout 已 pipe");
+  let my_gen = generation.load(Ordering::SeqCst);
   std::thread::spawn(move || {
     for line in BufReader::new(stdout).lines() {
       let Ok(line) = line else { break };
@@ -163,8 +383,10 @@ fn watch_core(child: &mut Child, shared: Shared, work_dir: String) {
           if let (Some(port), Some(token)) = (port, token) {
             if let Err(e) = validate_protocol(protocol) {
               log::error!("[shell] 握手校验失败: {e}");
-              if let Ok(mut guard) = shared.lock() {
-                *guard = CoreState::Failed(e);
+              if generation.load(Ordering::SeqCst) == my_gen {
+                if let Ok(mut guard) = shared.lock() {
+                  *guard = CoreState::Failed(e);
+                }
               }
               return;
             }
@@ -182,42 +404,72 @@ fn watch_core(child: &mut Child, shared: Shared, work_dir: String) {
               info.commit,
               info.protocol
             );
-            if let Ok(mut guard) = shared.lock() {
-              *guard = CoreState::Ready(info);
+            if generation.load(Ordering::SeqCst) == my_gen {
+              if let Ok(mut guard) = shared.lock() {
+                *guard = CoreState::Ready(info);
+              }
             }
           }
         }
         Err(e) => log::warn!("[shell] 解析 core ready 行失败: {e}"),
       }
     }
-    // stdout 关闭（core 退出或管道断裂）
-    if let Ok(mut guard) = shared.lock() {
-      if matches!(*guard, CoreState::Starting) {
-        *guard = CoreState::Failed("core 进程提前退出（检查 LLM_* 环境变量）".to_string());
+    // stdout 关闭（core 退出或管道断裂）：仅当仍是当前代且未就绪时置失败（重启换代防旧 watcher 误报）
+    if generation.load(Ordering::SeqCst) == my_gen {
+      if let Ok(mut guard) = shared.lock() {
+        if matches!(*guard, CoreState::Starting) {
+          *guard = CoreState::Failed("core 进程提前退出（检查 LLM_* 环境变量）".to_string());
+        }
       }
     }
   });
 }
 
-/// 计算 core 启动所需的 work 目录与（生产模式下的）资源目录。
-/// dev 保持现状；prod 用 Tauri 应用数据目录做作品根，资源目录指向安装包里的 resources。
-fn resolve_startup_paths(app: &tauri::App) -> Result<(PathBuf, Option<PathBuf>), String> {
-  if cfg!(debug_assertions) {
-    return Ok((work_dir()?, None));
+/// 读配置 → 解析作品目录/资源目录 → spawn core → watch → 收句柄。setup 与 restart_core 共用。
+fn spawn_and_watch(app: &tauri::AppHandle, core: &CoreProcess, shared: &Shared) -> Result<(), String> {
+  let outcome = (|| -> Result<(Child, PathBuf), String> {
+    let cfg = read_config_at(&config_file(app)?)?;
+    let (work, resource_dir) = resolve_startup_paths(app, &cfg)?;
+    Ok((spawn_core(resource_dir, &work, &cfg)?, work))
+  })();
+  match outcome {
+    Ok((mut child, work)) => {
+      let gen = Arc::clone(&core.generation);
+      watch_core(&mut child, Arc::clone(shared), gen, work.to_string_lossy().to_string());
+      // Child 不随 drop 被杀；壳退出后由 core 孤儿守护（--parent-pid）收尾
+      *core.child.lock().map_err(|e| e.to_string())? = Some(child);
+      Ok(())
+    }
+    Err(e) => {
+      log::error!("[shell] {e}");
+      if let Ok(mut guard) = shared.lock() {
+        *guard = CoreState::Failed(e.clone());
+      }
+      Err(e)
+    }
   }
-  let data_dir = plain_path(
-    &app
-      .path()
-      .app_data_dir()
-      .map_err(|e| format!("定位应用数据目录失败: {e}"))?,
-  );
-  let resource_dir = plain_path(
-    &app
-      .path()
-      .resource_dir()
-      .map_err(|e| format!("定位资源目录失败: {e}"))?,
-  );
-  Ok((data_dir.join(".demo-work"), Some(resource_dir)))
+}
+
+/// 让配置（作品目录 / LLM_*）立即生效：杀掉当前 core 子进程并按最新配置重新拉起。
+/// 模型/作品目录是 core 启动时读的，只能整进程重启；前端随后重连（core_info 轮询新 port/token/workDir）。
+#[tauri::command]
+fn restart_core(
+  app: tauri::AppHandle,
+  state: tauri::State<'_, Shared>,
+  core: tauri::State<'_, Arc<CoreProcess>>,
+) -> Result<(), String> {
+  {
+    let mut child_guard = core.child.lock().map_err(|e| e.to_string())?;
+    if let Some(mut child) = child_guard.take() {
+      let _ = child.kill();
+      let _ = child.wait();
+    }
+  }
+  core.generation.fetch_add(1, Ordering::SeqCst); // 旧 stdout watcher 作废，防旧管道 EOF 误报失败
+  if let Ok(mut guard) = state.lock() {
+    *guard = CoreState::Starting;
+  }
+  spawn_and_watch(&app, &core, state.inner())
 }
 
 /// Tauri updater Day-1：启动即后台检查；端点是占位，失败只记日志不打扰作者。
@@ -239,40 +491,32 @@ fn check_updates(app: &tauri::AppHandle) {
 pub fn run() {
   let shared: Shared = Arc::new(Mutex::new(CoreState::Starting));
   let shared_for_spawn = Arc::clone(&shared);
+  let core_process = Arc::new(CoreProcess {
+    child: Mutex::new(None),
+    generation: Arc::new(AtomicU64::new(0)),
+  });
 
   tauri::Builder::default()
     .plugin(tauri_plugin_updater::Builder::new().build())
+    .plugin(tauri_plugin_dialog::init())
     .plugin(
       tauri_plugin_log::Builder::default()
         .level(log::LevelFilter::Info)
         .build(),
     )
     .manage(shared)
-    .invoke_handler(tauri::generate_handler![core_info])
+    .manage(Arc::clone(&core_process))
+    .invoke_handler(tauri::generate_handler![
+      core_info,
+      read_config,
+      write_config,
+      config_status,
+      restart_core
+    ])
     .setup(move |app| {
-      let (work, resource_dir) = match resolve_startup_paths(app) {
-        Ok(paths) => paths,
-        Err(e) => {
-          log::error!("[shell] {e}");
-          if let Ok(mut guard) = shared_for_spawn.lock() {
-            *guard = CoreState::Failed(e);
-          }
-          return Ok(());
-        }
-      };
-      match spawn_core(resource_dir, &work) {
-        Ok(mut child) => {
-          watch_core(&mut child, Arc::clone(&shared_for_spawn), work.to_string_lossy().to_string());
-          // Child 不随 drop 被杀；壳退出后由 core 孤儿守护（--parent-pid）收尾
-          std::mem::forget(child);
-        }
-        Err(e) => {
-          log::error!("[shell] {e}");
-          if let Ok(mut guard) = shared_for_spawn.lock() {
-            *guard = CoreState::Failed(e);
-          }
-        }
-      }
+      let handle = app.handle().clone();
+      // 失败已在 spawn_and_watch 内记日志并置 CoreState::Failed
+      let _ = spawn_and_watch(&handle, &core_process, &shared_for_spawn);
       check_updates(app.handle());
       Ok(())
     })
@@ -295,7 +539,7 @@ mod tests {
 
   #[test]
   fn default_work_dir_is_demo_work_under_repo() {
-    let w = work_dir().expect("work_dir");
+    let w = repo_default_work_dir().expect("repo_default_work_dir");
     assert!(w.ends_with(".demo-work"), "缺省作品目录应为 <repo>/.demo-work: {w:?}");
   }
 
@@ -308,5 +552,104 @@ mod tests {
       "协议 v2 与壳期望不符必须拒绝"
     );
     assert!(validate_protocol(None).is_err(), "缺 protocol 字段必须拒绝");
+  }
+
+  /// 作品目录优先级：配置 > 环境变量 > 缺省；空白配置视为未设置。
+  #[test]
+  fn work_dir_priority_config_over_env_over_default() {
+    let default = PathBuf::from("C:/default-work");
+    let cfg = Some("C:/cfg-work");
+    let env = Some("C:/env-work");
+    assert_eq!(
+      pick_work_dir(cfg, env, &default).expect("cfg"),
+      std::path::absolute("C:/cfg-work").expect("abs")
+    );
+    assert_eq!(
+      pick_work_dir(None, env, &default).expect("env"),
+      std::path::absolute("C:/env-work").expect("abs")
+    );
+    assert_eq!(pick_work_dir(None, None, &default).expect("default"), default);
+    // 空白配置=未设置，回落环境变量
+    assert_eq!(
+      pick_work_dir(Some("   "), env, &default).expect("blank-cfg"),
+      std::path::absolute("C:/env-work").expect("abs")
+    );
+  }
+
+  /// 配置读写：缺文件返回默认；roundtrip；原子写后 tmp 不残留。
+  #[test]
+  fn config_write_read_roundtrip() {
+    let dir = std::env::temp_dir().join(format!("novel-ws-config-test-{}", std::process::id()));
+    let file = dir.join("config.json");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let missing = read_config_at(&file).expect("read missing");
+    assert!(missing.work_dir.is_none() && missing.llm.is_none(), "缺文件应返回全空配置");
+
+    let cfg = AppConfig {
+      work_dir: Some("C:/works/新书".to_string()),
+      llm: Some(LlmConfig {
+        base_url: Some("https://llm.example/v1".to_string()),
+        api_key: Some("sk-test-123".to_string()),
+        model: Some("m1".to_string()),
+        model_cheap: Some("m2".to_string()),
+      }),
+    };
+    write_config_at(&file, &cfg).expect("write");
+    assert!(file.is_file(), "配置文件应已落盘");
+    assert!(
+      !file.with_extension("json.tmp").exists(),
+      "原子写后 .tmp 应已被 rename 掉"
+    );
+
+    let back = read_config_at(&file).expect("read back");
+    assert_eq!(back.work_dir.as_deref(), Some("C:/works/新书"));
+    let llm = back.llm.expect("llm");
+    assert_eq!(llm.base_url.as_deref(), Some("https://llm.example/v1"));
+    assert_eq!(llm.api_key.as_deref(), Some("sk-test-123"));
+    assert_eq!(llm.model.as_deref(), Some("m1"));
+    assert_eq!(llm.model_cheap.as_deref(), Some("m2"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  /// LLM 环境变量覆盖：只生成配置非空字段（空=继承壳进程环境变量，不覆盖）。
+  #[test]
+  fn llm_env_overrides_only_non_empty_config_fields() {
+    assert!(llm_env_overrides(&AppConfig::default()).is_empty(), "全空配置不产生任何覆盖");
+    let cfg = AppConfig {
+      llm: Some(LlmConfig {
+        base_url: Some("https://llm.example/v1".to_string()),
+        api_key: None,
+        model: Some("m1".to_string()),
+        model_cheap: Some("  ".to_string()),
+      }),
+      ..Default::default()
+    };
+    assert_eq!(
+      llm_env_overrides(&cfg),
+      vec![("LLM_BASE_URL", "https://llm.example/v1".to_string()), ("LLM_MODEL", "m1".to_string())]
+    );
+  }
+
+  /// resolve_field：配置 > 环境变量 > 缺省；apiKey 打码只露前 4 位。
+  #[test]
+  fn resolve_field_priority_and_api_key_mask() {
+    let cfg = resolve_field(Some("cfg-url"), "LLM_BASE_URL");
+    assert_eq!((cfg.value.as_str(), cfg.source.as_str()), ("cfg-url", "config"));
+
+    let env = resolve_field(None, "LLM_BASE_URL");
+    if env.source == "env" {
+      assert!(!env.value.is_empty());
+    } else {
+      assert_eq!(env.source, "default");
+      assert!(env.value.is_empty());
+    }
+
+    let masked = resolve_field_masked(Some("sk-abcdef123456"), "LLM_API_KEY");
+    assert_eq!(masked.source, "config");
+    assert!(masked.value.starts_with("sk-a"), "打码应保留前 4 位: {}", masked.value);
+    assert_ne!(masked.value, "sk-abcdef123456", "打码不得回显整把 key");
+    assert!(resolve_field_masked(None, "LLM_THIS_ENV_DOES_NOT_EXIST").value.is_empty());
   }
 }

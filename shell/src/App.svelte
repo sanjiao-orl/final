@@ -31,37 +31,40 @@
   let booted = $state(false);
   let bootError = $state<string | null>(null);
 
+  /** 连接 core 并初始化各 store + D2 握手 + 首屏数据加载；初次启动与 restart_core 后共用。 */
+  async function connectAndBootCore(): Promise<void> {
+    const { client, workDir } = await connectCore();
+    work.init(client, workDir);
+    chat.init(client);
+    candidates.init(client);
+    snapshot.init(client, workDir);
+    review.init(client, workDir);
+    // 启动握手（D2，对齐 shell/src-tauri/src/lib.rs 的 validate_protocol）：
+    // /v1/health 自报 protocol 字段，期望 v1，不匹配或缺字段直接红条拒接。
+    const health = await client.health();
+    if (typeof health.protocol === 'number' && health.protocol !== EXPECTED_PROTOCOL) {
+      throw new Error(
+        `core 协议版本不兼容：实际 v${health.protocol}，壳期望 v${EXPECTED_PROTOCOL}（见 docs/decisions/0007-协议契约-v1.md）`,
+      );
+    }
+    if (health.protocol === undefined) {
+      throw new Error('core 健康检查缺少 protocol 字段（core 版本过旧？）');
+    }
+    await work.loadStructure();
+    await chat.setScope(''); // 默认无归属讨论
+    await candidates.load();
+  }
+
   onMount(async () => {
+    // 重启 core 后的重连：restart_core 换新进程（新 port/token/workDir），重新连 + 重握手 + 重载数据
+    settings.registerCoreRestartHandler(() => connectAndBootCore());
     try {
-      const { client, workDir } = await connectCore();
-      work.init(client, workDir);
-      chat.init(client);
-      candidates.init(client);
-      snapshot.init(client, workDir);
-      review.init(client, workDir);
-      // 启动握手（D2，对齐 shell/src-tauri/src/lib.rs 的 validate_protocol）：
-      // /v1/health 自报 protocol 字段，期望 v1，不匹配或缺字段直接红条拒接。
-      try {
-        const health = await client.health();
-        if (typeof health.protocol === 'number' && health.protocol !== EXPECTED_PROTOCOL) {
-          throw new Error(
-            `core 协议版本不兼容：实际 v${health.protocol}，壳期望 v${EXPECTED_PROTOCOL}（见 docs/decisions/0007-协议契约-v1.md）`,
-          );
-        }
-        if (health.protocol === undefined) {
-          throw new Error('core 健康检查缺少 protocol 字段（core 版本过旧？）');
-        }
-      } catch (hErr) {
-        bootError = hErr instanceof Error ? hErr.message : String(hErr);
-        return;
-      }
-      await work.loadStructure();
-      await chat.setScope(''); // 默认无归属讨论
-      await candidates.load();
+      await connectAndBootCore();
       booted = true;
     } catch (err) {
       bootError = err instanceof Error ? err.message : String(err);
     }
+    void settings.loadAppConfig(); // 应用级配置（作品目录 + LLM）进 store，设置面板可改
   });
 
   // 自动保存：间隔跟随设置（30/60/120s），有脏改动才落盘，失败走显式红条；saveCurrent 自带 saving 互斥

@@ -1,13 +1,37 @@
 <script lang="ts">
   // 设置栏（开放项 2 定稿）：审批模式 ask/auto/yolo、外观（主题/字号/打字机）、
   // 保存与快照（自动保存间隔、采纳前自动快照常开）、暂存与裁决（分流/采纳留痕）。
+  // 第二步新增：作品目录（config.json workDir）+ 模型配置（BYOK 双档 LLM_*），保存后重启 core 生效。
+  import { open } from '@tauri-apps/plugin-dialog';
   import { settings, type ApprovalMode } from '../../lib/settings.svelte.js';
+  import type { ResolvedField } from '../../lib/settings.svelte.js';
 
   const APPROVALS: { mode: ApprovalMode; name: string; desc: string }[] = [
     { mode: 'ask', name: 'ask · 逐项询问', desc: 'AI 直调写/删/导出前一律弹审批卡；暂存采纳路径不弹（已有人的裁决）。默认。' },
     { mode: 'auto', name: 'auto · 同类放行', desc: '本会话内同工具同目标放行一次后不再询问，换目标仍询问。' },
     { mode: 'yolo', name: 'yolo · 完全放手', desc: '全部自动放行。所有写入仍强制事前快照（B4 不受模式影响）。' },
   ];
+
+  const SRC_LABEL: Record<ResolvedField['source'], string> = {
+    config: '配置',
+    env: '环境变量',
+    default: '缺省',
+  };
+
+  /** 占位符：当前生效值 + 来源；无值给回落提示。 */
+  function ph(f: ResolvedField | undefined, hint: string): string {
+    if (!f) return hint;
+    return f.value ? `当前生效（${SRC_LABEL[f.source]}）：${f.value}` : `当前生效（缺省）：${hint}`;
+  }
+
+  async function pickWorkDir(): Promise<void> {
+    try {
+      const dir = await open({ directory: true, title: '选择作品目录' });
+      if (typeof dir === 'string' && dir) settings.appWorkDir = dir;
+    } catch {
+      settings.appError = '选择文件夹失败（非 Tauri 环境？）';
+    }
+  }
 </script>
 
 <div class="group">
@@ -50,6 +74,58 @@
       <span class="sl"></span>
     </label>
   </div>
+</div>
+
+<div class="group">
+  <div class="label">作 品 目 录</div>
+  <div class="row">
+    <div class="r-label">当前作品目录</div>
+    <div class="r-desc">
+      {settings.configStatus
+        ? `${settings.configStatus.workDir.value}（来源：${SRC_LABEL[settings.configStatus.workDir.source]}）`
+        : 'core 启动时决定（未加载）'}
+    </div>
+    <div class="row-inline">
+      <input class="text" placeholder="留空 = 默认目录" bind:value={settings.appWorkDir} aria-label="配置的作品目录" />
+      <button class="btn" onclick={() => void pickWorkDir()}>选择文件夹…</button>
+    </div>
+    <div class="r-desc">换书/换目录不用再改环境变量：填好后保存配置并「立即重启 core」即切换。</div>
+  </div>
+</div>
+
+<div class="group">
+  <div class="label">模 型 配 置（BYOK 双档）</div>
+  <div class="row">
+    <div class="r-label">Base URL</div>
+    <input class="text" placeholder={ph(settings.configStatus?.baseUrl, '回落环境变量 LLM_BASE_URL')} bind:value={settings.appBaseUrl} />
+  </div>
+  <div class="row">
+    <div class="r-label">API Key</div>
+    <input class="text" type="password" placeholder={ph(settings.configStatus?.apiKey, '回落环境变量 LLM_API_KEY')} bind:value={settings.appApiKey} />
+  </div>
+  <div class="row">
+    <div class="r-label">写作档模型</div>
+    <input class="text" placeholder={ph(settings.configStatus?.model, '回落环境变量 LLM_MODEL')} bind:value={settings.appModel} />
+  </div>
+  <div class="row">
+    <div class="r-label">后台档模型（便宜）</div>
+    <input class="text" placeholder={ph(settings.configStatus?.modelCheap, '回落环境变量 LLM_MODEL_CHEAP，再缺省同写作档')} bind:value={settings.appModelCheap} />
+  </div>
+  <div class="row-inline">
+    <button class="btn primary" disabled={settings.saving} onclick={() => void settings.saveAppConfig()}>
+      {settings.saving ? '保存中…' : '保存配置'}
+    </button>
+    <button class="btn" disabled={settings.restarting || settings.saving} onclick={() => void settings.restartCore()}>
+      {settings.restarting ? '重启中…' : '立即重启 core'}
+    </button>
+  </div>
+  {#if settings.appNotice}
+    <div class="status ok-line"><span>{settings.appNotice}</span><button onclick={() => settings.dismissAppNotice()} aria-label="关闭">×</button></div>
+  {/if}
+  {#if settings.appError}
+    <div class="status err-line"><span>{settings.appError}</span><button onclick={() => settings.dismissAppError()} aria-label="关闭">×</button></div>
+  {/if}
+  <div class="note">API Key 明文存储于本机应用数据目录（config.json），纯本地单用户使用。模型/作品目录是 core 启动时读取的：保存配置后点「立即重启 core」即可生效，无需重启应用。</div>
 </div>
 
 <div class="group">
@@ -191,6 +267,81 @@
   .row.inline .r-label {
     flex: 1;
     margin: 0;
+  }
+  .row-inline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 7px;
+  }
+  .text {
+    flex: 1;
+    min-width: 0;
+    height: 27px;
+    padding: 0 8px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--panel);
+    font-size: 12px;
+    color: var(--ink);
+    outline: none;
+  }
+  .text:focus {
+    border-color: var(--accent);
+  }
+  .btn {
+    height: 27px;
+    padding: 0 12px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--ink);
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all var(--t-hover);
+  }
+  .btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  .btn.primary:hover:not(:disabled) {
+    opacity: 0.88;
+    color: #fff;
+  }
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .status {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 6px 0;
+    padding: 6px 9px;
+    border-radius: 6px;
+    font-size: 11px;
+    line-height: 1.5;
+  }
+  .status button {
+    font-size: 13px;
+    padding: 0 3px;
+  }
+  .ok-line {
+    background: color-mix(in srgb, var(--ok) 10%, var(--panel));
+    color: var(--ok);
+    border: 1px solid var(--ok);
+  }
+  .err-line {
+    background: color-mix(in srgb, var(--danger) 10%, var(--panel));
+    color: var(--danger);
+    border: 1px solid var(--danger);
   }
   .seg {
     display: flex;
