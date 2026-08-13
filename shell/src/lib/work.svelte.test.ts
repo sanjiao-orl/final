@@ -63,6 +63,28 @@ describe('WorkStore', () => {
     expect(work.dirty).toBe(false);
   });
 
+  it('reloadCurrent：跳过脏保存门禁，以磁盘内容刷新 current 并 bump reloadNonce', async () => {
+    const callTool = vi
+      .fn()
+      .mockResolvedValueOnce(READ_RESULT) // openChapter 的 read_chapter
+      .mockResolvedValueOnce({ ...READ_RESULT, body: '磁盘新文' }); // reloadCurrent 的 read_chapter
+    const client = mockClient({ callTool });
+    const work = new WorkStore();
+    work.init(client, 'C:/works/demo');
+    await work.openChapter(VOLUME[0]!.children[0]!);
+    work.registerEditor({ getMd: () => '旧编辑器文', applyEdit: () => 'not-found' });
+    work.dirty = true;
+    await work.reloadCurrent();
+    expect(callTool).toHaveBeenCalledTimes(2); // 只重读，不写回旧编辑器内容
+    expect(callTool).toHaveBeenLastCalledWith('read_chapter', {
+      workDir: 'C:/works/demo',
+      relPath: '第一卷/第一章.md',
+    });
+    expect(work.current?.savedMd).toBe('磁盘新文');
+    expect(work.dirty).toBe(false);
+    expect(work.reloadNonce).toBe(1);
+  });
+
   it('openChapter 失败：显式报错，不切章', async () => {
     const client = mockClient({ callTool: vi.fn().mockRejectedValue(new Error('文件不存在')) });
     const work = new WorkStore();

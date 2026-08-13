@@ -174,25 +174,41 @@ export class ChatStore {
 
   /**
    * B6 审批裁决：允许一次 / 允许本会话 / 拒绝（拒绝走补偿还原）。
+   * callId 可选：审批卡按 active 裁决；工具卡上的拒绝按钮按本卡 callId 裁决，避免误拒最旧卡。
    * 拒绝语义（core 在事件流内已执行，壳做撤销）：write_chapter → 事前快照还原；
    * delete_chapter → 从 .novel/trash/ 读回原内容写回原路径；export_txt → 提示文件保留路径。
    */
-  async resolveApproval(verdict: 'once' | 'session' | 'reject'): Promise<void> {
-    const req = approval.active;
+  async resolveApproval(verdict: 'once' | 'session' | 'reject', callId?: string): Promise<void> {
+    const req = callId ? approval.pending.find((p) => p.callId === callId) : approval.active;
     if (!req) return;
     if (verdict === 'reject') {
       await this.rejectApproval(req);
+    } else {
+      this.markToolResolved(req.callId, 'done');
+      // B6 放行 AI 直写当前打开章：core 已落盘，编辑器以磁盘为准重载，避免旧文覆盖 AI 写入。
+      if (
+        req.name === 'write_chapter' &&
+        typeof req.args.relPath === 'string' &&
+        work.current?.relPath === req.args.relPath
+      ) {
+        await work.reloadCurrent();
+      }
     }
     approval.resolve(req.callId, verdict);
   }
 
-  private async rejectApproval(req: { callId: string; name: string; args: Record<string, unknown> }): Promise<void> {
-    // 该调用对应的工具卡落定为 rejected（结果已到则保留结果就地审阅）
+  /** 把指定工具行推进到终态（放行 done / 拒绝 rejected）。 */
+  private markToolResolved(callId: string, state: ToolState): void {
     for (const m of this.messages) {
       for (const t of m.tools ?? []) {
-        if (t.id === req.callId) t.state = 'rejected';
+        if (t.id === callId) t.state = state;
       }
     }
+  }
+
+  private async rejectApproval(req: { callId: string; name: string; args: Record<string, unknown> }): Promise<void> {
+    // 该调用对应的工具卡落定为 rejected（结果已到则保留结果就地审阅）
+    this.markToolResolved(req.callId, 'rejected');
     try {
       if (req.name === 'write_chapter') {
         const rel = typeof req.args.relPath === 'string' ? req.args.relPath : '';
@@ -203,7 +219,7 @@ export class ChatStore {
       } else if (req.name === 'delete_chapter') {
         const rel = typeof req.args.relPath === 'string' ? req.args.relPath : '';
         if (rel) {
-          // 删除是软删：从 trash 里找回最新一份同名内容写回原路径（read_chapter 不限 manuscript）
+          // 删除是软删：从 trash 里找回最新一份同名内容写回原路径（read_chapter 特许读 .novel/trash/ 内的 .md）
           const trashPath = this.trashPathOf(req.callId, rel);
           if (trashPath) {
             const r = await this.client.callTool<{ content: string }>('read_chapter', {

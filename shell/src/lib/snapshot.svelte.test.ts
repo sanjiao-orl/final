@@ -9,6 +9,8 @@ beforeEach(() => {
   work.notice = null;
   work.current = null;
   work.structure = [];
+  work.dirty = false;
+  work.reloadNonce = 0;
 });
 
 function mockClient(overrides: Record<string, unknown> = {}): CoreClient {
@@ -57,7 +59,7 @@ describe('SnapshotStore', () => {
       .fn()
       .mockResolvedValueOnce({ ok: true, content: '旧内容' }) // read_snapshot
       .mockResolvedValueOnce(undefined) // write_chapter
-      .mockResolvedValueOnce({ type: 'chapter', title: '第一章', relPath: 'manuscript/a.md', wordCount: 3, scenes: [] }) // findChapter→openChapter 的 read_chapter
+      .mockResolvedValueOnce({ content: '旧内容', frontmatter: {}, frontmatterRaw: '', body: '旧内容' }) // reloadCurrent 的 read_chapter
       .mockResolvedValueOnce([]); // loadStructure
     const client = mockClient({ callTool });
     work.init(client, 'C:/works/demo');
@@ -68,6 +70,7 @@ describe('SnapshotStore', () => {
       frontmatter: {},
       savedMd: '新内容',
     };
+    work.dirty = true;
     work.structure = [
       {
         type: 'volume',
@@ -88,6 +91,15 @@ describe('SnapshotStore', () => {
       relPath: 'manuscript/a.md',
       content: '旧内容',
     });
+    // 缺陷 1：还原当前章后必须重读磁盘（旧实现 openChapter 同 relPath 早退，假绿）。
+    expect(callTool).toHaveBeenNthCalledWith(3, 'read_chapter', {
+      workDir: 'C:/works/demo',
+      relPath: 'manuscript/a.md',
+    });
+    expect(callTool).toHaveBeenNthCalledWith(4, 'list_structure', { workDir: 'C:/works/demo' });
+    expect(work.current?.savedMd).toBe('旧内容');
+    expect(work.dirty).toBe(false);
+    expect(work.reloadNonce).toBe(1);
     expect(work.notice).toContain('已还原');
   });
 

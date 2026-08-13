@@ -35,6 +35,8 @@ export class WorkStore {
   current = $state<OpenChapter | null>(null);
   /** 待跳转的场景标题（打开章后由 Editor 消费）。 */
   pendingScene = $state<string | null>(null);
+  /** 同章重载计数：App 按 relPath + 该值 keyed Editor，磁盘回写后强制编辑器重挂载。 */
+  reloadNonce = $state(0);
   dirty = $state(false);
   saving = $state(false);
   loading = $state(false);
@@ -297,12 +299,36 @@ export class WorkStore {
     return this.editorApi.insertAfter(original, proposed);
   }
 
-  /** 重载当前章（快照还原等磁盘回写后刷新现场）。 */
+  /**
+   * 重载当前章（快照还原、AI 直写放行等磁盘回写后刷新现场）。
+   * 与 openChapter 不同：跳过脏保存门禁，直接以磁盘内容为准，避免旧编辑器内容写回覆盖磁盘。
+   */
   async reloadCurrent(): Promise<void> {
     const cur = this.current;
     if (!cur) return;
-    const node = this.findChapter(cur.relPath);
-    if (node) await this.openChapter(node);
+    this.error = null;
+    try {
+      const r = await this.client.callTool<ReadChapterResult>('read_chapter', {
+        workDir: this.workDir,
+        relPath: cur.relPath,
+      });
+      const node = this.findChapter(cur.relPath);
+      const open: OpenChapter = {
+        relPath: cur.relPath,
+        title: node?.title ?? cur.title,
+        frontmatterRaw: r.frontmatterRaw,
+        frontmatter: r.frontmatter,
+        savedMd: r.body,
+      };
+      if (typeof r.frontmatter.goal === 'number') open.goal = r.frontmatter.goal;
+      if (typeof r.frontmatter.id === 'string') open.id = r.frontmatter.id;
+      this.current = open;
+      this.pendingScene = null;
+      this.dirty = false;
+      this.reloadNonce++;
+    } catch (err) {
+      this.error = `重载章节失败：${err instanceof Error ? err.message : String(err)}`;
+    }
   }
 }
 

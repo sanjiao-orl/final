@@ -62,7 +62,7 @@
   }
 
   async function reject(): Promise<void> {
-    await chat.resolveApproval('reject');
+    await chat.resolveApproval('reject', tool.id);
   }
 
   function stateColor(): string {

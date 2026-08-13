@@ -92,10 +92,9 @@ export class SnapshotStore {
         relPath,
         content: r.content,
       });
-      // 若当前正开该章：重载磁盘内容（保留 frontmatterRaw 解析）
+      // 若当前正开该章：以磁盘为准重载现场（跳过脏保存，避免旧编辑器内容写回覆盖还原结果）
       if (work.current?.relPath === relPath) {
-        const node = work.findChapter(relPath);
-        if (node) await work.openChapter(node);
+        await work.reloadCurrent();
       }
       await work.loadStructure();
       work.notice = `已还原 ${relPath}（快照 ${snapshotPath.split('/').pop()}）`;

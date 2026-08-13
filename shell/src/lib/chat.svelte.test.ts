@@ -14,6 +14,9 @@ beforeEach(() => {
   work.error = null;
   work.notice = null;
   work.current = null;
+  work.structure = [];
+  work.dirty = false;
+  work.reloadNonce = 0;
   // approval 是模块单例：清挂起卡，避免跨用例泄漏
   approval.pending = [];
   approval.active = null;
@@ -260,10 +263,34 @@ describe('ChatStore · B6 审批联动', () => {
     await chat.send('写一次');
     expect(approval.active?.callId).toBe('w1');
     await chat.resolveApproval('session');
+    // 缺陷 2：放行本会话后，第一次的工具卡必须从 pending 推进到 done（否则卡片永久假死）。
+    expect(chat.messages[1]?.tools?.[0]?.state).toBe('done');
     expect(approval.pending).toEqual([]);
     await chat.send('再写一次');
     expect(chat.messages[3]?.tools?.[0]?.state).toBe('done');
     expect(approval.pending).toEqual([]);
+  });
+
+  it('auto 模式：允许一次后本次工具卡落 done，第二次同类同目标仍询问', async () => {
+    let n = 0;
+    const chatStream = vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+      n++;
+      h.onToolCall?.({ id: `w${n}`, name: 'write_chapter', args: { relPath: 'manuscript/once.md' } });
+      h.onToolResult?.({ id: `w${n}`, name: 'write_chapter', result: { ok: true } });
+      h.onDone?.({ sessionId: 's1', messageId: `m${n}` });
+    });
+    const client = streamClient({ chatStream });
+    const chat = new ChatStore();
+    chat.init(client);
+    settings.approvalMode = 'auto';
+    await chat.send('写一次');
+    expect(chat.messages[1]?.tools?.[0]?.state).toBe('pending');
+    await chat.resolveApproval('once');
+    expect(chat.messages[1]?.tools?.[0]?.state).toBe('done');
+    expect(approval.pending).toEqual([]);
+    await chat.send('再写一次');
+    expect(chat.messages[3]?.tools?.[0]?.state).toBe('pending');
+    expect(approval.active?.callId).toBe('w2');
   });
 
   it('拒绝 write_chapter：工具卡落 rejected，走快照还原补偿', async () => {
@@ -297,5 +324,60 @@ describe('ChatStore · B6 审批联动', () => {
       relPath: 'manuscript/a.md',
       content: '旧内容',
     });
+  });
+
+  it('放行 write_chapter 且目标是当前打开章：重载当前章刷新 savedMd 与编辑器现场', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+      h.onToolCall?.({ id: 'w1', name: 'write_chapter', args: { relPath: 'manuscript/a.md', content: 'AI 新文' } });
+      h.onToolResult?.({ id: 'w1', name: 'write_chapter', result: { ok: true } });
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const callTool = vi
+      .fn()
+      .mockResolvedValue({ content: 'AI 新文', frontmatter: {}, frontmatterRaw: '---\n---\n', body: 'AI 新文' });
+    const client = streamClient({ chatStream, callTool });
+    const chat = new ChatStore();
+    chat.init(client);
+    work.init(client, 'C:/works/demo');
+    work.current = {
+      relPath: 'manuscript/a.md',
+      title: '第一章',
+      frontmatterRaw: '---\n---\n',
+      frontmatter: {},
+      savedMd: '旧文',
+    };
+    settings.approvalMode = 'ask';
+    await chat.send('帮我写');
+    expect(chat.messages[1]?.tools?.[0]?.state).toBe('pending');
+    await chat.resolveApproval('once');
+    expect(callTool).toHaveBeenCalledWith('read_chapter', {
+      workDir: 'C:/works/demo',
+      relPath: 'manuscript/a.md',
+    });
+    expect(work.current?.savedMd).toBe('AI 新文');
+    expect(work.reloadNonce).toBe(1);
+    expect(chat.messages[1]?.tools?.[0]?.state).toBe('done');
+  });
+
+  it('多挂起卡：按 callId 拒绝本卡，不影响其他挂起卡', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+      h.onToolCall?.({ id: 'w1', name: 'write_chapter', args: { relPath: 'manuscript/a.md' } });
+      h.onToolResult?.({ id: 'w1', name: 'write_chapter', result: { ok: true } });
+      h.onToolCall?.({ id: 'e1', name: 'export_txt', args: {} });
+      h.onToolResult?.({ id: 'e1', name: 'export_txt', result: { path: 'C:/works/demo/全稿.txt' } });
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const client = streamClient({ chatStream });
+    const chat = new ChatStore();
+    chat.init(client);
+    settings.approvalMode = 'ask';
+    await chat.send('写一章并导出');
+    expect(chat.messages[1]?.tools?.map((t) => t.state)).toEqual(['pending', 'pending']);
+    expect(approval.active?.callId).toBe('w1');
+    await chat.resolveApproval('reject', 'e1');
+    expect(chat.messages[1]?.tools?.find((t) => t.id === 'e1')?.state).toBe('rejected');
+    expect(chat.messages[1]?.tools?.find((t) => t.id === 'w1')?.state).toBe('pending');
+    expect(approval.pending.map((p) => p.callId)).toEqual(['w1']);
+    expect(approval.active?.callId).toBe('w1');
   });
 });

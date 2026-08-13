@@ -113,7 +113,7 @@
       <section class="center">
         <div class="editor-area">
           {#if work.current}
-            {#key work.current.relPath}
+            {#key `${work.current.relPath}:${work.reloadNonce}`}
               <Editor
                 html={mdToHtml(work.current.savedMd)}
                 typewriter={settings.typewriter}
