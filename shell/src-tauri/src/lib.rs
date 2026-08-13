@@ -1,5 +1,5 @@
 // 壳进程职责（docs/decisions/0002）：拉起 core sidecar（node 直起，--parent-pid 交给 core 孤儿守护），
-// 从 stdout 解析 {event:"ready",port,token} 供前端 core_info 取用；Tauri updater Day-1 接入（占位端点，失败静默）。
+// 从 stdout 解析 {event:"ready",port,token} 供前端 core_info 取用；Tauri updater 真实端点（GitHub Releases latest.json）。
 // 应用配置持久化（第二步）：config.json（app_config_dir）存作品目录 + LLM 双档模型，字段可空=回落环境变量/缺省；
 // 设置面板经 read_config/write_config/config_status 读写，restart_core 杀旧起新让配置立即生效。
 use std::io::{BufRead, BufReader};
@@ -472,17 +472,62 @@ fn restart_core(
   spawn_and_watch(&app, &core, state.inner())
 }
 
-/// Tauri updater Day-1：启动即后台检查；端点是占位，失败只记日志不打扰作者。
+/// Tauri updater 启动后台检查：真实端点（GitHub Releases latest.json）；
+/// 发现新版本后下载校验并交给 passive 安装器，随后由安装器接管/重启。
 fn check_updates(app: &tauri::AppHandle) {
   let handle = app.clone();
   tauri::async_runtime::spawn(async move {
-    match handle.updater() {
-      Ok(updater) => match updater.check().await {
-        Ok(Some(update)) => log::info!("[updater] 发现新版本 {}", update.version),
-        Ok(None) => log::info!("[updater] 已是最新"),
-        Err(e) => log::warn!("[updater] 检查失败（占位端点，预期内）: {e}"),
-      },
-      Err(e) => log::warn!("[updater] 初始化失败: {e}"),
+    let updater = match handle.updater() {
+      Ok(updater) => updater,
+      Err(e) => {
+        log::warn!("[updater] 初始化失败: {e}");
+        return;
+      }
+    };
+    let update = match updater.check().await {
+      Ok(Some(update)) => update,
+      Ok(None) => {
+        log::info!("[updater] 已是最新");
+        return;
+      }
+      Err(e) => {
+        log::warn!("[updater] 检查失败: {e}");
+        return;
+      }
+    };
+
+    log::info!(
+      "[updater] 发现新版本 v{}（当前 v{}）",
+      update.version,
+      update.current_version
+    );
+    log::info!("[updater] 开始下载 {}", update.download_url);
+
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let downloaded_for_log = Arc::clone(&downloaded);
+    match update
+      .download_and_install(
+        move |chunk, total| {
+          let n = downloaded_for_log.fetch_add(chunk as u64, Ordering::SeqCst) + chunk as u64;
+          // 每跨过约 8 MiB 记一次进度，避免刷屏
+          if n % (8 * 1024 * 1024) < chunk as u64 {
+            match total {
+              Some(total) => log::info!(
+                "[updater] 下载进度 {}%（{} / {} 字节）",
+                n * 100 / total,
+                n,
+                total
+              ),
+              None => log::info!("[updater] 已下载 {n} 字节"),
+            }
+          }
+        },
+        || log::info!("[updater] 下载完成，开始安装（passive）"),
+      )
+      .await
+    {
+      Ok(()) => log::info!("[updater] 安装器已启动，等待安装完成并重启"),
+      Err(e) => log::error!("[updater] 下载或安装失败: {e}"),
     }
   });
 }

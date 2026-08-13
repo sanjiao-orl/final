@@ -36,7 +36,15 @@ node core/scripts/e2e.mjs   # 真实 LLM e2e(key 在场才跑)
 
 ## 更新通道
 
-- updater 为占位接入(检查端点指向 `http://127.0.0.1:9/...`,启动即后台检查,失败只记日志不打扰):本仓是自用项目、无发布通道,不构建安装包更新链;后续要对外分发时再接真实端点。
+- 端点:`https://github.com/sanjiao-orl/final/releases/latest/download/latest.json`(Tauri updater 标准静态 latest.json,启动后台检查,发现新版本即下载校验并走 passive 安装)。
+- 发布命令(在仓库根,需 `gh` 已登录 github.com):
+  ```bash
+  npm run release -- 0.1.1          # 指定版本
+  npm run release -- patch          # 或 patch / minor / major 自增
+  ```
+  脚本 `scripts/release.mjs` 会同步 `shell/src-tauri/tauri.conf.json`、`shell/package.json`、`shell/src-tauri/Cargo.toml` 三处版本号 → 带签名私钥跑 `npx tauri build --ci` → 收集 NSIS/MSI 与 `.sig` → 生成 `latest.json` → `gh release create/upload` 上传资产。
+- 签名密钥在仓外 `%USERPROFILE%\.tauri\novel-ws.key`(本仓为空密码;pubkey 已写入 tauri.conf.json,私钥绝不入库)。可用 `TAURI_SIGNING_PRIVATE_KEY_PATH` 覆盖路径,或 `TAURI_SIGNING_PRIVATE_KEY` 直接给密钥内容;密码用 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。
+- 发布后需手动提交版本号变更并打 tag:`git add shell/src-tauri/tauri.conf.json shell/package.json shell/src-tauri/Cargo.toml shell/src-tauri/Cargo.lock && git commit -m "chore: bump vX.Y.Z" && git tag vX.Y.Z && git push origin main vX.Y.Z`。
 
 ## production 打包（sidecar 随安装包分发）
 
