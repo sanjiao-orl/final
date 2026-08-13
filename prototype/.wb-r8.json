@@ -1,1 +1,0 @@
-{"action":"evaluate","args":{"code":"document.getElementById('app').classList.remove('show-approval'); document.getElementById('app').classList.add('show-settings'); 'settings'"},"session":"shell-proto-review"}

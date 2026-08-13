@@ -1,1 +1,0 @@
-{"action":"evaluate","args":{"code":"(async()=>{document.getElementById('proto-panel').style.display='none';document.getElementById('app').classList.add('show-approval');await new Promise(r=>setTimeout(r,600));return getComputedStyle(document.getElementById('approval-overlay')).opacity})()"},"session":"shell-proto-review"}

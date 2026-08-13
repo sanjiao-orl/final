@@ -1,1 +1,0 @@
-{"action":"evaluate","args":{"code":"document.documentElement.dataset.theme='light'; document.getElementById('app').classList.add('show-approval'); 'approval'"},"session":"shell-proto-review"}
