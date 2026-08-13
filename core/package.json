@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "tsx watch src/main.ts",
     "start": "tsx src/main.ts",
+    "build": "node ../scripts/build-sidecar.mjs --only core",
     "check": "tsc --noEmit -p .",
     "test": "vitest run",
     "e2e": "node scripts/e2e.mjs"

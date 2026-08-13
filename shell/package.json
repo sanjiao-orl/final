@@ -8,6 +8,7 @@
     "dev": "node scripts/dev-env.mjs",
     "dev:vite": "vite",
     "build": "vite build",
+    "build:sidecar": "node ../scripts/build-sidecar.mjs",
     "check": "svelte-check --tsconfig ./tsconfig.json && tsc --noEmit -p tsconfig.node.json",
     "test": "vitest run",
     "tauri": "tauri"

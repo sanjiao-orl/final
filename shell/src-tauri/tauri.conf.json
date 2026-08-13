@@ -7,7 +7,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": "npm run dev:vite",
-    "beforeBuildCommand": "npm run build"
+    "beforeBuildCommand": "npm run build && npm run build:sidecar"
   },
   "app": {
     "windows": [
@@ -27,6 +27,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE0OEI3Q0ZDRDJFMEJDNDQKUldSRXZPRFMvSHlMcElrYmdHcXpqRTJRNnd3cXZhQ281dG5nZG05cm1YRUphTi8wbmJZYVpHaDcK",
       "endpoints": ["http://127.0.0.1:9/novel-ws/{{target}}/{{current_version}}"],
+      "dangerousInsecureTransportProtocol": true,
       "windows": { "installMode": "passive" }
     }
   },
@@ -40,6 +41,11 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": {
+      "resources/sidecar/node.exe": "sidecar/node.exe",
+      "../../core/dist/main.mjs": "sidecar/core/main.mjs",
+      "../../domain/dist/server.mjs": "sidecar/domain/server.mjs"
+    },
     "android": {
       "debugApplicationIdSuffix": ".debug"
     }

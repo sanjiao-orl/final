@@ -1,9 +1,10 @@
 // 壳进程职责（docs/decisions/0002）：拉起 core sidecar（node 直起，--parent-pid 交给 core 孤儿守护），
 // 从 stdout 解析 {event:"ready",port,token} 供前端 core_info 取用；Tauri updater Day-1 接入（占位端点，失败静默）。
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use tauri::Manager;
 use tauri_plugin_updater::UpdaterExt;
 
 /// 协议契约版本（core 侧自报，docs/decisions/0007）。壳只认这个版本，不匹配即拒接。
@@ -56,6 +57,16 @@ fn repo_root() -> Result<PathBuf, String> {
     .map_err(|e| format!("定位仓库根失败: {e}"))
 }
 
+/// Tauri 在 Windows 上给的 resource_dir 可能是 \\?\ 前缀的 verbatim 路径，
+/// Node 解析入口脚本会 EISDIR（已实测）；这里剥成普通绝对路径。
+fn plain_path(path: &Path) -> PathBuf {
+  let s = path.to_string_lossy();
+  match s.strip_prefix(r"\\?\") {
+    Some(stripped) => PathBuf::from(stripped),
+    None => path.to_path_buf(),
+  }
+}
+
 /// 作品目录：NOVEL_WORK_DIR 可覆盖，缺省 <repo>/.demo-work。
 fn work_dir() -> Result<PathBuf, String> {
   if let Ok(dir) = std::env::var("NOVEL_WORK_DIR") {
@@ -64,25 +75,62 @@ fn work_dir() -> Result<PathBuf, String> {
   Ok(repo_root()?.join(".demo-work"))
 }
 
-/// 拉起 core：node --import tsx core/src/main.ts（cwd=仓库根解析依赖），NOVEL_DIR=<作品>/.novel。
-fn spawn_core() -> Result<Child, String> {
-  let root = repo_root()?;
-  let work = work_dir()?;
+/// 拉起 core。
+/// dev（debug build）保持现状：node --import tsx core/src/main.ts，cwd=仓库根解析依赖。
+/// prod（release build）：从 Tauri resource_dir 找 node.exe + core/domain 编译产物，
+/// 并通过 MCP_DOMAIN_CMD 让 core 拉起资源目录里的 domain bundle；CORE_RUNTIME_FILE 落到作品目录。
+fn spawn_core(resource_dir: Option<PathBuf>, work: &Path) -> Result<Child, String> {
   let novel_dir = work.join(".novel");
   std::fs::create_dir_all(&novel_dir).map_err(|e| format!("创建 .novel 目录失败: {e}"))?;
   log::info!("[shell] 作品目录: {}", work.display());
 
-  let mut cmd = Command::new("node");
-  cmd
-    .arg("--import")
-    .arg("tsx")
-    .arg(root.join("core").join("src").join("main.ts"))
-    .arg("--parent-pid")
-    .arg(std::process::id().to_string())
-    .current_dir(&root)
-    .env("NOVEL_DIR", &novel_dir)
-    .stdout(Stdio::piped())
-    .stderr(Stdio::inherit());
+  let mut cmd;
+  if let Some(resources) = resource_dir {
+    let node_exe = resources.join("sidecar").join("node.exe");
+    let core_js = resources.join("sidecar").join("core").join("main.mjs");
+    let domain_js = resources.join("sidecar").join("domain").join("server.mjs");
+    for (file, label) in [
+      (&node_exe, "node 运行时"),
+      (&core_js, "core 编译产物"),
+      (&domain_js, "domain 编译产物"),
+    ] {
+      if !file.is_file() {
+        return Err(format!("安装包资源缺失{label}: {}", file.display()));
+      }
+    }
+
+    log::info!(
+      "[shell] prod sidecar: node={} core={} domain={}",
+      node_exe.display(),
+      core_js.display(),
+      domain_js.display()
+    );
+    cmd = Command::new(&node_exe);
+    cmd
+      .arg(&core_js)
+      .arg("--parent-pid")
+      .arg(std::process::id().to_string())
+      .current_dir(&resources)
+      .env("NOVEL_DIR", &novel_dir)
+      .env("CORE_RUNTIME_FILE", novel_dir.join("core-runtime.local.json"))
+      .env(
+        "MCP_DOMAIN_CMD",
+        format!("\"{}\" \"{}\"", node_exe.display(), domain_js.display()),
+      );
+  } else {
+    let root = repo_root()?;
+    cmd = Command::new("node");
+    cmd
+      .arg("--import")
+      .arg("tsx")
+      .arg(root.join("core").join("src").join("main.ts"))
+      .arg("--parent-pid")
+      .arg(std::process::id().to_string())
+      .current_dir(&root)
+      .env("NOVEL_DIR", &novel_dir);
+  }
+
+  cmd.stdout(Stdio::piped()).stderr(Stdio::inherit());
   #[cfg(windows)]
   {
     use std::os::windows::process::CommandExt;
@@ -91,7 +139,7 @@ fn spawn_core() -> Result<Child, String> {
   }
   let child = cmd
     .spawn()
-    .map_err(|e| format!("启动 core 失败（node 需在 PATH）: {e}"))?;
+    .map_err(|e| format!("启动 core 失败: {e}"))?;
   Ok(child)
 }
 
@@ -151,6 +199,27 @@ fn watch_core(child: &mut Child, shared: Shared, work_dir: String) {
   });
 }
 
+/// 计算 core 启动所需的 work 目录与（生产模式下的）资源目录。
+/// dev 保持现状；prod 用 Tauri 应用数据目录做作品根，资源目录指向安装包里的 resources。
+fn resolve_startup_paths(app: &tauri::App) -> Result<(PathBuf, Option<PathBuf>), String> {
+  if cfg!(debug_assertions) {
+    return Ok((work_dir()?, None));
+  }
+  let data_dir = plain_path(
+    &app
+      .path()
+      .app_data_dir()
+      .map_err(|e| format!("定位应用数据目录失败: {e}"))?,
+  );
+  let resource_dir = plain_path(
+    &app
+      .path()
+      .resource_dir()
+      .map_err(|e| format!("定位资源目录失败: {e}"))?,
+  );
+  Ok((data_dir.join(".demo-work"), Some(resource_dir)))
+}
+
 /// Tauri updater Day-1：启动即后台检查；端点是占位，失败只记日志不打扰作者。
 fn check_updates(app: &tauri::AppHandle) {
   let handle = app.clone();
@@ -181,10 +250,19 @@ pub fn run() {
     .manage(shared)
     .invoke_handler(tauri::generate_handler![core_info])
     .setup(move |app| {
-      match spawn_core() {
+      let (work, resource_dir) = match resolve_startup_paths(app) {
+        Ok(paths) => paths,
+        Err(e) => {
+          log::error!("[shell] {e}");
+          if let Ok(mut guard) = shared_for_spawn.lock() {
+            *guard = CoreState::Failed(e);
+          }
+          return Ok(());
+        }
+      };
+      match spawn_core(resource_dir, &work) {
         Ok(mut child) => {
-          let work = work_dir().unwrap_or_default().to_string_lossy().to_string();
-          watch_core(&mut child, Arc::clone(&shared_for_spawn), work);
+          watch_core(&mut child, Arc::clone(&shared_for_spawn), work.to_string_lossy().to_string());
           // Child 不随 drop 被杀；壳退出后由 core 孤儿守护（--parent-pid）收尾
           std::mem::forget(child);
         }

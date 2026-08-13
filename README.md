@@ -38,6 +38,12 @@ node core/scripts/e2e.mjs   # 真实 LLM e2e(key 在场才跑)
 
 - updater 为占位接入(检查端点指向 `http://127.0.0.1:9/...`,启动即后台检查,失败只记日志不打扰):本仓是自用项目、无发布通道,不构建安装包更新链;后续要对外分发时再接真实端点。
 
+## production 打包（sidecar 随安装包分发）
+
+- `npm run build:sidecar`：用 esbuild 把 `core/src/main.ts`、`domain/src/server.ts` 打成单文件 ESM bundle（`core/dist/main.mjs`、`domain/dist/server.mjs`），并把本机 Node 24 运行时复制到 `shell/src-tauri/resources/sidecar/node.exe`（该目录不入库）。
+- `cd shell && npx tauri build`：`beforeBuildCommand` 会先构建前端与 sidecar；`bundle.resources` 把 `sidecar/node.exe`、`sidecar/core/main.mjs`、`sidecar/domain/server.mjs` 收进安装包资源目录。
+- 发布形态：release 壳从 Tauri resource_dir 拉起 node.exe + core bundle，并通过 `MCP_DOMAIN_CMD` 指向资源目录里的 domain bundle；dev 模式仍走仓库源码 + `tsx`，行为不变。作品目录：dev 为 `<repo>/.demo-work`，prod 为系统应用数据目录下 `.demo-work`。
+
 ## 验收口径
 
 - `npm run check` / `npm test`(295 用例:core 74 + domain 140 + shell 81)
