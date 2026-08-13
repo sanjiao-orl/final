@@ -7,7 +7,7 @@
  * - Esc/点外部=收起；Ctrl+J/顶栏 AI 按钮=开合；F8 专注连窄条隐藏
  * 明暗/打字机归 settings store（本文件不再持有）。
  */
-import { aiColumns, layout } from '../theme.js';
+import { aiColumns } from '../theme.js';
 
 export type AiColId = (typeof aiColumns.order)[number];
 
@@ -106,8 +106,5 @@ export class UiStore {
 function byOrder(a: AiColId, b: AiColId): number {
   return aiColumns.order.indexOf(a) - aiColumns.order.indexOf(b);
 }
-
-/** 面板完全收起时工具栏/窄条也不该占用 --right-w（CSS 已按宽度 0 处理）。 */
-export const railWidth = layout.railWidth;
 
 export const ui = new UiStore();

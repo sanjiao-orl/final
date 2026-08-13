@@ -436,8 +436,8 @@
     white-space: nowrap;
   }
   .prose {
-    /* 行高 17px × 1.75 ≈ 29.75 ≈ 30px：选区浮动条按 layout.lineHeight=30 卡行间隙定位，
-       改字号/行高需同步 shell/src/theme.ts 的 layout.lineHeight 与 selBar 系列。 */
+    /* 行高按 --body-line-px 派生（默认 17px×1.75=30，theme.ts 的 lineHeightPx 派生），
+       选区浮动条按此卡行间隙定位；改字号/行高由 applyTheme 自动重算 --body-line-px。 */
     font-family: var(--body-font);
     font-size: var(--body-size);
     line-height: var(--body-leading);
@@ -541,7 +541,7 @@
   }
   .selbar button {
     background: var(--accent);
-    color: #fff;
+    color: var(--on-accent);
     font-size: 12px;
     padding: 4px 12px;
     border-radius: 6px;

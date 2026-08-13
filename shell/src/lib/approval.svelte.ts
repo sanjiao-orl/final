@@ -86,6 +86,11 @@ export class ApprovalGate {
   isPending(name: string, targetKey: string): boolean {
     return this.pending.some((p) => p.name === name && p.targetKey === targetKey);
   }
+
+  /** 切换/新建会话时清掉本会话放行表：文案承诺"本会话不再询问"以会话为单位。 */
+  resetSessionAllowed(): void {
+    this.sessionAllowed.clear();
+  }
 }
 
 export const approval = new ApprovalGate();

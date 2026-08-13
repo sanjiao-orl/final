@@ -65,6 +65,7 @@ describe('ChatStore', () => {
     expect(chatStream).toHaveBeenCalledWith(
       { text: '帮我看看', workDir: 'C:/works/demo', scope: '' },
       expect.anything(),
+      expect.anything(),
     );
     expect(listSessions).toHaveBeenCalled(); // onDone 后刷会话列表
   });
@@ -78,7 +79,7 @@ describe('ChatStore', () => {
     chat.init(client);
     chat.sessionId = 's1';
     await chat.send('继续');
-    expect(chatStream).toHaveBeenCalledWith({ sessionId: 's1', text: '继续', workDir: '' }, expect.anything());
+    expect(chatStream).toHaveBeenCalledWith({ sessionId: 's1', text: '继续', workDir: '' }, expect.anything(), expect.anything());
   });
 
   it('send：空文本或流式进行中不发请求', async () => {
@@ -211,6 +212,48 @@ describe('ChatStore', () => {
     chat.newSession();
     expect(chat.sessionId).toBeNull();
     expect(chat.messages).toEqual([]);
+  });
+
+  it('newSession / openSession / setScope：调用即清空 approval 会话放行表（下次同类工具重新询问）', async () => {
+    // 建立一次会话放行，再触发新会话/打开历史/切存区，验证同工具重新挂起。
+    let n = 0;
+    const chatStream = vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+      n++;
+      h.onToolCall?.({ id: `w${n}`, name: 'write_chapter', args: { relPath: 'manuscript/a.md' } });
+      h.onToolResult?.({ id: `w${n}`, name: 'write_chapter', result: { ok: true } });
+      h.onDone?.({ sessionId: `s${n}`, messageId: `m${n}` });
+    });
+    const listSessions = vi.fn().mockResolvedValue({ sessions: [] });
+    const sessionMessages = vi.fn().mockResolvedValue({ sessionId: 's2', messages: [] });
+    const client = streamClient({ chatStream, listSessions, sessionMessages });
+    const chat = new ChatStore();
+    chat.init(client);
+    settings.approvalMode = 'auto';
+    await chat.send('写');
+    await chat.resolveApproval('session');
+    // 同会话同工具同目标：放行
+    expect(approval.pending).toEqual([]);
+    expect(approval.active).toBeNull();
+
+    // 新建会话：放行表清空，下次重新挂起
+    chat.newSession();
+    await chat.send('写');
+    expect(approval.pending).toHaveLength(1);
+    expect(approval.active?.callId).toBe('w2');
+    await chat.resolveApproval('session');
+
+    // 打开历史会话：放行表清空
+    await chat.openSession('s2');
+    await chat.send('写');
+    expect(approval.pending).toHaveLength(1);
+    expect(approval.active?.callId).toBe('w3');
+    await chat.resolveApproval('session');
+
+    // 切存区：放行表清空
+    await chat.setScope('manuscript/a.md');
+    await chat.send('写');
+    expect(approval.pending).toHaveLength(1);
+    expect(approval.active?.callId).toBe('w4');
   });
 });
 
@@ -379,5 +422,35 @@ describe('ChatStore · B6 审批联动', () => {
     expect(chat.messages[1]?.tools?.find((t) => t.id === 'w1')?.state).toBe('pending');
     expect(approval.pending.map((p) => p.callId)).toEqual(['w1']);
     expect(approval.active?.callId).toBe('w1');
+  });
+
+  it('abortStream：流式期间取消 → signal 被 abort、assistant 占位保留、流式复位', async () => {
+    let h!: ChatStreamHandlers;
+    let resolveStream!: () => void;
+    const chatStream = vi.fn().mockImplementation((_b: unknown, handlers: ChatStreamHandlers) => {
+      h = handlers;
+      return new Promise<void>((r) => {
+        resolveStream = r;
+      });
+    });
+    const client = streamClient({ chatStream });
+    const chat = new ChatStore();
+    chat.init(client);
+    const p = chat.send('慢慢写');
+    h.onDelta('写到一半');
+    chat.abortStream();
+    resolveStream();
+    await p;
+    expect(chat.streaming).toBe(false);
+    expect(chat.abortedLastStream).toBe(true);
+    expect(chat.messages.find((m) => m.role === 'error')).toBeUndefined();
+    // 占位保留 + 内容保留（已生成部分不丢）
+    const assistant = chat.messages.find((m) => m.role === 'assistant');
+    expect(assistant?.content).toContain('写到一半');
+  });
+
+  it('abortStream：流式未开始时调用为 no-op', async () => {
+    const chat = new ChatStore();
+    expect(() => chat.abortStream()).not.toThrow();
   });
 });

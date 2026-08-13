@@ -68,4 +68,13 @@ describe('ApprovalGate', () => {
     expect(g.pending).toEqual([]);
     expect(g.active).toBeNull();
   });
+
+  it('resetSessionAllowed：清掉本会话放行表，session/auto 下同目标再询问', () => {
+    const g = gate();
+    g.decide('c1', 'write_chapter', { relPath: 'manuscript/a.md' }, 'auto');
+    g.resolve('c1', 'session');
+    expect(g.decide('c2', 'write_chapter', { relPath: 'manuscript/a.md' }, 'auto')).toBe('allow');
+    g.resetSessionAllowed();
+    expect(g.decide('c3', 'write_chapter', { relPath: 'manuscript/a.md' }, 'auto')).toBe('pending');
+  });
 });

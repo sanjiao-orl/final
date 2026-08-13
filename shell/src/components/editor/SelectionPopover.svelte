@@ -2,6 +2,8 @@
   // B1 多候选就地浮层：原文（删除线）+ 候选 tab/卡（选中者 accent 左缘）+ 底部打磨输入框。
   // 多轮打磨：指令再生成新版本（tab 递增）；满意才「插入其后 / 替换原文」；
   // 小改就地（≤200 字且分流开关开）走这里，大改进走暂存抽屉。
+  // 关闭：× / Esc / 点浮层外（参照审批卡/面板现有模式）。
+  import { onMount } from 'svelte';
   import { iconSvg } from '../../lib/icons.js';
   import { candidates } from '../../lib/candidates.svelte.js';
   import { snapshot } from '../../lib/snapshot.svelte.js';
@@ -28,6 +30,8 @@
   }
   let { x, y, maxTop, original, chapter, initialInstruction, onClose }: Props = $props();
 
+  let rootEl = $state<HTMLDivElement | null>(null);
+
   let cands = $state<Candidate[]>([]);
   let active = $state(0);
   // svelte-ignore state_referenced_locally —— 浮层按打开瞬间的指令初始化一次（组件随浮层挂载/卸载）
@@ -38,6 +42,29 @@
   let draft = $state('');
   let applying = $state(false);
   let seq = 0;
+
+  // Esc 关浮层；click outside 落在 mousedown 阶段判断（输入框/按钮/浮层自身内吞掉）
+  onMount(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        onClose();
+      }
+    };
+    const onDocMouseDown = (e: MouseEvent): void => {
+      const t = e.target as Node | null;
+      if (!t) return;
+      if (rootEl?.contains(t)) return; // 浮层内：吞掉
+      onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    // capture 阶段拦截，绕过编辑器内 mousedown 的 preventDefault；只对浮层外有效
+    window.addEventListener('mousedown', onDocMouseDown, true);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('mousedown', onDocMouseDown, true);
+    };
+  });
 
   // 打开即生成第一版（提交改写时已带首次指令；空指令=润色）
   $effect(() => {
@@ -94,11 +121,29 @@
     applying = false;
   }
 
-  // 定位钳位：垂直不没入暂存抽屉（抽屉高 268px 时上抬），由 Editor 按 scroller 几何传入
-  // （maxTop 为组件打开时的钳位上限，抽屉开合时 Editor 会重算传入）
+  // 定位钳位：垂直不没入暂存抽屉（抽屉开合 maxTop 需重算）。
+  // 原型用 MutationObserver 监抽屉 class 触发重钳，这里用 $effect 监听 drawerOpen + 实际高度响应式重算，
+  // 与浮层尺寸/抽屉状态同源，避免打开瞬间计算后抽屉开合盖住浮层。
+
+  /** 抽屉开合后（268px）按浮层实际高度重算 maxTop。 */
+  // svelte-ignore state_referenced_locally —— 初始值取自打开瞬间的 prop；后续变化由 $effect 重算覆写
+  let liveMaxTop = $state(maxTop);
+  $effect(() => {
+    const drawerH = candidates.drawerOpen ? 268 : 0;
+    const popH = rootEl?.offsetHeight || 380;
+    const scroller = rootEl?.closest('.scroller') as HTMLElement | null;
+    if (!scroller) {
+      liveMaxTop = maxTop;
+      return;
+    }
+    const max = Math.max(120, scroller.clientHeight - drawerH - popH - 8);
+    liveMaxTop = Math.min(maxTop, max);
+  });
+
+  const effectiveTop = $derived(Math.min(y, liveMaxTop));
 </script>
 
-<div class="selpop" role="dialog" aria-label="AI 改写候选" tabindex="-1" style:left="{x}px" style:top="{Math.min(y, maxTop)}px" onmousedown={(e) => {
+<div class="selpop" role="dialog" aria-label="AI 改写候选" tabindex="-1" bind:this={rootEl} style:left="{x}px" style:top="{effectiveTop}px" onmousedown={(e) => {
   // 只拦非输入元素的 mousedown（保住选区）；输入框/按钮正常聚焦
   if (!(e.target as HTMLElement).closest('input, button, textarea')) e.preventDefault();
 }}>
@@ -203,7 +248,7 @@
   .tab.on {
     background: var(--accent);
     border-color: var(--accent);
-    color: #fff;
+    color: var(--on-accent);
   }
   .tab:not(.on):hover {
     border-color: var(--accent-line);
@@ -369,7 +414,7 @@
   .btn.primary {
     background: var(--accent);
     border-color: var(--accent);
-    color: #fff;
+    color: var(--on-accent);
   }
   .btn.primary:hover:not(:disabled) {
     background: color-mix(in srgb, var(--accent) 88%, #000);

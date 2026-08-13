@@ -13,6 +13,49 @@ export interface EditorApi {
   insertAfter?: (original: string, proposed: string) => 'ok' | 'not-found' | 'ambiguous';
 }
 
+/** 软删条目：原章节路径与 trash 副本路径。domain 没有 list_trash，壳在 localStorage 跟踪。 */
+export interface TrashEntry {
+  /** 原章节相对 workDir 路径（manuscript/.../*.md），找回时写回此路径。 */
+  relPath: string;
+  /** 软删后 trash 副本路径（.novel/trash/<...>.md）。 */
+  trashPath: string;
+  /** 删除时间戳（ms）。 */
+  deletedAt: number;
+}
+
+/** localStorage key（per-workDir）。 */
+function trashKey(workDir: string): string {
+  return `novel.trash.${workDir}`;
+}
+
+function loadTrashEntries(workDir: string): TrashEntry[] {
+  if (!workDir || typeof localStorage === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(trashKey(workDir));
+    if (!raw) return [];
+    const arr = JSON.parse(raw) as TrashEntry[];
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveTrashEntries(workDir: string, entries: TrashEntry[]): void {
+  if (typeof localStorage === 'undefined') return;
+  localStorage.setItem(trashKey(workDir), JSON.stringify(entries));
+}
+
+function recordTrashEntry(workDir: string, relPath: string, trashPath: string): void {
+  const entries = loadTrashEntries(workDir);
+  entries.unshift({ relPath, trashPath, deletedAt: Date.now() });
+  saveTrashEntries(workDir, entries);
+}
+
+function removeTrashEntry(workDir: string, trashPath: string): void {
+  const entries = loadTrashEntries(workDir).filter((e) => e.trashPath !== trashPath);
+  saveTrashEntries(workDir, entries);
+}
+
 export interface OpenChapter {
   relPath: string;
   title: string;
@@ -35,6 +78,8 @@ export class WorkStore {
   current = $state<OpenChapter | null>(null);
   /** 待跳转的场景标题（打开章后由 Editor 消费）。 */
   pendingScene = $state<string | null>(null);
+  /** 当前打开的章里被聚焦的场景标题（结构树当前场高亮判定来源）。 */
+  currentScene = $state<string | null>(null);
   /** 同章重载计数：App 按 relPath + 该值 keyed Editor，磁盘回写后强制编辑器重挂载。 */
   reloadNonce = $state(0);
   dirty = $state(false);
@@ -104,9 +149,17 @@ export class WorkStore {
   }
 
   async loadStructure(): Promise<void> {
-    this.structure = await this.client.callTool<VolumeNode[]>('list_structure', {
-      workDir: this.workDir,
-    });
+    this.loading = true;
+    try {
+      this.structure = await this.client.callTool<VolumeNode[]>('list_structure', {
+        workDir: this.workDir,
+      });
+    } catch (err) {
+      this.error = `加载结构树失败：${err instanceof Error ? err.message : String(err)}`;
+      throw err;
+    } finally {
+      this.loading = false;
+    }
   }
 
   /** 打开一章；有未保存改动先自动落盘（失败则不切换，显式报错留在当前章）。 */
@@ -130,6 +183,7 @@ export class WorkStore {
       if (typeof r.frontmatter.id === 'string') open.id = r.frontmatter.id;
       this.current = open;
       this.pendingScene = sceneTitle ?? null;
+      this.currentScene = sceneTitle ?? null;
       this.dirty = false;
     } catch (err) {
       this.error = `打开章节失败：${err instanceof Error ? err.message : String(err)}`;
@@ -153,7 +207,7 @@ export class WorkStore {
       });
       this.current.savedMd = md;
       this.dirty = false;
-      void this.loadStructure(); // 字数/场景可能变了，后台刷树
+      void this.loadStructure().catch(() => undefined); // 字数/场景可能变了，后台刷树（失败红条已在 loadStructure 内）
       return true;
     } catch (err) {
       this.error = `保存失败：${err instanceof Error ? err.message : String(err)}`;
@@ -175,6 +229,7 @@ export class WorkStore {
         this.current = null;
         this.dirty = false;
       }
+      recordTrashEntry(this.workDir, relPath, r.trashPath);
       this.notice = `已移入回收站 ${r.trashPath}（移回原路径即找回）`;
       await this.loadStructure();
     } catch (err) {
@@ -243,9 +298,9 @@ export class WorkStore {
         title,
       });
       await this.loadStructure();
-      // 重命名后若正开着该章，title 跟随
+      // 重命名后若正开着该章，title / relPath 跟随（章头 + 顶栏展示同步）
       if (this.current?.relPath === relPath) {
-        this.current = { ...this.current, relPath: r.relPath };
+        this.current = { ...this.current, relPath: r.relPath, title };
       }
       return true;
     } catch (err) {
@@ -299,6 +354,40 @@ export class WorkStore {
     return this.editorApi.insertAfter(original, proposed);
   }
 
+  // ---------- 回收站：localStorage 跟踪软删条目，listTrash/restoreTrash 供 TreeView 面板用 ----------
+  // 约束：domain 没有 list_trash 工具（本任务不新加 domain 工具），回收站面板用壳私有 localStorage 跟踪已软删过的章；
+  // 找回复用 read_chapter（特许读 .novel/trash/）→ write_chapter 写回原路径，参照 chat.svelte.ts 的删章补偿逻辑。
+  listTrash(): TrashEntry[] {
+    return loadTrashEntries(this.workDir);
+  }
+
+  async restoreTrash(trashPath: string): Promise<boolean> {
+    const entry = loadTrashEntries(this.workDir).find((e) => e.trashPath === trashPath);
+    if (!entry) {
+      this.error = '回收站条目不存在（可能已被恢复）';
+      return false;
+    }
+    this.error = null;
+    try {
+      const r = await this.client.callTool<{ content: string }>('read_chapter', {
+        workDir: this.workDir,
+        relPath: entry.trashPath,
+      });
+      await this.client.callTool('write_chapter', {
+        workDir: this.workDir,
+        relPath: entry.relPath,
+        content: r.content,
+      });
+      removeTrashEntry(this.workDir, entry.trashPath);
+      this.notice = `已找回 ${entry.relPath}（trash 副本移回）`;
+      await this.loadStructure();
+      return true;
+    } catch (err) {
+      this.error = `找回失败：${err instanceof Error ? err.message : String(err)}`;
+      return false;
+    }
+  }
+
   /**
    * 重载当前章（快照还原、AI 直写放行等磁盘回写后刷新现场）。
    * 与 openChapter 不同：跳过脏保存门禁，直接以磁盘内容为准，避免旧编辑器内容写回覆盖磁盘。
@@ -324,6 +413,7 @@ export class WorkStore {
       if (typeof r.frontmatter.id === 'string') open.id = r.frontmatter.id;
       this.current = open;
       this.pendingScene = null;
+      this.currentScene = null;
       this.dirty = false;
       this.reloadNonce++;
     } catch (err) {

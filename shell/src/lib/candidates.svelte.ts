@@ -91,6 +91,16 @@ export class CandidatesStore {
     this.selected = new Set();
   }
 
+  /** 流式生成的 AbortController（取消按钮接这里）。 */
+  private generateAbort: AbortController | null = null;
+  /** 流式生成期间是否在生成中（用于按钮态）。 */
+  isGenerating = $derived(this.generating !== null);
+
+  /** 取消当前流式生成（接在 selectionPopover/暂存区入口的停止按钮）。 */
+  abortGenerate(): void {
+    this.generateAbort?.abort();
+  }
+
   /**
    * 选区改写：/rewrite 流式生成 → 完成后 POST /candidates 进暂存区。
    * 生成过程实时进 generating（暂存区流式显示，30–50ms 批次），完成态落候选卡。
@@ -106,6 +116,8 @@ export class CandidatesStore {
     const failure: { err: Error | null } = { err: null }; // 闭包赋值，TS 收窄不跨闭包，用对象持有
     this.generating = { chapter, original, instruction: instruction.trim(), text: '' };
     this.drawerOpen = true; // 暂存区实时展示生成内容
+    const ac = new AbortController();
+    this.generateAbort = ac;
     try {
       await this.client.rewriteStream(
         { original, instruction },
@@ -122,6 +134,7 @@ export class CandidatesStore {
             failure.err = err;
           },
         },
+        ac.signal,
       );
       if (failure.err) throw failure.err;
       this.generating = null;
@@ -130,8 +143,12 @@ export class CandidatesStore {
       return true;
     } catch (err) {
       this.generating = null;
-      work.error = `AI 改写失败：${err instanceof Error ? err.message : String(err)}`;
+      if (!ac.signal.aborted) {
+        work.error = `AI 改写失败：${err instanceof Error ? err.message : String(err)}`;
+      }
       return false;
+    } finally {
+      this.generateAbort = null;
     }
   }
 
@@ -140,6 +157,7 @@ export class CandidatesStore {
     original: string,
     instruction: string,
     onProgress?: (text: string) => void,
+    signal?: AbortSignal,
   ): Promise<string | null> {
     let text = '';
     const failure: { err: Error | null } = { err: null }; // 闭包赋值，TS 收窄不跨闭包，用对象持有
@@ -158,11 +176,14 @@ export class CandidatesStore {
             failure.err = err;
           },
         },
+        signal,
       );
       if (failure.err) throw failure.err;
       return text;
     } catch (err) {
-      work.error = `AI 改写失败：${err instanceof Error ? err.message : String(err)}`;
+      if (!signal?.aborted) {
+        work.error = `AI 改写失败：${err instanceof Error ? err.message : String(err)}`;
+      }
       return null;
     }
   }

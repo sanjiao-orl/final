@@ -81,7 +81,7 @@
   {#each chat.messages as m, i (i)}
     <div class="msg {m.role}">
       {#if m.role === 'assistant' && m.content !== ''}
-        <span class="who">AI · {chat.scopeLabel()}</span>
+        <span class="who">AI · {chat.scopeLabel()}{#if chat.abortedLastStream && i === chat.messages.length - 1}<i class="aborted">已中断</i>{/if}</span>
       {/if}
       {#if m.content !== ''}<div class="bubble">{m.content}</div>{/if}
       {#each m.tools ?? [] as t (t.id)}
@@ -123,7 +123,11 @@
     ></textarea>
     <div class="bar">
       <span class="hint">Enter 发送 · Shift+Enter 换行</span>
-      <button class="send" onclick={send} disabled={chat.streaming || input.trim() === ''} aria-label="发送">{@html iconSvg('spark', 13, 2)}</button>
+      {#if chat.streaming}
+        <button class="stop" onclick={() => chat.abortStream()} aria-label="停止" title="停止生成（已收内容会保留，已中断）">{@html iconSvg('close', 12, 2)} 停止</button>
+      {:else}
+        <button class="send" onclick={send} disabled={chat.streaming || input.trim() === ''} aria-label="发送">{@html iconSvg('spark', 13, 2)}</button>
+      {/if}
     </div>
   </div>
 </div>
@@ -214,6 +218,15 @@
     font-size: 10.5px;
     letter-spacing: 0.15em;
     color: var(--muted);
+  }
+  .msg .who .aborted {
+    margin-left: 6px;
+    padding: 1px 6px;
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+    color: var(--danger);
+    font-style: normal;
+    letter-spacing: 0.06em;
   }
   .msg-user .bubble {
     align-self: flex-end;
@@ -333,5 +346,21 @@
   }
   .send:disabled {
     opacity: 0.4;
+  }
+  .stop {
+    height: 26px;
+    padding: 0 10px;
+    border-radius: 6px;
+    border: 1px solid var(--danger);
+    background: transparent;
+    color: var(--danger);
+    font-size: 11.5px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    transition: background var(--t-hover);
+  }
+  .stop:hover {
+    background: color-mix(in srgb, var(--danger) 8%, transparent);
   }
 </style>

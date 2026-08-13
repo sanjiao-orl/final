@@ -78,8 +78,8 @@
     left: calc(100% + 10px);
     top: 50%;
     transform: translateY(-50%) translateX(-3px);
-    background: #1e1c18;
-    color: #ede9e0;
+    background: var(--ink);
+    color: var(--paper);
     font-size: 11px;
     line-height: 1;
     letter-spacing: 0.04em;

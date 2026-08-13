@@ -88,6 +88,18 @@ export class ChatStore {
     return this.meta[s.id]?.title || s.title || '（未命名）';
   }
 
+  /** 当前流式请求的 AbortController：用于 UI 主动取消（聊天栏「停止」按钮）。 */
+  private streamAbort: AbortController | null = null;
+  /** 最后一次流式是否被用户主动取消（聊天栏给中断消息打标）。 */
+  abortedLastStream = $state(false);
+
+  /** 中断当前流式：fetch 收到 abort 后服务连接断开，UI 不再展示残留 delta。
+   *  已落库的 assistant 占位 message 保留并打上「已中断」标记，方便用户接着发。 */
+  abortStream(): void {
+    if (!this.streaming) return;
+    this.streamAbort?.abort();
+  }
+
   /** 当前挂载点的人类可读标签（会话栏/对话栏标题用）。 */
   scopeLabel(): string {
     if (this.scope === '') return '无归属';
@@ -107,6 +119,7 @@ export class ChatStore {
     this.scope = scope;
     this.sessionId = null;
     this.messages = [];
+    approval.resetSessionAllowed();
     await this.loadSessions();
     const latest = this.visibleSessions[0];
     if (latest) await this.openSession(latest.id);
@@ -125,6 +138,7 @@ export class ChatStore {
   async openSession(id: string): Promise<void> {
     this.sessionId = id;
     this.renamingId = null;
+    approval.resetSessionAllowed();
     try {
       const r = await this.client.sessionMessages(id);
       this.messages = r.messages.map((m) => ({
@@ -142,6 +156,7 @@ export class ChatStore {
   newSession(): void {
     this.sessionId = null;
     this.messages = [];
+    approval.resetSessionAllowed();
   }
 
   /** B7 重命名：行内编辑态进入 / 提交 / 取消。 */
@@ -262,11 +277,14 @@ export class ChatStore {
   async send(text: string): Promise<void> {
     const trimmed = text.trim();
     if (!trimmed || this.streaming) return;
+    this.abortedLastStream = false;
     this.messages.push({ role: 'user', content: trimmed });
     this.messages.push({ role: 'assistant', content: '', tools: [] });
     const idx = this.messages.length - 1;
     this.streaming = true;
     const scopeAtSend = this.scope; // 流式期间切存区：结果不回写现场，但服务端会话已完整落库
+    const ac = new AbortController();
+    this.streamAbort = ac;
     try {
       const body = this.sessionId
         ? { sessionId: this.sessionId, text: trimmed, workDir: work.workDir }
@@ -306,18 +324,28 @@ export class ChatStore {
         onError: (err) => {
           this.messages.push({ role: 'error', content: `服务端错误：${err.message}` });
         },
-      });
+      }, ac.signal);
+      // 流式正常完成（非中断）：若占位无内容也无工具行则清理
+      if (!ac.signal.aborted) {
+        const m = this.messages[idx];
+        if (m && m.content === '' && (m.tools?.length ?? 0) === 0) {
+          this.messages.splice(idx, 1);
+        }
+      } else {
+        this.abortedLastStream = true;
+      }
     } catch (err) {
-      this.messages.push({
-        role: 'error',
-        content: `请求失败：${err instanceof Error ? err.message : String(err)}`,
-      });
+      if (ac.signal.aborted) {
+        this.abortedLastStream = true;
+      } else {
+        this.messages.push({
+          role: 'error',
+          content: `请求失败：${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
     } finally {
       this.streaming = false;
-      const m = this.messages[idx];
-      if (m && m.content === '' && (m.tools?.length ?? 0) === 0) {
-        this.messages.splice(idx, 1);
-      }
+      this.streamAbort = null;
     }
   }
 }

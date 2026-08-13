@@ -1,12 +1,22 @@
 <script lang="ts">
   // B6 审批卡：480px 居中模态。遮罩点击不关闭（危险操作必须显式选择）；
   // 三档按钮固定顺序 拒绝 / 允许一次 / 允许本会话；底部 ask/auto/yolo 指示。
+  import { tick } from 'svelte';
   import { approval } from '../../lib/approval.svelte.js';
   import { chat } from '../../lib/chat.svelte.js';
   import { settings } from '../../lib/settings.svelte.js';
   import { work } from '../../lib/work.svelte.js';
 
   const req = $derived(approval.active);
+  let cardEl = $state<HTMLDivElement | null>(null);
+  let primaryBtn = $state<HTMLButtonElement | null>(null);
+
+  // 模态打开后焦点落到「允许,本会话不再询问」主操作按钮（参考 dialog store 的 prompt/confirm 模式）
+  $effect(() => {
+    if (req) {
+      void tick().then(() => primaryBtn?.focus());
+    }
+  });
 
   /** 影响面：当前章字数（write/delete 时）与目标。 */
   const impact = $derived.by(() => {
@@ -38,10 +48,10 @@
 </script>
 
 {#if req}
-  <div class="overlay" id="approval-overlay" data-ai-zone role="dialog" aria-modal="true" aria-label="审批 · 危险操作">
-    <div class="card">
+  <div class="overlay" id="approval-overlay" data-ai-zone role="dialog" aria-modal="true" aria-labelledby="approval-title">
+    <div class="card" bind:this={cardEl}>
       <div class="head">
-        <span class="title">审批 · 危险操作</span>
+        <span class="title" id="approval-title">审批 · 危险操作</span>
         <span class="tag">{settings.approvalMode} 模式挂起</span>
       </div>
       <div class="body">
@@ -68,7 +78,7 @@
       <div class="ops">
         <button class="btn ghost-danger" onclick={() => void decide('reject')}>拒绝</button>
         <button class="btn" onclick={() => void decide('once')}>允许一次</button>
-        <button class="btn primary" onclick={() => void decide('session')}>允许,本会话不再询问</button>
+        <button class="btn primary" bind:this={primaryBtn} onclick={() => void decide('session')}>允许,本会话不再询问</button>
       </div>
       <div class="foot">
         审批模式(B6)
@@ -196,7 +206,7 @@
   .btn.primary {
     background: var(--accent);
     border-color: var(--accent);
-    color: #fff;
+    color: var(--on-accent);
   }
   .btn.primary:hover {
     background: color-mix(in srgb, var(--accent) 88%, #000);

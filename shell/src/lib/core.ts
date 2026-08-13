@@ -113,6 +113,7 @@ export class CoreClient {
   async chatStream(
     body: { sessionId?: string; text: string; workDir?: string; scope?: string },
     handlers: ChatStreamHandlers,
+    signal?: AbortSignal,
   ): Promise<void> {
     await this.postSse(`${API_PREFIX}/chat`, body, handlers.onDelta, (event, data, flush) => {
       switch (event) {
@@ -133,13 +134,14 @@ export class CoreClient {
           break;
         }
       }
-    });
+    }, signal);
   }
 
   /** POST /v1/rewrite 的 SSE 流：纯改写（无工具、不落库），done 带完整改写文本。 */
   async rewriteStream(
     body: { original: string; instruction: string },
     handlers: RewriteStreamHandlers,
+    signal?: AbortSignal,
   ): Promise<void> {
     await this.postSse(`${API_PREFIX}/rewrite`, body, handlers.onDelta, (event, data, flush) => {
       if (event === 'done') {
@@ -150,7 +152,7 @@ export class CoreClient {
         const msg = (data as { message?: string }).message ?? '服务端错误';
         handlers.onError?.(new Error(msg));
       }
-    });
+    }, signal);
   }
 
   /** SSE POST 共用管道：fetch + ReadableStream 手工解析帧，text-delta 批次进 onDelta。 */
@@ -159,12 +161,15 @@ export class CoreClient {
     body: unknown,
     onDelta: (text: string) => void,
     onEvent: (event: string, data: unknown, flush: () => void) => void,
+    signal?: AbortSignal,
   ): Promise<void> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
+    const init: RequestInit = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.token}` },
       body: JSON.stringify(body),
-    });
+    };
+    if (signal) init.signal = signal;
+    const res = await fetch(`${this.baseUrl}${path}`, init);
     if (!res.ok || !res.body) {
       const j = (await res.json().catch(() => ({}))) as { error?: string };
       throw new Error(j.error ?? `请求失败: ${res.status}`);
@@ -173,6 +178,15 @@ export class CoreClient {
     const decoder = new TextDecoder();
     let buf = '';
     const batcher = new DeltaBatcher(onDelta);
+    let aborted = false;
+    const onAbort = (): void => {
+      aborted = true;
+      reader.cancel().catch(() => {});
+    };
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
+    }
     try {
       for (;;) {
         const { done, value } = await reader.read();
@@ -187,8 +201,10 @@ export class CoreClient {
             onEvent(frame.event, frame.data, () => batcher.flushNow());
           }
         }
+        if (aborted) break;
       }
     } finally {
+      if (signal) signal.removeEventListener('abort', onAbort);
       batcher.dispose(); // 兜底 flush，末尾不丢 token
     }
   }

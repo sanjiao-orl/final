@@ -298,6 +298,31 @@
     return n.toLocaleString('zh-CN');
   }
 
+  // ---------- 回收站：domain 无 list_trash，壳走 localStorage 跟踪；找回=读 trash 写回原路径 ----------
+  let trashOpen = $state(false);
+  let trashBusy = $state(false);
+  const trashEntries = $derived(work.listTrash());
+
+  function trashNameOf(trashPath: string): string {
+    return trashPath.split('/').pop()?.replace(/-\d+\.md$/, '.md') ?? trashPath;
+  }
+  function trashTimeOf(deletedAt: number): string {
+    const d = new Date(deletedAt);
+    if (Number.isNaN(d.getTime())) return '';
+    const p = (n: number) => String(n).padStart(2, '0');
+    return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+
+  async function restoreOne(trashPath: string): Promise<void> {
+    if (trashBusy) return;
+    trashBusy = true;
+    try {
+      await work.restoreTrash(trashPath);
+    } finally {
+      trashBusy = false;
+    }
+  }
+
   /** B5 进度：wordCount / goal，0..1；无 goal 返回 null。 */
   function goalRatio(c: ChapterNode): number | null {
     if (!c.goal || c.goal <= 0) return null;
@@ -331,7 +356,9 @@
   </div>
 
   <div class="body">
-    {#if work.structure.length === 0}
+    {#if work.loading && work.structure.length === 0}
+      <p class="empty">结构树加载中…</p>
+    {:else if work.structure.length === 0}
       <p class="empty">manuscript 下还没有章节，点上方新建。</p>
     {/if}
 
@@ -424,7 +451,7 @@
                       {#if sceneVisible(sc)}
                         <div
                           class="scene-row"
-                          class:current={work.current?.relPath === ch.relPath && work.pendingScene === null}
+                          class:current={work.current?.relPath === ch.relPath && work.currentScene === sc.title}
                           role="button"
                           tabindex="0"
                           onclick={() => void work.openChapter(ch, sc.title)}
@@ -462,10 +489,34 @@
   {/if}
 
   <div class="foot">
-    <div class="trash-row" title="软删章在这里（.novel/trash/），移回原路径即找回">
+    <button
+      class="trash-row"
+      class:open={trashOpen}
+      onclick={() => (trashOpen = !trashOpen)}
+      aria-expanded={trashOpen}
+      title="软删章在这里（.novel/trash/），可一键找回"
+    >
       {@html iconSvg('trash', 13)}
-      回收站 · 软删章（.novel/trash/）
-    </div>
+      <span>回收站 · 软删章（.novel/trash/）</span>
+      {#if trashEntries.length > 0}<i class="n">{trashEntries.length}</i>{/if}
+    </button>
+    {#if trashOpen}
+      <div class="trash-panel">
+        {#if trashEntries.length === 0}
+          <p class="empty">回收站空。软删的章会出现在这里。</p>
+        {:else}
+          {#each trashEntries as e (e.trashPath)}
+            <div class="trash-item">
+              <div class="ti-meta">
+                <span class="ti-name" title={e.relPath}>{trashNameOf(e.trashPath)}</span>
+                <span class="ti-time">{trashTimeOf(e.deletedAt)}</span>
+              </div>
+              <button class="ti-btn" disabled={trashBusy} onclick={() => void restoreOne(e.trashPath)} title={`找回：写回 ${e.relPath}`}>找回</button>
+            </div>
+          {/each}
+        {/if}
+      </div>
+    {/if}
   </div>
 </nav>
 
@@ -797,6 +848,9 @@
   .foot {
     border-top: 1px solid var(--line);
     padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
   }
   .trash-row {
     display: flex;
@@ -806,11 +860,94 @@
     padding: 0 8px;
     font-size: 12px;
     color: var(--muted);
+    border: none;
+    background: transparent;
     border-radius: 6px;
     cursor: pointer;
-    transition: background var(--t-hover);
+    transition: background var(--t-hover), color var(--t-hover);
+    text-align: left;
   }
   .trash-row:hover {
     background: color-mix(in srgb, var(--muted) 8%, transparent);
+  }
+  .trash-row.open {
+    color: var(--ink);
+  }
+  .trash-row .n {
+    min-width: 16px;
+    height: 16px;
+    padding: 0 5px;
+    border-radius: 8px;
+    background: var(--muted);
+    color: var(--panel);
+    font-size: 10.5px;
+    line-height: 16px;
+    text-align: center;
+    margin-left: auto;
+  }
+  .trash-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 4px 4px 0;
+    max-height: 180px;
+    overflow-y: auto;
+  }
+  .trash-panel .empty {
+    margin: 4px 4px 6px;
+    padding: 8px;
+    font-size: 11px;
+    color: var(--muted);
+    text-align: center;
+    border: 1px dashed var(--line);
+    border-radius: 6px;
+  }
+  .trash-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 6px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--paper);
+    font-size: 11.5px;
+  }
+  .ti-meta {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .ti-name {
+    font-weight: 600;
+    color: var(--ink);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ti-time {
+    font-size: 10px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .ti-btn {
+    flex: none;
+    height: 22px;
+    padding: 0 8px;
+    font-size: 11.5px;
+    border: 1px solid var(--accent-line);
+    border-radius: 5px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    cursor: pointer;
+    transition: background var(--t-hover), border-color var(--t-hover);
+  }
+  .ti-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+  }
+  .ti-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
   }
 </style>

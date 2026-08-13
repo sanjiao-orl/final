@@ -65,6 +65,23 @@ export const body = {
 
 export const uiFont = '"Microsoft YaHei", "PingFang SC", system-ui, sans-serif';
 
+/**
+ * 默认字号（17px）下正文行高（px）= fontSize × lineHeight，取整对齐 .prose line-height。
+ * Editor 选区浮动条按此基准定位行间隙；改字号时 lineHeight 应同步重算（见 applyTheme 的派生逻辑）。
+ * 显式声明耦合：17 × 1.75 = 29.75 → 30。
+ */
+const DEFAULT_FONT_SIZE = 17;
+const DEFAULT_LINE_RATIO = 1.75;
+const DEFAULT_LINE_PX = Math.round(DEFAULT_FONT_SIZE * DEFAULT_LINE_RATIO); // 30
+
+/**
+ * 给定字号按 lineHeight 比例派生 px 行高。Editor 用以在字号变化后保持选区浮动条贴行间隙。
+ * 浮动条定位的"魔法 30"从此函数派生，不再散落硬编码。
+ */
+export function lineHeightPx(fontSize: number, ratio: number = DEFAULT_LINE_RATIO): number {
+  return Math.round(fontSize * ratio);
+}
+
 export const layout = {
   treeWidth: '260px',
   rightWidth: '360px',
@@ -74,8 +91,8 @@ export const layout = {
   toolbarHeight: '42px',
   /** 打字机滚动：光标锁定在滚动视口的 42% 高度处。 */
   typewriterRatio: 0.42,
-  /** 正文行高（px）：排版 17px × 1.75 ≈ 29.75 取整，与 .prose line-height 对齐（Editor 浮动条定位基准）。 */
-  lineHeight: 30,
+  /** 默认字号 17px 下的 px 行高（30px）；字号变化时由 applyTheme 重新派生 --body-line-px 注入文档根。 */
+  lineHeight: DEFAULT_LINE_PX,
   /** B1 多候选浮层宽度（px，与原型一致）。 */
   selPopWidth: 580,
   /** 选区浮动条估算高度（px），浮动条定位用。 */
@@ -107,6 +124,8 @@ function derivedVars(mode: ThemeMode): Record<string, string> {
     '--suggest-line': 'color-mix(in srgb, var(--ok) 38%, var(--line))',
     '--strike': 'color-mix(in srgb, var(--danger) 55%, var(--muted))',
     '--warn-bg': 'color-mix(in srgb, var(--status-draft) 9%, transparent)',
+    /** 主行动按钮文字色：恒白/近白，accent 背景上两种主题都保证可读，避免硬编码 #fff。 */
+    '--on-accent': '#FFFFFF',
     '--shadow-pop': light
       ? '0 1px 2px rgba(42,39,35,.05), 0 8px 28px -6px rgba(42,39,35,.14)'
       : '0 1px 2px rgba(0,0,0,.25), 0 8px 28px -6px rgba(0,0,0,.45)',
@@ -138,6 +157,7 @@ export function applyTheme(mode: ThemeMode, root: HTMLElement = document.documen
     '--body-font': body.fontFamily,
     '--body-size': fontSize !== undefined ? `${fontSize}px` : body.fontSize,
     '--body-leading': body.lineHeight,
+    '--body-line-px': `${lineHeightPx(fontSize ?? parseInt(body.fontSize, 10))}px`,
     '--body-indent': body.indent,
     '--body-maxwidth': body.maxWidth,
     '--ui-font': uiFont,

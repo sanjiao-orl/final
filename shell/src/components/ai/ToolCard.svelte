@@ -66,7 +66,18 @@
   }
 
   function stateColor(): string {
-    return 'var(--muted)';
+    switch (tool.state) {
+      case 'running':
+        return 'var(--status-polish)';
+      case 'pending':
+        return 'var(--status-draft)';
+      case 'rejected':
+        return 'var(--danger)';
+      case 'done':
+        return 'var(--ok)';
+      default:
+        return 'var(--muted)';
+    }
   }
 </script>
 
