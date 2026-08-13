@@ -123,11 +123,15 @@ function defaultKeyPath() {
 
 function buildEnv() {
   const env = { ...process.env };
-  // 私钥内容（TAURI_SIGNING_PRIVATE_KEY）优先；否则用路径。
+  // tauri build 的签名只认 TAURI_SIGNING_PRIVATE_KEY（密钥内容），不认 _PATH。
   if (!env.TAURI_SIGNING_PRIVATE_KEY) {
-    env.TAURI_SIGNING_PRIVATE_KEY_PATH = env.TAURI_SIGNING_PRIVATE_KEY_PATH || defaultKeyPath();
-    delete env.TAURI_SIGNING_PRIVATE_KEY;
+    const keyPath = env.TAURI_SIGNING_PRIVATE_KEY_PATH || defaultKeyPath();
+    if (!existsSync(keyPath)) {
+      fail(`签名私钥不存在: ${keyPath}。请用 TAURI_SIGNING_PRIVATE_KEY 提供密钥内容，或 TAURI_SIGNING_PRIVATE_KEY_PATH 覆盖路径。`);
+    }
+    env.TAURI_SIGNING_PRIVATE_KEY = readFileSync(keyPath, 'utf8').trim();
   }
+  delete env.TAURI_SIGNING_PRIVATE_KEY_PATH;
   if (env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD === undefined) {
     env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD = '';
   }
