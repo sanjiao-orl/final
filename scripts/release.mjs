@@ -115,6 +115,14 @@ function syncVersions(version) {
 
   const cargoToml = readFileSync(cargoTomlPath, 'utf8');
   writeFileSync(cargoTomlPath, setCargoPackageVersion(cargoToml, version));
+
+  // core/domain 也同步（sidecar 自报版本取自它们的 package.json，漏掉会不一致）
+  for (const sub of ['core', 'domain']) {
+    const pkgPath = path.join(root, sub, 'package.json');
+    const pkg = readJson(pkgPath);
+    pkg.version = version;
+    writeJson(pkgPath, pkg);
+  }
 }
 
 function defaultKeyPath() {
