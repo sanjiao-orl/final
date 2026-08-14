@@ -123,6 +123,20 @@ function syncVersions(version) {
     pkg.version = version;
     writeJson(pkgPath, pkg);
   }
+
+  // core/src/config.ts 与 domain/src/server.ts 里的硬编码版本常量
+  const coreConfig = readFileSync(path.join(root, 'core', 'src', 'config.ts'), 'utf8');
+  if (!coreConfig.includes(`VERSION = '${version}'`)) {
+    writeFileSync(
+      path.join(root, 'core', 'src', 'config.ts'),
+      coreConfig.replace(/(VERSION = ')[^']*(')/, `$1${version}$2`),
+    );
+  }
+  const domainServer = readFileSync(path.join(root, 'domain', 'src', 'server.ts'), 'utf8');
+  writeFileSync(
+    path.join(root, 'domain', 'src', 'server.ts'),
+    domainServer.replace(/(version: ')[^']*(')/, `$1${version}$2`),
+  );
 }
 
 function defaultKeyPath() {
