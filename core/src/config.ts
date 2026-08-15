@@ -6,7 +6,7 @@ import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import type { LanguageModel } from 'ai';
 
 /** 与 core/package.json version 保持同步。 */
-export const VERSION = '0.1.6';
+export const VERSION = '0.2.0';
 
 /** Node 版本门禁下限（与根 package.json engines.node 对齐）：低于此版本直接拒启。 */
 export const MIN_NODE_MAJOR = 24;
