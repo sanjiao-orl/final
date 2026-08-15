@@ -1,6 +1,6 @@
 /**
- * tools.ts —— 十六个 MCP 工具的业务实现（不含 MCP 装配）。
- * 双侧合并口径：基础工具 7 个（结构/读写/搜索/统计/软删/导出）+ WS-9 scan_quality + A 组 8 工具。
+ * tools.ts —— 十七个 MCP 工具的业务实现（不含 MCP 装配）。
+ * 双侧合并口径：基础工具 8 个（结构/读写/搜索/统计/软删/导出）+ WS-9 scan_quality + A 组 8 工具。
  * 结构树永远从文件内容派生；relPath 一律相对 workDir，输出统一用正斜杠。
  */
 import fs from 'node:fs';
@@ -416,6 +416,31 @@ export function deleteChapter(workDir: string, relPath: string): DeleteChapterRe
   const stampName = `${flattenRel(posix)}-${stamp()}.md`;
   const target = path.join(novelSubDir(workDir, 'trash'), stampName);
   fs.renameSync(abs, target); // 文件不存在时抛错；同卷 rename 原子移动
+  return { ok: true, trashPath: toPosix(path.join('.novel', 'trash', stampName)) };
+}
+
+export interface DeleteVolumeResult {
+  ok: true;
+  /** 软删后相对 workDir 的 trash 路径（正斜杠）。 */
+  trashPath: string;
+}
+
+/**
+ * delete_volume：软删——把 manuscript/ 下的卷目录（含全部章）整体移进 .novel/trash/
+ * （时间戳防重名），永不物理删除；拒绝删 manuscript 本身、非 manuscript/ 前缀与非目录路径。
+ */
+export function deleteVolume(workDir: string, volumePath: string): DeleteVolumeResult {
+  const posix = toPosix(volumePath);
+  if (posix === 'manuscript' || posix === 'manuscript/' || !posix.startsWith('manuscript/')) {
+    throw new Error(`delete_volume 只允许 manuscript/ 下的卷目录: ${volumePath}`);
+  }
+  const abs = resolveInside(workDir, volumePath); // 越界在此抛错
+  if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) {
+    throw new Error(`delete_volume 卷目录不存在: ${volumePath}`);
+  }
+  const stampName = `${flattenRel(posix)}-${stamp()}`;
+  const target = path.join(novelSubDir(workDir, 'trash'), stampName);
+  fs.renameSync(abs, target); // 目录不存在时抛错；同卷 rename 原子移动
   return { ok: true, trashPath: toPosix(path.join('.novel', 'trash', stampName)) };
 }
 

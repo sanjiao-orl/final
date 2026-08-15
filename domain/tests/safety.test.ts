@@ -7,6 +7,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   deleteChapter,
+  deleteVolume,
   exportTxt,
   readChapter,
   SNAPSHOT_KEEP,
@@ -90,6 +91,42 @@ describe('delete_chapter 软删', () => {
     expect(() => deleteChapter(work, 'manuscript/卷一/不存在.md')).toThrow();
     // 原有文件未被误伤
     expect(fs.existsSync(path.join(work, 'manuscript/卷一/第一章.md'))).toBe(true);
+  });
+});
+
+describe('delete_volume 软删', () => {
+  const CH2 = ['---', 'title: 第二章·客栈', 'status: 打磨', '---', '', '客栈正文。'].join('\n');
+
+  it('含 2 章的卷整体移进 .novel/trash，trash 内章原文保留', () => {
+    const work = makeWorkDir();
+    writeTree(work, {
+      'manuscript/第一卷·风起/第一章·少年.md': CH.replace('title: 第一章', 'title: 第一章·少年'),
+      'manuscript/第一卷·风起/第二章·客栈.md': CH2,
+    });
+    const { ok, trashPath } = deleteVolume(work, 'manuscript/第一卷·风起');
+    expect(ok).toBe(true);
+    expect(trashPath).toMatch(/^\.novel\/trash\/manuscript__第一卷·风起-.+$/);
+    // 卷目录整体消失
+    expect(fs.existsSync(path.join(work, 'manuscript/第一卷·风起'))).toBe(false);
+    // trash 内章原文保留
+    const trashAbs = path.join(work, ...trashPath.split('/'));
+    expect(fs.readFileSync(path.join(trashAbs, '第一章·少年.md'), 'utf8')).toBe(
+      CH.replace('title: 第一章', 'title: 第一章·少年'),
+    );
+    expect(fs.readFileSync(path.join(trashAbs, '第二章·客栈.md'), 'utf8')).toBe(CH2);
+  });
+
+  it('拒绝删 manuscript 本身、非 manuscript/ 前缀、越界与不存在的卷', () => {
+    const work = makeWorkDir();
+    writeTree(work, { 'manuscript/第一卷·风起/第一章·少年.md': CH, '笔记.md': '根目录' });
+    expect(() => deleteVolume(work, 'manuscript')).toThrow(/只允许 manuscript\/ 下的卷目录/);
+    expect(() => deleteVolume(work, 'manuscript/')).toThrow(/只允许 manuscript\/ 下的卷目录/);
+    expect(() => deleteVolume(work, '笔记.md')).toThrow(/只允许 manuscript\/ 下的卷目录/);
+    expect(() => deleteVolume(work, '../外面')).toThrow();
+    expect(() => deleteVolume(work, 'manuscript/../../../外面')).toThrow();
+    expect(() => deleteVolume(work, 'manuscript/不存在的卷')).toThrow(/卷目录不存在/);
+    // 原有文件未被误伤
+    expect(fs.existsSync(path.join(work, 'manuscript/第一卷·风起/第一章·少年.md'))).toBe(true);
   });
 });
 

@@ -1,5 +1,7 @@
 // 测试：/v1/chat SSE 管道——mock 模型（ai/test 的 MockLanguageModelV3）驱动的事件序列、落库、工具多轮、断连中止。
 import { tool, type ToolSet } from 'ai';
+import { MockLanguageModelV3 } from 'ai/test';
+import type { LanguageModelV3StreamPart } from '@ai-sdk/provider';
 import { z } from 'zod';
 import { describe, expect, it, vi } from 'vitest';
 import { readSse, startTestServer, stepModel, textResult, toolCallResult, hangingModel } from './helpers.js';
@@ -258,13 +260,13 @@ describe('/v1/chat SSE 管道', () => {
     }
   });
 
-  it('回放跳过纯工具轮（空文本 assistant），相邻 user 合并为一条', async () => {
+  it('回放纯工具轮：空文本 assistant 以工具摘要回放，不再跳过，相邻 user 仍合并', async () => {
     const model = stepModel([textResult(['好'])]);
     const s = await startTestServer({ modelForTier: () => model });
     try {
       const sid = s.store.createSession('回放').id;
       s.store.addMessage(sid, { role: 'user', content: '第一问' });
-      // 纯工具轮：无文本，只有 toolCalls（工具结果不重放，整条跳过）
+      // 纯工具轮：无文本，只有 toolCalls——现在回放为一行工具摘要（工具结果仍不重放）
       s.store.addMessage(sid, {
         role: 'assistant',
         content: '',
@@ -277,8 +279,9 @@ describe('/v1/chat SSE 管道', () => {
       expect(evs.at(-1)!.event).toBe('done');
 
       const prompt = model.doStreamCalls[0]!.prompt.filter((m) => m.role !== 'system');
-      expect(prompt.map((m) => m.role)).toEqual(['user']); // 空 assistant 跳过后相邻 user 合并成一条
-      expect(promptText(prompt[0]!)).toBe('第一问\n追问\n最新问题');
+      expect(prompt.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
+      expect(promptText(prompt[1]!)).toBe('[工具调用] word_count({"relPath":"ch01.md"})');
+      expect(promptText(prompt[2]!)).toBe('追问\n最新问题'); // 相邻 user 合并成一条
     } finally {
       await s.close();
     }
@@ -322,6 +325,134 @@ describe('/v1/chat SSE 管道', () => {
       const prompt = model.doStreamCalls[0]!.prompt.filter((m) => m.role !== 'system');
       expect(prompt.map((m) => m.role)).toEqual(['user']);
       expect(promptText(prompt[0]!)).toBe('最新问题');
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('失败轮落库：后续步骤 provider 抛错时，已收集的 toolCalls 随部分 assistant 消息落库，SSE 收到 error', async () => {
+    let step = 0;
+    const model = new MockLanguageModelV3({
+      doStream: async () => {
+        step++;
+        if (step === 1) return toolCallResult('tc-1', 'word_count', { relPath: 'ch01.md' });
+        // 第二步：provider 中途抛错
+        return {
+          stream: new ReadableStream<LanguageModelV3StreamPart>({
+            start(controller) {
+              controller.error(new Error('provider 中途抛错'));
+            },
+          }),
+        };
+      },
+    });
+    const s = await startTestServer({ modelForTier: () => model, tools: domainTools });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '统计第一章字数' });
+      const events = await readSse(res);
+      expect(events.map((e) => e.event)).toEqual(['tool-call', 'tool-result', 'error']);
+
+      const sessionId = s.store.listSessions()[0]!.id;
+      const messages = s.store.listMessages(sessionId);
+      expect(messages.map((m) => m.role)).toEqual(['user', 'assistant']);
+      const assistant = messages.at(-1)!;
+      expect(assistant.content).toBe('');
+      expect(assistant.toolCalls).toEqual([{ id: 'tc-1', name: 'word_count', args: { relPath: 'ch01.md' } }]);
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('失败轮落库：服务端超时已产生的文本随部分 assistant 消息落库，SSE 收到 error', async () => {
+    vi.stubEnv('LLM_TIMEOUT_SECONDS', '1');
+    const s = await startTestServer({ modelForTier: () => hangingModel(() => {}) });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '超时落库' });
+      const events = await readSse(res);
+      expect(events.map((e) => e.event)).toEqual(['text-delta', 'error']);
+
+      const sessionId = s.store.listSessions()[0]!.id;
+      const messages = s.store.listMessages(sessionId);
+      expect(messages.map((m) => m.role)).toEqual(['user', 'assistant']);
+      expect(messages.at(-1)!.content).toBe('第一段');
+      expect(messages.at(-1)!.toolCalls).toEqual([]);
+    } finally {
+      vi.unstubAllEnvs();
+      await s.close();
+    }
+  });
+
+  it('失败轮落库：多步工具轮在后续步骤超时时，已收集的 toolCalls 落库为部分 assistant 消息', async () => {
+    vi.stubEnv('LLM_TIMEOUT_SECONDS', '1');
+    let step = 0;
+    const model = new MockLanguageModelV3({
+      doStream: async (options) => {
+        step++;
+        if (step === 1) return toolCallResult('tc-1', 'word_count', { relPath: 'ch01.md' });
+        // 第二步挂起直到服务端超时中止
+        return {
+          stream: new ReadableStream<LanguageModelV3StreamPart>({
+            start(controller) {
+              options.abortSignal?.addEventListener('abort', () => controller.error(new Error('provider stream aborted')));
+            },
+          }),
+        };
+      },
+    });
+    const s = await startTestServer({ modelForTier: () => model, tools: domainTools });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '统计第一章字数' });
+      const events = await readSse(res);
+      expect(events.map((e) => e.event)).toEqual(['tool-call', 'tool-result', 'error']);
+
+      const sessionId = s.store.listSessions()[0]!.id;
+      const messages = s.store.listMessages(sessionId);
+      expect(messages.map((m) => m.role)).toEqual(['user', 'assistant']);
+      const assistant = messages.at(-1)!;
+      expect(assistant.content).toBe('');
+      expect(assistant.toolCalls).toEqual([{ id: 'tc-1', name: 'word_count', args: { relPath: 'ch01.md' } }]);
+    } finally {
+      vi.unstubAllEnvs();
+      await s.close();
+    }
+  });
+
+  it('回放工具调用摘要：带 toolCalls 的 assistant 行 content 末尾追加 [工具调用]；空 content 有 toolCalls 不再跳过', async () => {
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const sid = s.store.createSession('回放').id;
+      s.store.addMessage(sid, { role: 'user', content: '第一问' });
+      // 纯工具轮：空 content + toolCalls，回放为一行摘要
+      s.store.addMessage(sid, {
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'tc-1', name: 'word_count', args: { relPath: 'ch01.md' } }],
+      });
+      s.store.addMessage(sid, { role: 'user', content: '追问' });
+      // 带文本 + toolCalls 的 assistant 行：content 末尾追加摘要
+      s.store.addMessage(sid, {
+        role: 'assistant',
+        content: '我先查了字数。',
+        toolCalls: [{ id: 'tc-2', name: 'word_count', args: { relPath: 'ch02.md' } }],
+      });
+      s.store.addMessage(sid, { role: 'user', content: '继续' });
+
+      const res = await postChat(s.baseUrl, s.token, { sessionId: sid, text: '最新问题' });
+      const evs = await readSse(res);
+      expect(evs.at(-1)!.event).toBe('done');
+
+      const prompt = model.doStreamCalls[0]!.prompt.filter((m) => m.role !== 'system');
+      expect(prompt.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant', 'user']);
+      const assistantTexts = prompt.filter((m) => m.role === 'assistant').map((m) => promptText(m));
+      // 纯工具轮行：回放内容就是摘要
+      expect(assistantTexts[0]).toBe('[工具调用] word_count({"relPath":"ch01.md"})');
+      // 带文本行：末尾追加摘要
+      expect(assistantTexts[1]).toBe('我先查了字数。\n[工具调用] word_count({"relPath":"ch02.md"})');
+      // 落库不受影响：摘要只进回放，不写库
+      const stored = s.store.listMessages(sid).map((m) => m.content);
+      expect(stored).not.toContain('[工具调用]');
+      expect(stored.at(-1)).toBe('好'); // 本轮模型回复照常落库
     } finally {
       await s.close();
     }

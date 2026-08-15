@@ -49,12 +49,33 @@ const MAX_REPLAY_CHARS = 25_000;
 
 /**
  * 跨对话记忆：把会话历史回放成 messages（替代单轮 prompt: text）。
- * 已知限制：assistant 的工具调用结果不重放——AI SDK 要求 tool-call 与 tool-result 成对，
- * 而历史只存了 assistant 侧的 toolCalls，回放会校验失败；纯工具轮（无文本）也一并跳过。
+ * 工具调用只回放一行摘要（[工具调用] name(args)），不重放 toolCalls 本体与工具结果——
+ * AI SDK 要求 tool-call 与 tool-result 成对，而历史只存了 assistant 侧的 toolCalls，直接回放会校验失败；
+ * 纯工具轮（content 为空但有 toolCalls）以摘要为回放内容，不再跳过。
  * 预算：最多最近 MAX_REPLAY_MESSAGES 条、合计 MAX_REPLAY_CHARS 字符，从最新往回取；
  * 当前用户消息刚落库，必在回放内且位于末尾。相邻同 role（纯工具轮被跳过/预算截断造成）
  * 需自合并——实测 AI SDK 不合并，而部分 provider 拒绝连续同角色消息。
  */
+
+/** 工具调用摘要：把 toolCalls（unknown[]，运行时收窄：元素须为对象且有 string name）拼成一行提示文本；参数 JSON 超 100 字符截断。 */
+function toolSummary(toolCalls: unknown[]): string {
+  const names: string[] = [];
+  for (const call of toolCalls) {
+    if (typeof call !== 'object' || call === null) continue;
+    const c = call as { name?: unknown; args?: unknown };
+    if (typeof c.name !== 'string') continue;
+    let argsText = '{}';
+    try {
+      argsText = JSON.stringify(c.args ?? {});
+    } catch {
+      argsText = '{}';
+    }
+    if (argsText.length > 100) argsText = argsText.slice(0, 100) + '…';
+    names.push(`${c.name}(${argsText})`);
+  }
+  return names.length > 0 ? `[工具调用] ${names.join('、')}` : '';
+}
+
 function buildReplayMessages(
   rows: MessageRow[]
 ): { role: 'user' | 'assistant'; content: string }[] {
@@ -62,10 +83,14 @@ function buildReplayMessages(
   let total = 0;
   for (let i = rows.length - 1; i >= 0 && picked.length < MAX_REPLAY_MESSAGES; i--) {
     const row = rows[i]!;
-    if (row.role === 'assistant' && row.content.trim() === '') continue;
-    if (picked.length > 0 && total + row.content.length > MAX_REPLAY_CHARS) break;
-    total += row.content.length;
-    picked.push({ role: row.role, content: row.content });
+    // 工具摘要只作模型上下文提示、不落库；纯工具轮（content 空）以摘要为回放内容。
+    const summary = row.role === 'assistant' ? toolSummary(row.toolCalls) : '';
+    const content = summary ? (row.content === '' ? summary : `${row.content}\n${summary}`) : row.content;
+    // 仅当 content 为空且无有效工具摘要才跳过。
+    if (row.role === 'assistant' && content.trim() === '') continue;
+    if (picked.length > 0 && total + content.length > MAX_REPLAY_CHARS) break;
+    total += content.length;
+    picked.push({ role: row.role, content });
   }
   picked.reverse();
   // 截断后若首条是 assistant（其对应的 user 引导已被裁掉），丢掉。
@@ -127,6 +152,17 @@ export async function handleChatRequest(
 
   const pump = new EventPump(res, sessionId);
   pump.start();
+  let assistantText = '';
+  const toolCalls: { id: string; name: string; args: unknown }[] = [];
+  /** 失败轮落库：非断连且已产出内容时，把部分 assistant 消息落库再发 error；落库失败只记 stderr，不掩盖原始错误。 */
+  const persistPartial = (): void => {
+    if (abort.signal.aborted || (assistantText === '' && toolCalls.length === 0)) return;
+    try {
+      deps.store.addMessage(sessionId, { role: 'assistant', content: assistantText, toolCalls });
+    } catch (e) {
+      console.error('落库失败轮 assistant 消息失败:', e);
+    }
+  };
   try {
     const model = deps.modelForTier(tier);
     const options: Parameters<typeof streamText>[0] = {
@@ -139,8 +175,6 @@ export async function handleChatRequest(
     if (deps.tools) options.tools = deps.tools;
     const result = streamText(options);
 
-    let assistantText = '';
-    const toolCalls: { id: string; name: string; args: unknown }[] = [];
     for await (const part of result.stream) {
       switch (part.type) {
         case 'text-delta':
@@ -170,6 +204,7 @@ export async function handleChatRequest(
       return;
     }
     if (timeoutSignal.aborted) {
+      persistPartial();
       pump.emit('error', { message: `LLM 请求超时（超过 ${timeoutSeconds} 秒）` });
       pump.end();
       return;
@@ -189,11 +224,13 @@ export async function handleChatRequest(
       return;
     }
     if (timeoutSignal.aborted) {
+      persistPartial();
       pump.emit('error', { message: `LLM 请求超时（超过 ${timeoutSeconds} 秒）` });
       pump.end();
       return;
     }
     // 错误脱敏：非业务错误（provider 内部异常等）只回稳定占位，原始细节已写 stderr。
+    persistPartial();
     pump.emit('error', { message: toPublicErrorMessage(err) });
     pump.end();
   } finally {

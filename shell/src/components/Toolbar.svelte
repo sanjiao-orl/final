@@ -1,5 +1,7 @@
 <script lang="ts">
-  // 顶栏 42px（v3）：作品名 / 当前章+脏点 / 保存/导出/快照 / 审批模式指示 / 暂存 / 打字机/明暗/专注/AI/设置。
+  // 顶栏 42px（v3）：作品名（可切换作品）/ 当前章+脏点 / 保存/导出/快照 / 审批模式指示 / 暂存 / 打字机/明暗/专注/AI/设置。
+  import { open } from '@tauri-apps/plugin-dialog';
+  import { tauriInvoke } from '../lib/core.js';
   import { iconSvg } from '../lib/icons.js';
   import { candidates } from '../lib/candidates.svelte.js';
   import { settings } from '../lib/settings.svelte.js';
@@ -8,11 +10,93 @@
   import { review } from '../lib/review.svelte.js';
   import { ui } from '../lib/ui.svelte.js';
   import { work } from '../lib/work.svelte.js';
+  import WorkMenu from './WorkMenu.svelte';
 
   interface Props {
     onSave: () => void;
   }
   let { onSave }: Props = $props();
+
+  let menuOpen = $state(false);
+  /** 仅桌面版（Tauri）支持作品切换；浏览器 dev 只给 title 提示。 */
+  const tauriAvailable = tauriInvoke() !== undefined;
+
+  /** 父目录：作品切换/新建时作为文件夹选择的 defaultPath。 */
+  function parentPath(p: string): string | undefined {
+    const i = Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/'));
+    return i > 0 ? p.slice(0, i) : undefined;
+  }
+
+  function toggleWorkMenu(): void {
+    if (!tauriAvailable) return;
+    menuOpen = !menuOpen;
+  }
+
+  /** 切换前脏确认：有未保存改动时提示，确认后才允许切换。 */
+  async function confirmSwitch(): Promise<boolean> {
+    if (!work.dirty) return true;
+    return dialog.confirm({
+      message: '未保存改动将丢失，确认切换？',
+      okLabel: '切换',
+      danger: true,
+    });
+  }
+
+  /** 切换作品：脏改动先确认（未保存将丢失），再写配置 + 注册 works + 重启 core；切换中菜单保持打开显示状态行。 */
+  async function switchTo(dir: string): Promise<void> {
+    if (!dir || (dir === work.workDir && dir === settings.appWorkDir)) {
+      menuOpen = false;
+      return;
+    }
+    if (!(await confirmSwitch())) {
+      menuOpen = false;
+      return;
+    }
+    try {
+      await settings.switchWork(dir);
+    } finally {
+      menuOpen = false;
+    }
+  }
+
+  /** 新建作品：输名称 → 选父目录（默认当前作品上一级）→ create_work 建目录并注册切换。 */
+  async function newWork(): Promise<void> {
+    try {
+      const name = await dialog.prompt({ message: '输入新作品名称（将在所选父目录下创建同名文件夹）', placeholder: '作品名称' });
+      if (!name) return;
+      const defaultPath = parentPath(work.workDir);
+      const dir = await open({
+        directory: true,
+        title: '选择新建作品的父目录',
+        ...(defaultPath ? { defaultPath } : {}),
+      });
+      if (typeof dir === 'string' && dir) {
+        if (!(await confirmSwitch())) return;
+        await settings.createWork(dir, name);
+      }
+    } catch {
+      settings.appError = '选择文件夹失败（非 Tauri 环境？）';
+    } finally {
+      menuOpen = false;
+    }
+  }
+
+  /** 打开现有目录：选目录 → 注册并切换。 */
+  async function openExisting(): Promise<void> {
+    try {
+      const defaultPath = parentPath(work.workDir);
+      const dir = await open({
+        directory: true,
+        title: '打开现有作品目录',
+        ...(defaultPath ? { defaultPath } : {}),
+      });
+      if (typeof dir === 'string' && dir) await switchTo(dir);
+    } catch {
+      settings.appError = '选择文件夹失败（非 Tauri 环境？）';
+    } finally {
+      menuOpen = false;
+    }
+  }
 
   async function confirmDelete(): Promise<void> {
     const cur = work.current;
@@ -44,7 +128,20 @@
 </script>
 
 <header data-ai-zone>
-  <span class="tb-work" title={work.workDir}>{work.workName || '小说写作工作台'}</span>
+  <button
+    class="tb-work"
+    onclick={toggleWorkMenu}
+    title={tauriAvailable ? work.workDir : '作品切换仅桌面版可用'}
+  >
+    {work.workName || '小说写作工作台'}
+  </button>
+  <WorkMenu
+    open={menuOpen}
+    onClose={() => (menuOpen = false)}
+    onPick={(dir) => void switchTo(dir)}
+    onNew={() => void newWork()}
+    onOpenExisting={() => void openExisting()}
+  />
   <span class="tb-sep"></span>
   <span class="tb-chapter" title={work.current ? work.current.title : '未打开章节'}>
     {work.current ? work.current.title : '未打开章节'}
@@ -103,6 +200,7 @@
 
 <style>
   header {
+    position: relative;
     height: var(--toolbar-h);
     flex: none;
     display: flex;
@@ -124,6 +222,15 @@
     max-width: 200px;
     overflow: hidden;
     text-overflow: ellipsis;
+    background: none;
+    border: none;
+    color: var(--ink);
+    cursor: pointer;
+    border-radius: 6px;
+    transition: background var(--t-hover);
+  }
+  .tb-work:hover {
+    background: color-mix(in srgb, var(--muted) 10%, transparent);
   }
   .tb-chapter {
     display: flex;

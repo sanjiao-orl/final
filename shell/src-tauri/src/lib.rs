@@ -23,6 +23,8 @@ const CONFIG_FILE: &str = "config.json";
 struct AppConfig {
   /// 作品目录；空=缺省（dev 仓库 .demo-work / prod app_data_dir/.demo-work）。
   work_dir: Option<String>,
+  /// 作品注册表：作品目录绝对路径列表（顶栏作品菜单展示与切换用）。
+  works: Option<Vec<String>>,
   llm: Option<LlmConfig>,
 }
 
@@ -141,6 +143,41 @@ fn read_config(app: tauri::AppHandle) -> Result<AppConfig, String> {
 #[tauri::command]
 fn write_config(app: tauri::AppHandle, config: AppConfig) -> Result<(), String> {
   write_config_at(&config_file(&app)?, &config)
+}
+
+/// 纯函数：在 parent 下新建作品目录（parent/<name>/manuscript）。
+/// .novel 目录由 spawn_core 按需创建，这里不建。
+fn create_work_dir(parent: &Path, name: &str) -> Result<PathBuf, String> {
+  let name = name.trim();
+  if name.is_empty() {
+    return Err("作品名非法：名称不能为空".to_string());
+  }
+  if name.chars().any(|c| matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|')) {
+    return Err(format!("作品名非法：{name}（不能包含 \\ / : * ? \" < > |）"));
+  }
+  let target = parent.join(name);
+  if target.exists() {
+    // 已存在时只容忍空目录（用户复用自己建好的空文件夹）；非空目录直接拒，避免误入旧作品。
+    match std::fs::read_dir(&target) {
+      Ok(mut entries) => {
+        if entries.next().is_some() {
+          return Err("目标目录已存在且非空".to_string());
+        }
+      }
+      Err(_) => return Err("目标路径已存在且不是目录".to_string()),
+    }
+  }
+  std::fs::create_dir_all(target.join("manuscript"))
+    .map_err(|e| format!("创建作品目录失败: {e}"))?;
+  let abs = std::path::absolute(&target).map_err(|e| format!("作品目录路径非法: {e}"))?;
+  Ok(plain_path(&abs))
+}
+
+/// 新建作品：在 parentDir 下创建 <name>/manuscript，返回归一化后的作品目录绝对路径。
+#[tauri::command]
+fn create_work(parent_dir: String, name: String) -> Result<String, String> {
+  let dir = create_work_dir(Path::new(&parent_dir), &name)?;
+  Ok(dir.to_string_lossy().to_string())
 }
 
 /// 单字段生效值解析：配置 > 环境变量 > 缺省（空）；source 供面板标注来源。
@@ -555,6 +592,7 @@ pub fn run() {
       core_info,
       read_config,
       write_config,
+      create_work,
       config_status,
       restart_core
     ])
@@ -621,6 +659,58 @@ mod tests {
     );
   }
 
+  /// 单测临时目录：进程 id + 时间戳拼后缀，避免并行/残留冲突。
+  fn temp_test_dir(tag: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .expect("系统时间")
+      .as_nanos();
+    std::env::temp_dir().join(format!("novel-ws-{tag}-{}-{nanos}", std::process::id()))
+  }
+
+  /// 作品名非法字符逐个拒；空名/纯空白拒。
+  #[test]
+  fn create_work_dir_rejects_invalid_names() {
+    let parent = temp_test_dir("creatework-invalid");
+    std::fs::create_dir_all(&parent).expect("create parent");
+    for ch in ['\\', '/', ':', '*', '?', '"', '<', '>', '|'] {
+      let name = format!("a{ch}b");
+      let err = create_work_dir(&parent, &name).expect_err(&format!("name {name:?} 应拒"));
+      assert!(err.contains("作品名非法"), "错误应为作品名非法: {err}");
+    }
+    assert!(create_work_dir(&parent, "   ").is_err(), "纯空白名称应拒");
+    let _ = std::fs::remove_dir_all(&parent);
+  }
+
+  /// 目标目录已存在且非空时拒绝。
+  #[test]
+  fn create_work_dir_rejects_existing_non_empty_dir() {
+    let parent = temp_test_dir("creatework-exists");
+    let target = parent.join("旧书");
+    std::fs::create_dir_all(&target).expect("create target");
+    std::fs::write(target.join("a.md"), "x").expect("write file");
+    let err = create_work_dir(&parent, "旧书").expect_err("非空目录应拒");
+    assert!(err.contains("目标目录已存在且非空"), "错误应为目录非空: {err}");
+    let _ = std::fs::remove_dir_all(&parent);
+  }
+
+  /// 正例：建出 manuscript/，返回 plain 绝对路径（不带 Windows verbatim 前缀）。
+  #[test]
+  fn create_work_dir_creates_manuscript_and_returns_plain_abs_path() {
+    let parent = temp_test_dir("creatework-ok");
+    std::fs::create_dir_all(&parent).expect("create parent");
+    let dir = create_work_dir(&parent, "新书").expect("create work dir");
+    assert!(dir.is_absolute(), "返回路径应为绝对路径: {dir:?}");
+    assert!(
+      !dir.to_string_lossy().starts_with(r"\\?\"),
+      "不得带 \\\\?\\ 前缀: {}",
+      dir.display()
+    );
+    assert!(dir.join("manuscript").is_dir(), "应建出 manuscript/ 子目录");
+    assert_eq!(dir, std::path::absolute(parent.join("新书")).expect("abs"));
+    let _ = std::fs::remove_dir_all(&parent);
+  }
+
   /// 配置读写：缺文件返回默认；roundtrip；原子写后 tmp 不残留。
   #[test]
   fn config_write_read_roundtrip() {
@@ -629,10 +719,14 @@ mod tests {
     let _ = std::fs::remove_dir_all(&dir);
 
     let missing = read_config_at(&file).expect("read missing");
-    assert!(missing.work_dir.is_none() && missing.llm.is_none(), "缺文件应返回全空配置");
+    assert!(
+      missing.work_dir.is_none() && missing.llm.is_none() && missing.works.is_none(),
+      "缺文件应返回全空配置"
+    );
 
     let cfg = AppConfig {
       work_dir: Some("C:/works/新书".to_string()),
+      works: Some(vec!["C:/works/新书".to_string(), "C:/works/旧书".to_string()]),
       llm: Some(LlmConfig {
         base_url: Some("https://llm.example/v1".to_string()),
         api_key: Some("sk-test-123".to_string()),
@@ -649,6 +743,10 @@ mod tests {
 
     let back = read_config_at(&file).expect("read back");
     assert_eq!(back.work_dir.as_deref(), Some("C:/works/新书"));
+    assert_eq!(
+      back.works.as_deref(),
+      Some(vec!["C:/works/新书".to_string(), "C:/works/旧书".to_string()].as_slice())
+    );
     let llm = back.llm.expect("llm");
     assert_eq!(llm.base_url.as_deref(), Some("https://llm.example/v1"));
     assert_eq!(llm.api_key.as_deref(), Some("sk-test-123"));

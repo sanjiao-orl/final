@@ -17,7 +17,7 @@ function mockTauri(impl: InvokeFn): ReturnType<typeof vi.fn> {
 
 /** config_status 样例：配置全空，生效值来自环境变量/缺省。 */
 const STATUS = {
-  config: { workDir: '', llm: { baseUrl: '', apiKey: '', model: '', modelCheap: '' } },
+  config: { workDir: '', works: ['C:/works/demo'], llm: { baseUrl: '', apiKey: '', model: '', modelCheap: '' } },
   workDir: { value: 'C:/works/demo', source: 'default' },
   baseUrl: { value: 'https://opencode.ai/zen/go/v1', source: 'env' },
   apiKey: { value: 'sk-a••••', source: 'env' },
@@ -27,6 +27,7 @@ const STATUS = {
 
 beforeEach(() => {
   settings.appWorkDir = '';
+  settings.appWorks = [];
   settings.appBaseUrl = '';
   settings.appApiKey = '';
   settings.appModel = '';
@@ -51,12 +52,25 @@ describe('应用级配置（config.json）', () => {
     expect(invoke).toHaveBeenCalledWith('config_status');
     expect(settings.configStatus).toEqual(STATUS);
     expect(settings.appWorkDir).toBe('');
+    expect(settings.appWorks).toEqual(['C:/works/demo']);
     expect(settings.appBaseUrl).toBe('');
     expect(settings.appModel).toBe('');
   });
 
-  it('saveAppConfig：write_config 带 camelCase 配置，成功后刷新 config_status 并给提示', async () => {
+  it('loadAppConfig：老配置无 works 时，把当前生效作品目录自愈补进列表', async () => {
+    mockTauri(async (cmd) => {
+      if (cmd === 'config_status') {
+        return { ...STATUS, config: { ...STATUS.config, works: [] } };
+      }
+      throw new Error(`unexpected ${cmd}`);
+    });
+    await settings.loadAppConfig();
+    expect(settings.appWorks).toEqual(['C:/works/demo']); // 来自 workDir.value 自愈注册
+  });
+
+  it('saveAppConfig：write_config 带 camelCase 配置（含作品注册表），成功后刷新 config_status 并给提示', async () => {
     settings.appWorkDir = 'C:/works/新书';
+    settings.appWorks = ['C:/works/新书', 'C:/works/旧书'];
     settings.appBaseUrl = 'https://llm.example/v1';
     settings.appApiKey = 'sk-test';
     settings.appModel = 'm1';
@@ -71,6 +85,7 @@ describe('应用级配置（config.json）', () => {
     expect(invoke).toHaveBeenCalledWith('write_config', {
       config: {
         workDir: 'C:/works/新书',
+        works: ['C:/works/新书', 'C:/works/旧书'],
         llm: { baseUrl: 'https://llm.example/v1', apiKey: 'sk-test', model: 'm1', modelCheap: 'm2' },
       },
     });
@@ -86,6 +101,40 @@ describe('应用级配置（config.json）', () => {
     expect(ok).toBe(false);
     expect(settings.appError).toContain('保存配置失败');
     expect(settings.appError).toContain('磁盘写失败');
+  });
+
+  it('switchWork：写 config 带 works 去重，成功后调 restart_core', async () => {
+    settings.appWorkDir = 'C:/works/a';
+    settings.appWorks = ['C:/works/a'];
+    settings.appBaseUrl = 'https://llm.example/v1';
+    settings.appApiKey = 'sk-test';
+    settings.appModel = 'm1';
+    settings.appModelCheap = 'm2';
+    const invoke = mockTauri(async (cmd) => {
+      if (cmd === 'write_config') return undefined;
+      if (cmd === 'config_status') {
+        return {
+          ...STATUS,
+          // 切换后生效目录已是新作品（与真实 config_status 一致），自愈逻辑不追加旧目录
+          workDir: { value: 'C:/works/b', source: 'config' },
+          config: { ...STATUS.config, workDir: 'C:/works/b', works: ['C:/works/a', 'C:/works/b'] },
+        };
+      }
+      if (cmd === 'restart_core') return undefined;
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const ok = await settings.switchWork('C:/works/b');
+    expect(ok).toBe(true);
+    expect(invoke).toHaveBeenCalledWith('write_config', {
+      config: {
+        workDir: 'C:/works/b',
+        works: ['C:/works/a', 'C:/works/b'],
+        llm: { baseUrl: 'https://llm.example/v1', apiKey: 'sk-test', model: 'm1', modelCheap: 'm2' },
+      },
+    });
+    expect(invoke).toHaveBeenCalledWith('restart_core');
+    expect(settings.appWorkDir).toBe('C:/works/b');
+    expect(settings.appWorks).toEqual(['C:/works/a', 'C:/works/b']);
   });
 
   it('restartCore：调 restart_core 并跑注册的重连回调', async () => {
@@ -114,7 +163,7 @@ describe('应用级配置（config.json）', () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
-  it('非 Tauri 环境：loadAppConfig 静默跳过，save/restart 明确报错', async () => {
+  it('非 Tauri 环境：loadAppConfig 静默跳过，save/restart/switchWork 明确报错', async () => {
     await settings.loadAppConfig(); // 无 window.__TAURI_INTERNALS__（afterEach 已删）
     expect(settings.configStatus).toBeNull();
     expect(await settings.saveAppConfig()).toBe(false);
@@ -122,6 +171,9 @@ describe('应用级配置（config.json）', () => {
     settings.dismissAppError();
     expect(settings.appError).toBeNull();
     expect(await settings.restartCore()).toBe(false);
+    expect(settings.appError).toContain('仅 Tauri 环境');
+    settings.dismissAppError();
+    expect(await settings.switchWork('C:/works/b')).toBe(false);
     expect(settings.appError).toContain('仅 Tauri 环境');
   });
 });

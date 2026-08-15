@@ -4,7 +4,7 @@
  * 采纳前自动快照（常开不可关）、小改就地分流、采纳留痕。默认值全部最保守。
  * 持久化 localStorage；主题/字号写回 CSS 变量（theme.ts 唯一来源）。
  *
- * 应用级配置（config.json，Tauri app_config_dir 持久化）：作品目录 + LLM 双档模型。
+ * 应用级配置（config.json，Tauri app_config_dir 持久化）：作品目录 + 作品注册表 + LLM 双档模型。
  * 生效优先级 配置 > 环境变量 > 默认；模型/作品目录是 core 启动时读的，保存后需 restart_core 才生效。
  */
 import { applyTheme, type ThemeMode } from '../theme.js';
@@ -20,9 +20,10 @@ export interface AppLlmShape {
   modelCheap: string;
 }
 
-/** 应用级配置（config.json）：workDir 空串=默认目录。 */
+/** 应用级配置（config.json）：workDir 空串=默认目录；works=作品注册表（绝对路径列表）。 */
 export interface AppConfigShape {
   workDir: string;
+  works?: string[];
   llm: AppLlmShape;
 }
 
@@ -93,6 +94,8 @@ class SettingsStore {
   // ---- 应用级配置（config.json：作品目录 + LLM 双档；配置值 > 环境变量 > 默认） ----
   /** 配置里的作品目录（空串=默认）。 */
   appWorkDir = $state('');
+  /** 作品注册表：作品目录绝对路径列表（去重）。 */
+  appWorks = $state<string[]>([]);
   appBaseUrl = $state('');
   appApiKey = $state('');
   appModel = $state('');
@@ -192,6 +195,12 @@ class SettingsStore {
       const s = await invoke<ConfigStatus>('config_status');
       this.configStatus = s;
       this.appWorkDir = s.config.workDir ?? '';
+      this.appWorks = s.config.works ?? [];
+      // 老配置没有 works 字段：把当前生效作品目录补进列表（下次保存配置时落库，自愈注册）。
+      const currentDir = s.workDir?.value ?? '';
+      if (currentDir && !this.appWorks.includes(currentDir)) {
+        this.appWorks = [currentDir, ...this.appWorks];
+      }
       this.appBaseUrl = s.config.llm?.baseUrl ?? '';
       this.appApiKey = s.config.llm?.apiKey ?? '';
       this.appModel = s.config.llm?.model ?? '';
@@ -202,7 +211,7 @@ class SettingsStore {
     }
   }
 
-  /** 保存应用级配置（作品目录 + LLM 四字段，明文存本机 config.json）；保存后需重启 core 生效。 */
+  /** 保存应用级配置（作品目录 + 作品注册表 + LLM 四字段，明文存本机 config.json）；保存后需重启 core 生效。 */
   async saveAppConfig(): Promise<boolean> {
     const invoke = tauriInvoke();
     if (!invoke) {
@@ -215,6 +224,7 @@ class SettingsStore {
       await invoke('write_config', {
         config: {
           workDir: this.appWorkDir,
+          works: this.appWorks,
           llm: {
             baseUrl: this.appBaseUrl,
             apiKey: this.appApiKey,
@@ -231,6 +241,44 @@ class SettingsStore {
       return false;
     } finally {
       this.saving = false;
+    }
+  }
+
+  /** 切换作品：写 workDir + 注册进 works 去重 → 保存配置 → 重启 core（重连回调重载全部数据）。 */
+  async switchWork(dir: string): Promise<boolean> {
+    const invoke = tauriInvoke();
+    if (!invoke) {
+      this.appError = '切换作品仅 Tauri 环境支持';
+      return false;
+    }
+    this.appWorkDir = dir;
+    this.appWorks = [...new Set([...this.appWorks, dir])];
+    const saved = await this.saveAppConfig();
+    if (!saved) {
+      this.appError = `切换作品失败：${this.appError ?? '保存配置失败'}`;
+      return false;
+    }
+    const restarted = await this.restartCore();
+    if (!restarted) {
+      this.appError = `切换作品失败：${this.appError ?? '重启 core 失败'}`;
+      return false;
+    }
+    return true;
+  }
+
+  /** 新建作品：Tauri 侧建 <parentDir>/<name>/manuscript，成功后注册并切换过去。 */
+  async createWork(parentDir: string, name: string): Promise<boolean> {
+    const invoke = tauriInvoke();
+    if (!invoke) {
+      this.appError = '新建作品仅 Tauri 环境支持';
+      return false;
+    }
+    try {
+      const dir = await invoke<string>('create_work', { parentDir, name });
+      return await this.switchWork(dir);
+    } catch (err) {
+      this.appError = `新建作品失败：${err instanceof Error ? err.message : String(err)}`;
+      return false;
     }
   }
 

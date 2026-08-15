@@ -1,6 +1,6 @@
 /**
- * server.ts —— MCP stdio server 装配：注册二十个工具并连接 stdio transport。
- * 双侧合并口径：基础工具 7 个 + WS-9 scan_quality + A 组 8 工具 + WS-17 账本 4 工具。
+ * server.ts —— MCP stdio server 装配：注册二十一个工具并连接 stdio transport。
+ * 双侧合并口径：基础工具 8 个 + WS-9 scan_quality + A 组 8 工具 + WS-17 账本 4 工具。
  * 被 core 包经 MCP stdio spawn 调用；工具实现见 tools.ts。
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -10,6 +10,7 @@ import {
   createChapter,
   createVolume,
   deleteChapter,
+  deleteVolume,
   exportTxt,
   listSnapshots,
   listStructure,
@@ -28,7 +29,7 @@ import { diagnosticsForWork, ledgerSlice, readLedger, upsertLedger, type LedgerO
 
 const server = new McpServer({
   name: 'domain',
-  version: '0.1.2',
+  version: '0.1.3',
 });
 
 /** 工具结果统一序列化为 JSON 文本。 */
@@ -117,6 +118,20 @@ server.registerTool(
     },
   },
   async ({ workDir, relPath }) => jsonResult(deleteChapter(workDir, relPath)),
+);
+
+server.registerTool(
+  'delete_volume',
+  {
+    title: '软删一卷',
+    description:
+      '安全阀：软删一卷——manuscript/ 下的卷目录（含全部章）整体移进 .novel/trash/（时间戳防重名），永不物理删除。返回 { ok, trashPath }；从 trash 移回原路径即找回。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      volumePath: z.string().describe('相对 workDir 的卷目录路径，必须是 manuscript/ 下的目录'),
+    },
+  },
+  async ({ workDir, volumePath }) => jsonResult(deleteVolume(workDir, volumePath)),
 );
 
 server.registerTool(

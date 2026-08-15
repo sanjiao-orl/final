@@ -6,7 +6,7 @@ import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import type { LanguageModel } from 'ai';
 
 /** 与 core/package.json version 保持同步。 */
-export const VERSION = '0.1.2';
+export const VERSION = '0.1.3';
 
 /** Node 版本门禁下限（与根 package.json engines.node 对齐）：低于此版本直接拒启。 */
 export const MIN_NODE_MAJOR = 24;
@@ -22,8 +22,8 @@ export interface LlmConfig {
   modelCheap: string;
 }
 
-/** LLM 服务端超时秒数缺省值：provider 挂起时请求最多挂这么久。 */
-export const DEFAULT_LLM_TIMEOUT_SECONDS = 120;
+/** LLM 服务端超时秒数缺省值：provider 挂起时请求最多挂这么久；多步工具轮在慢 provider 下耗时可能很长，取 10 分钟。 */
+export const DEFAULT_LLM_TIMEOUT_SECONDS = 600;
 
 /** 构造即校验：LLM_BASE_URL / LLM_API_KEY / LLM_MODEL 缺任一即抛错。 */
 export function loadLlmConfig(env: NodeJS.ProcessEnv = process.env): LlmConfig {

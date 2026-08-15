@@ -1,6 +1,6 @@
 {
   "name": "core",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "type": "module",
   "description": "小说写作工作台的 Node sidecar 核心：本地 HTTP/SSE 服务、会话持久化、LLM 接入、MCP 领域工具（UI 无关，被 Tauri 壳与浏览器联调页消费）",
