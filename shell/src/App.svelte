@@ -120,6 +120,9 @@
   // v3：点击外部（正文/树/抽屉）收起 AI 面板；工具栏/窄条/面板/审批卡除外
   function onDocClick(e: MouseEvent): void {
     const t = e.target as HTMLElement;
+    // 点击目标已被本次点击引发的 UI 变化卸载（如栏内「查看工具调用」跳栏后原栏卸载）：
+    // 该点击发生在面板内,只是元素先走了,不能算"点外部"。
+    if (!t.isConnected) return;
     if (t.closest('[data-ai-zone], #approval-overlay')) return;
     if (ui.aiOpen) ui.collapseAi();
   }
