@@ -167,6 +167,107 @@ fn write_config(app: tauri::AppHandle, config: AppConfig) -> Result<(), String> 
   write_config_at(&config_file(&app)?, &config)
 }
 
+// ---------- 作者笔记（作者私人笔记，AI 物理不可见） ----------
+// 约束：读写只走本壳 Tauri 命令（read_note / write_note），绝不经 core/domain MCP 工具集；
+// 文件落 <workDir>/.novel/notes/ 下。路径必须相对、无 .. / . 段、不以 / \ 或盘符开头、
+// 以 .md 结尾，拼接 canonical 目标后仍须位于笔记根内（防目录穿越 / symlink 逃逸）。
+
+/// 笔记根目录：<workDir>/.novel/notes/（作品目录解析复用 resolve_work_dir）。
+fn notes_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+  let cfg = read_config_at(&config_file(app)?)?;
+  Ok(resolve_work_dir(app, &cfg)?.join(".novel").join("notes"))
+}
+
+/// 纯函数（可单测）：校验 rel_path 相对安全——非空、以 .md 结尾、不以 / \ 或盘符开头、
+/// 不含 .. 或 . 路径段。返回可安全 join 的 rel_path；非法返回带原因的 Err。
+fn sanitize_note_rel_path(rel_path: &str) -> Result<&str, String> {
+  if rel_path.is_empty() {
+    return Err("笔记路径非法：为空".to_string());
+  }
+  if !rel_path.ends_with(".md") {
+    return Err(format!("笔记路径非法：{rel_path}（必须以 .md 结尾）"));
+  }
+  let first = rel_path.as_bytes()[0];
+  if first == b'/' || first == b'\\' {
+    return Err(format!("笔记路径非法：{rel_path}（不能以 / 或 \\ 开头）"));
+  }
+  let bytes = rel_path.as_bytes();
+  if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+    return Err(format!("笔记路径非法：{rel_path}（不能是盘符绝对路径）"));
+  }
+  for seg in rel_path.split(|c| c == '/' || c == '\\') {
+    if seg == ".." || seg == "." {
+      return Err(format!("笔记路径非法：{rel_path}（不能包含 {seg} 路径段）"));
+    }
+  }
+  Ok(rel_path)
+}
+
+/// 拼接笔记目标路径并做 canonical 包含校验：目标必须仍位于笔记根内。
+/// 文件/目录可能尚不存在（读缺文件、写新子目录），对最近存在的祖先 canonicalize 后
+/// 拼回剩余后缀，防 .. 残留与 symlink 逃逸（canonicalize 会解析符号链接到真实路径）。
+fn note_target(root: &Path, rel_path: &str) -> Result<PathBuf, String> {
+  let rel = sanitize_note_rel_path(rel_path)?;
+  let candidate = root.join(rel);
+  let root_canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+
+  let mut missing: Vec<std::ffi::OsString> = Vec::new();
+  let mut cur = candidate.as_path();
+  let canon = loop {
+    if let Ok(c) = std::fs::canonicalize(cur) {
+      let mut out = c;
+      for seg in missing.iter().rev() {
+        out.push(seg);
+      }
+      break out;
+    }
+    match (cur.parent(), cur.file_name()) {
+      (Some(p), Some(name)) => {
+        missing.push(name.to_os_string());
+        cur = p;
+      }
+      // 整条链都不存在：词法已滤掉 ..，按 root + rel 归位
+      _ => break root_canon.join(rel),
+    }
+  };
+
+  if !canon.starts_with(&root_canon) {
+    return Err(format!("笔记路径非法：{rel_path}（超出 .novel/notes/ 范围）"));
+  }
+  Ok(canon)
+}
+
+/// 读笔记：缺文件返回空串（作者笔记从空白起步）。
+fn read_note_at(root: &Path, rel_path: &str) -> Result<String, String> {
+  let target = note_target(root, rel_path)?;
+  if !target.is_file() {
+    return Ok(String::new());
+  }
+  std::fs::read_to_string(&target).map_err(|e| format!("读取笔记失败: {e}"))
+}
+
+/// 原子写笔记：先写同目录 .tmp 再 rename 覆盖（仿 write_config_at），需要时 create_dir_all。
+fn write_note_at(root: &Path, rel_path: &str, content: &str) -> Result<(), String> {
+  let target = note_target(root, rel_path)?;
+  if let Some(dir) = target.parent() {
+    std::fs::create_dir_all(dir).map_err(|e| format!("创建笔记目录失败: {e}"))?;
+  }
+  let tmp = target.with_extension("md.tmp");
+  std::fs::write(&tmp, content).map_err(|e| format!("写入笔记失败: {e}"))?;
+  std::fs::rename(&tmp, &target).map_err(|e| format!("替换笔记失败: {e}"))?;
+  Ok(())
+}
+
+#[tauri::command]
+fn read_note(app: tauri::AppHandle, rel_path: String) -> Result<String, String> {
+  read_note_at(&notes_root(&app)?, &rel_path)
+}
+
+#[tauri::command]
+fn write_note(app: tauri::AppHandle, rel_path: String, content: String) -> Result<(), String> {
+  write_note_at(&notes_root(&app)?, &rel_path, &content)
+}
+
 /// 纯函数：在 parent 下新建作品目录（parent/<name>/manuscript）。
 /// .novel 目录由 spawn_core 按需创建，这里不建。
 fn create_work_dir(parent: &Path, name: &str) -> Result<PathBuf, String> {
@@ -654,7 +755,9 @@ pub fn run() {
       write_config,
       create_work,
       config_status,
-      restart_core
+      restart_core,
+      read_note,
+      write_note
     ])
     .setup(move |app| {
       let handle = app.handle().clone();
@@ -932,5 +1035,82 @@ mod tests {
     assert!(masked.value.starts_with("sk-a"), "打码应保留前 4 位: {}", masked.value);
     assert_ne!(masked.value, "sk-abcdef123456", "打码不得回显整把 key");
     assert!(resolve_field_masked(None, "LLM_THIS_ENV_DOES_NOT_EXIST").value.is_empty());
+  }
+
+  // ---------- 作者笔记：路径守卫 + 读写 roundtrip ----------
+
+  /// 笔记路径守卫：非法相对路径逐个拒（.. / . / 盘符 / 以分隔符开头 / 非 .md / 空）。
+  #[test]
+  fn sanitize_note_rel_path_rejects_unsafe_and_accepts_relative_md() {
+    for bad in [
+      "",
+      "..",
+      "../escape.md",
+      "..\\escape.md",
+      "a/../b.md",
+      "a/./b.md",
+      "./a.md",
+      "/abs.md",
+      "\\abs.md",
+      "C:/abs.md",
+      "C:\\abs.md",
+      "book.txt",
+      "book",
+      "a/b.md/",
+      "chapters/..",
+    ] {
+      let err = sanitize_note_rel_path(bad).expect_err(&format!("{bad:?} 应被拒"));
+      assert!(err.contains("笔记路径非法"), "错误应为路径非法: {err}");
+    }
+    for good in ["book.md", "chapters/ch-1.md", "a/b/c.md", "章节笔记.md", "a\\b.md"] {
+      sanitize_note_rel_path(good).expect(&format!("{good:?} 应通过"));
+    }
+  }
+
+  /// 笔记读写 roundtrip：写→读回；缺文件返回空串；写后 .tmp 不残留；子目录自动创建。
+  #[test]
+  fn note_write_read_roundtrip_and_missing_returns_empty() {
+    let dir = temp_test_dir("notes-roundtrip");
+    let root = dir.join("work").join(".novel").join("notes");
+    std::fs::create_dir_all(&root).expect("create root");
+
+    // 缺文件：返回空串
+    assert_eq!(read_note_at(&root, "book.md").expect("read missing"), "");
+
+    write_note_at(&root, "book.md", "作者私房话第一版").expect("write book");
+    assert_eq!(
+      read_note_at(&root, "book.md").expect("read back"),
+      "作者私房话第一版"
+    );
+    assert!(!root.join("book.md.tmp").exists(), "原子写后 .tmp 应已被 rename 掉");
+
+    // 子目录（chapters/<id>.md）需要时 create_dir_all
+    write_note_at(&root, "chapters/ch-42.md", "本章私房话").expect("write chapter note");
+    assert_eq!(
+      read_note_at(&root, "chapters/ch-42.md").expect("read chapter note"),
+      "本章私房话"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  /// 目录穿越必须整体拒绝：.. 逃逸写不出去、也读不回，笔记根外不得落盘。
+  #[test]
+  fn note_at_rejects_traversal() {
+    let dir = temp_test_dir("notes-traversal");
+    let root = dir.join("work").join(".novel").join("notes");
+    std::fs::create_dir_all(&root).expect("create root");
+
+    let err = write_note_at(&root, "../evil.md", "x").expect_err(".. 应被拒");
+    assert!(err.contains("笔记路径非法"), "错误应为路径非法: {err}");
+    assert!(
+      !dir.join("work").join("evil.md").exists(),
+      "不得在笔记根外落盘"
+    );
+
+    assert!(read_note_at(&root, "a/../../evil.md").is_err(), "深层 .. 应被拒");
+    assert!(write_note_at(&root, "a\\..\\evil.md", "x").is_err(), "反斜杠 .. 应被拒");
+
+    let _ = std::fs::remove_dir_all(&dir);
   }
 }

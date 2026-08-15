@@ -283,3 +283,9 @@ describe('应用级配置（config.json）', () => {
     expect(settings.appError).toContain('仅 Tauri 环境');
   });
 });
+
+describe('暂存与裁决 · inlineSplit 默认（反馈#3：默认暂存优先）', () => {
+  it('inlineSplit 默认关：小改默认进暂存区（node 环境无 localStorage，走 DEFAULTS）', () => {
+    expect(settings.inlineSplit).toBe(false);
+  });
+});

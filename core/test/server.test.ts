@@ -3,12 +3,17 @@ import { describe, expect, it } from 'vitest';
 import { readSse, startTestServer } from './helpers.js';
 
 describe('core HTTP 服务', () => {
-  it('GET /v1/health → 200 { ok, version, protocol }', async () => {
+  it('GET /v1/health → 200 { ok, version, protocol, commit }', async () => {
     const s = await startTestServer();
     try {
       const res = await fetch(`${s.baseUrl}/v1/health`);
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ ok: true, version: 'test', protocol: 1 });
+      const body = (await res.json()) as { ok: boolean; version: string; protocol: number; commit: string };
+      expect(body.ok).toBe(true);
+      expect(body.version).toBe('test');
+      expect(body.protocol).toBe(1);
+      expect(typeof body.commit).toBe('string');
+      expect(body.commit.length).toBeGreaterThan(0);
     } finally {
       await s.close();
     }

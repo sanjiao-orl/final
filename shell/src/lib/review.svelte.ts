@@ -238,6 +238,10 @@ export class ReviewStore {
   open = $state(false);
   running = $state(false);
   report = $state<ReviewReport | null>(null);
+  /** 面板内嵌错误（反馈#4：失败不进 console / 不只在面板外红条，面板内红字可见；下次跑自动清）。 */
+  error = $state<string | null>(null);
+  /** 当前在跑的档位（反馈#4 进度文案区分）：scan=全书扫描，premium=贵档冷读。 */
+  mode = $state<'scan' | 'premium'>('scan');
   /** 红点徽标数：关掉视图后仍保留（清零出口：处理完重跑即消失）。 */
   blockerTotal = $derived(this.report?.blockerTotal ?? 0);
   hasBlockers = $derived(this.report?.hasBlockers ?? false);
@@ -266,10 +270,12 @@ export class ReviewStore {
     this.open = false;
   }
 
-  /** 跑全书扫描 + 账本诊断；失败走 work.error 红条，不吞错。 */
+  /** 跑全书扫描 + 账本诊断；失败在面板内嵌红字 + work.error 红条，不吞错。 */
   async run(): Promise<void> {
     if (this.running) return;
     this.running = true;
+    this.error = null;
+    this.mode = 'scan';
     try {
       const [scan, diag] = await Promise.all([
         this.client.callTool<WorkScanResult>('scan_quality', { workDir: this.workDir }),
@@ -280,7 +286,9 @@ export class ReviewStore {
       ]);
       this.report = applyPremiumFindings(buildReviewReport(scan, diag), this.premium);
     } catch (err) {
-      work.error = `审阅扫描失败：${err instanceof Error ? err.message : String(err)}`;
+      const msg = `审阅扫描失败：${err instanceof Error ? err.message : String(err)}`;
+      this.error = msg;
+      work.error = msg;
     } finally {
       this.running = false;
     }
@@ -297,15 +305,23 @@ export class ReviewStore {
       return;
     }
     this.running = true;
+    this.error = null;
+    this.mode = 'premium';
     try {
       const { findings } = await this.client.review(this.workDir, chapterRelPath);
       this.premium.set(chapterRelPath, findings);
       this.report = applyPremiumFindings(this.report ?? emptyReviewReport(), this.premium);
     } catch (err) {
-      work.error = `贵档审阅失败：${err instanceof Error ? err.message : String(err)}`;
+      const msg = `贵档审阅失败：${err instanceof Error ? err.message : String(err)}`;
+      this.error = msg;
+      work.error = msg;
     } finally {
       this.running = false;
     }
+  }
+
+  dismissError(): void {
+    this.error = null;
   }
 }
 

@@ -1,6 +1,7 @@
 <script lang="ts">
   // AI 窄条 48px（v4）：默认收起形态，点图标切换单活动栏（同栏再点=收起），hover 左侧弹出提示。
   // 滚轮增减栏手势已删除（与单栏切换冲突；栏宽由 AiPanel 左缘拖拽手柄调）。
+  import type { IconName } from '../../lib/icons.js';
   import { iconSvg } from '../../lib/icons.js';
   import { ui, type AiColId } from '../../lib/ui.svelte.js';
 
@@ -8,7 +9,17 @@
     { id: 'session', label: '会话', tip: '会话 · 挂载 / 会话列表(B7)' },
     { id: 'chat', label: '对话', tip: '对话 · 消息流 / 输入' },
     { id: 'tools', label: '工具', tip: '工具 · 调用卡(B3/B10)' },
+    { id: 'context', label: '上下文', tip: '上下文 · 四维账本(伏笔/道具/时钟/知情)' },
   ];
+
+  /** 栏 id → 图标名映射：settings 在底部单独渲染（与上方栏语义分组）。 */
+  const ICON_MAP: Record<AiColId, IconName> = {
+    session: 'session',
+    chat: 'chat',
+    tools: 'tools',
+    context: 'book',
+    settings: 'settings',
+  };
 </script>
 
 <aside class="rail" aria-label="AI 面板窄条">
@@ -21,7 +32,7 @@
       title={v.tip}
       aria-label={v.tip}
     >
-      {@html iconSvg(v.id === 'session' ? 'session' : v.id === 'chat' ? 'chat' : 'tools', 18)}
+      {@html iconSvg(ICON_MAP[v.id], 18)}
       <span class="tip">{v.tip}</span>
     </button>
   {/each}

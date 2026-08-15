@@ -69,7 +69,7 @@ export interface SettingsShape {
   autosaveSec: 30 | 60 | 120;
   /** 采纳/危险操作前自动快照：建议不允许关，仅列出以示存在（B4 不受审批模式影响）。 */
   snapshotBeforeAdopt: boolean;
-  /** 小改就地浮层 / 大改进暂存的分流（B1）：关则全部进暂存。 */
+  /** 小改就地浮层 / 大改进暂存的分流（B1）：默认关=暂存优先（小改也进暂存区）；开=小改就地浮层。 */
   inlineSplit: boolean;
   /** 采纳留痕：显示"为何采纳"（B8）。 */
   showInstruction: boolean;
@@ -82,7 +82,7 @@ const DEFAULTS: SettingsShape = {
   typewriter: true,
   autosaveSec: 60,
   snapshotBeforeAdopt: true,
-  inlineSplit: true,
+  inlineSplit: false,
   showInstruction: true,
 };
 

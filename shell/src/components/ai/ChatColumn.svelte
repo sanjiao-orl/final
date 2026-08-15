@@ -11,14 +11,17 @@
   import { work } from '../../lib/work.svelte.js';
   import { candidates } from '../../lib/candidates.svelte.js';
 
-  let input = $state('');
   let listEl = $state<HTMLDivElement | null>(null);
 
   const cur = $derived(chat.sessions.find((s) => s.id === chat.sessionId));
 
+  // 任务1（反馈#1）：composer 草稿绑 chat store 的 draftMap，关栏/切存区不再丢未发送文字。
+  // 键与 store 共用 chat.currentDraftKey()：有会话挂 session:<id>，无会话挂 scope:<scope>。
   function send(): void {
-    const text = input;
-    input = '';
+    const key = chat.currentDraftKey();
+    const text = chat.getDraft(key);
+    if (!text.trim()) return;
+    chat.setDraft(key, ''); // 立即清输入框（store 侧发送成功后兜底再清，失败则保留供重发）
     void chat.send(text);
   }
 
@@ -159,7 +162,8 @@
   <div class="box">
     <textarea
       placeholder={`对${chat.scopeLabel()}下指令…(Enter 发送, Shift+Enter 换行)`}
-      bind:value={input}
+      value={chat.getDraft(chat.currentDraftKey())}
+      oninput={(e) => chat.setDraft(chat.currentDraftKey(), e.currentTarget.value)}
       onkeydown={(e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
           e.preventDefault();
@@ -180,7 +184,7 @@
       {#if chat.streaming}
         <button class="stop" onclick={() => chat.abortStream()} aria-label="停止" title="停止生成（已收内容会保留，已中断）">{@html iconSvg('close', 12, 2)} 停止</button>
       {:else}
-        <button class="send" onclick={send} disabled={chat.streaming || input.trim() === ''} aria-label="发送">{@html iconSvg('spark', 13, 2)}</button>
+        <button class="send" onclick={send} disabled={chat.streaming || chat.getDraft(chat.currentDraftKey()).trim() === ''} aria-label="发送">{@html iconSvg('spark', 13, 2)}</button>
       {/if}
     </div>
   </div>

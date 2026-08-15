@@ -134,4 +134,46 @@ describe('SnapshotStore', () => {
     s.dismissToast();
     expect(s.toast).toBeNull();
   });
+
+  it('preview：调 read_snapshot 取回快照原文；失败回落空串', async () => {
+    const ok = mockClient({
+      callTool: vi.fn().mockResolvedValue({ ok: true, content: '快照旧内容' }),
+    });
+    const s = new SnapshotStore();
+    s.init(ok, 'C:/works/demo');
+    const txt = await s.preview('.novel/history/a/20260812-103000-abc.md');
+    expect(txt).toBe('快照旧内容');
+    expect(ok.callTool).toHaveBeenCalledWith('read_snapshot', {
+      workDir: 'C:/works/demo',
+      snapshotPath: '.novel/history/a/20260812-103000-abc.md',
+    });
+
+    const fail = mockClient({ callTool: vi.fn().mockRejectedValue(new Error('x')) });
+    const s2 = new SnapshotStore();
+    s2.init(fail, 'C:/works/demo');
+    expect(await s2.preview('x.md')).toBe('');
+  });
+
+  it('loadLedger：透传 ledger_read 入参并返回 ledger 视图', async () => {
+    const client = mockClient({
+      callTool: vi.fn().mockResolvedValue({
+        ledger: {
+          clock: [{ chapters: ['manuscript/a.md'], storyDay: '第1日' }],
+          props: [],
+          promises: [],
+          knowledge: [],
+          doNotReexplain: [],
+          protect: [],
+          tripwires: [],
+        },
+        path: '.novel/ledger.md',
+      }),
+    });
+    const s = new SnapshotStore();
+    s.init(client, 'C:/works/demo');
+    const r = await s.loadLedger();
+    expect(client.callTool).toHaveBeenCalledWith('ledger_read', { workDir: 'C:/works/demo' });
+    expect(r.path).toBe('.novel/ledger.md');
+    expect(r.ledger.clock).toHaveLength(1);
+  });
 });

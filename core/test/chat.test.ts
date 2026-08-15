@@ -89,7 +89,7 @@ describe('/v1/chat SSE 管道', () => {
       const assistant = messages[messages.length - 1]!;
       expect(assistant.role).toBe('assistant');
       expect(assistant.toolCalls).toEqual([
-        { id: 'tc-1', name: 'word_count', args: { relPath: 'ch01.md' } },
+        { id: 'tc-1', name: 'word_count', args: { relPath: 'ch01.md' }, result: '{"relPath":"ch01.md","count":42}' },
       ]);
     } finally {
       await s.close();
@@ -357,7 +357,9 @@ describe('/v1/chat SSE 管道', () => {
       expect(messages.map((m) => m.role)).toEqual(['user', 'assistant']);
       const assistant = messages.at(-1)!;
       expect(assistant.content).toBe('');
-      expect(assistant.toolCalls).toEqual([{ id: 'tc-1', name: 'word_count', args: { relPath: 'ch01.md' } }]);
+      expect(assistant.toolCalls).toEqual([
+        { id: 'tc-1', name: 'word_count', args: { relPath: 'ch01.md' }, result: '{"relPath":"ch01.md","count":42}' },
+      ]);
     } finally {
       await s.close();
     }
@@ -410,7 +412,9 @@ describe('/v1/chat SSE 管道', () => {
       expect(messages.map((m) => m.role)).toEqual(['user', 'assistant']);
       const assistant = messages.at(-1)!;
       expect(assistant.content).toBe('');
-      expect(assistant.toolCalls).toEqual([{ id: 'tc-1', name: 'word_count', args: { relPath: 'ch01.md' } }]);
+      expect(assistant.toolCalls).toEqual([
+        { id: 'tc-1', name: 'word_count', args: { relPath: 'ch01.md' }, result: '{"relPath":"ch01.md","count":42}' },
+      ]);
     } finally {
       vi.unstubAllEnvs();
       await s.close();
@@ -453,6 +457,157 @@ describe('/v1/chat SSE 管道', () => {
       const stored = s.store.listMessages(sid).map((m) => m.content);
       expect(stored).not.toContain('[工具调用]');
       expect(stored.at(-1)).toBe('好'); // 本轮模型回复照常落库
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('工具结果落库截断：单条结果最多存 500 字符', async () => {
+    const model = stepModel([
+      toolCallResult('tc-1', 'long_result', {}),
+      textResult(['完成']),
+    ]);
+    const longResultTools: ToolSet = {
+      long_result: tool({
+        description: '返回超长结果',
+        inputSchema: z.object({}),
+        execute: async () => 'L'.repeat(800),
+      }),
+    };
+    const s = await startTestServer({ modelForTier: () => model, tools: longResultTools });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '执行长结果工具' });
+      const events = await readSse(res);
+      expect(events.at(-1)!.event).toBe('done');
+
+      const sessionId = events.at(-1)!.data.sessionId as string;
+      const assistant = s.store.listMessages(sessionId).at(-1)!;
+      expect(assistant.toolCalls).toEqual([
+        { id: 'tc-1', name: 'long_result', args: {}, result: 'L'.repeat(500) },
+      ]);
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('回放工具结果成对：带 result 的轮输出 assistant(tool-call parts)+tool(tool-result parts)', async () => {
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const sid = s.store.createSession('成对回放').id;
+      s.store.addMessage(sid, { role: 'user', content: '第一问' });
+      s.store.addMessage(sid, {
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'tc-1', name: 'word_count', args: { relPath: 'ch01.md' }, result: '{"relPath":"ch01.md","count":42}' }],
+      });
+      s.store.addMessage(sid, { role: 'user', content: '追问' });
+
+      const res = await postChat(s.baseUrl, s.token, { sessionId: sid, text: '最新问题' });
+      const evs = await readSse(res);
+      expect(evs.at(-1)!.event).toBe('done');
+
+      const prompt = model.doStreamCalls[0]!.prompt.filter((m) => m.role !== 'system');
+      expect(prompt.map((m) => m.role)).toEqual(['user', 'assistant', 'tool', 'user']);
+      expect(prompt[1]!.content).toEqual([
+        { type: 'tool-call', toolCallId: 'tc-1', toolName: 'word_count', input: { relPath: 'ch01.md' } },
+      ]);
+      expect(prompt[2]!.content).toEqual([
+        {
+          type: 'tool-result',
+          toolCallId: 'tc-1',
+          toolName: 'word_count',
+          output: { type: 'text', value: '{"relPath":"ch01.md","count":42}' },
+        },
+      ]);
+      expect(promptText(prompt[3]!)).toBe('追问\n最新问题');
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('回放旧数据/部分缺 result：整轮回退摘要行，不混合拼半对', async () => {
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const sid = s.store.createSession('旧数据回退').id;
+      s.store.addMessage(sid, { role: 'user', content: '第一问' });
+      s.store.addMessage(sid, {
+        role: 'assistant',
+        content: '',
+        toolCalls: [
+          { id: 'tc-1', name: 'word_count', args: { relPath: 'ch01.md' }, result: '有结果' },
+          { id: 'tc-2', name: 'word_count', args: { relPath: 'ch02.md' } },
+        ],
+      });
+      s.store.addMessage(sid, { role: 'user', content: '追问' });
+
+      const res = await postChat(s.baseUrl, s.token, { sessionId: sid, text: '最新问题' });
+      const evs = await readSse(res);
+      expect(evs.at(-1)!.event).toBe('done');
+
+      const prompt = model.doStreamCalls[0]!.prompt.filter((m) => m.role !== 'system');
+      expect(prompt.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
+      expect(promptText(prompt[1]!)).toBe('[工具调用] word_count({"relPath":"ch01.md"})、word_count({"relPath":"ch02.md"})');
+      expect(promptText(prompt[2]!)).toBe('追问\n最新问题');
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('回放工具结果截断：单条结果最多回放 500 字符(与落库同值)', async () => {
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const sid = s.store.createSession('结果截断').id;
+      s.store.addMessage(sid, { role: 'user', content: '第一问' });
+      s.store.addMessage(sid, {
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'tc-1', name: 'read_file', args: {}, result: 'R'.repeat(10_000) }],
+      });
+      s.store.addMessage(sid, { role: 'user', content: '追问' });
+
+      const res = await postChat(s.baseUrl, s.token, { sessionId: sid, text: '最新问题' });
+      const evs = await readSse(res);
+      expect(evs.at(-1)!.event).toBe('done');
+
+      const prompt = model.doStreamCalls[0]!.prompt.filter((m) => m.role !== 'system');
+      expect(prompt.map((m) => m.role)).toEqual(['user', 'assistant', 'tool', 'user']);
+      const toolMsg = prompt.find((m) => m.role === 'tool')!;
+      expect(toolMsg.content).toEqual([
+        {
+          type: 'tool-result',
+          toolCallId: 'tc-1',
+          toolName: 'read_file',
+          output: { type: 'text', value: 'R'.repeat(500) },
+        },
+      ]);
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('回放结果计入字符预算：正文+结果超 25k 时整组裁掉，不留孤儿工具消息', async () => {
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const sid = s.store.createSession('结果预算').id;
+      s.store.addMessage(sid, { role: 'user', content: '第一问' });
+      s.store.addMessage(sid, {
+        role: 'assistant',
+        content: 'B'.repeat(24_700),
+        toolCalls: [{ id: 'tc-1', name: 'word_count', args: {}, result: 'R'.repeat(400) }],
+      });
+      s.store.addMessage(sid, { role: 'user', content: '追问' });
+
+      const res = await postChat(s.baseUrl, s.token, { sessionId: sid, text: '最新问题' });
+      const evs = await readSse(res);
+      expect(evs.at(-1)!.event).toBe('done');
+
+      const prompt = model.doStreamCalls[0]!.prompt.filter((m) => m.role !== 'system');
+      expect(prompt.map((m) => m.role)).toEqual(['user']);
+      expect(promptText(prompt[0]!)).toBe('追问\n最新问题');
     } finally {
       await s.close();
     }

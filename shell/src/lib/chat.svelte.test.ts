@@ -565,3 +565,189 @@ describe('ChatStore · D3 分组与定位', () => {
     expect(chat.toolStarted(fake)).toBeUndefined();
   });
 });
+
+describe('ChatStore · 对话草稿持久（反馈#1）', () => {
+  it('currentDraftKey：有会话挂 session:<id>，无会话挂 scope:<scope>', () => {
+    const chat = new ChatStore();
+    chat.scope = 'work';
+    chat.sessionId = null;
+    expect(chat.currentDraftKey()).toBe('scope:work');
+    chat.sessionId = 's1';
+    expect(chat.currentDraftKey()).toBe('session:s1');
+    chat.scope = 'ch:abc';
+    expect(chat.currentDraftKey()).toBe('session:s1'); // 会话键优先，scope 变化不影响
+    chat.sessionId = null;
+    expect(chat.currentDraftKey()).toBe('scope:ch:abc');
+  });
+
+  it('getDraft/setDraft：设草稿 → 切键 → 切回草稿还在（关栏不丢）', () => {
+    const chat = new ChatStore();
+    chat.scope = 'work';
+    const keyA = chat.currentDraftKey(); // scope:work
+    chat.setDraft(keyA, '未发送的文字');
+    chat.sessionId = 's1'; // 切到会话键（当前 session 场景）
+    expect(chat.getDraft(chat.currentDraftKey())).toBe(''); // 新键无草稿
+    chat.sessionId = null; // 切回 scope:work
+    expect(chat.currentDraftKey()).toBe(keyA);
+    expect(chat.getDraft(keyA)).toBe('未发送的文字');
+  });
+
+  it('发送成功后清该键草稿', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const chat = new ChatStore();
+    chat.init(streamClient({ chatStream }));
+    chat.sessionId = 's1';
+    const key = chat.currentDraftKey(); // session:s1
+    chat.setDraft(key, '要发送的文字');
+    await chat.send('要发送的文字');
+    expect(chat.getDraft(key)).toBe('');
+  });
+
+  it('发送失败保留草稿；流式期间用户改写后成功不清新内容', async () => {
+    // 失败不清：草稿留给用户重发
+    const failClient = streamClient({
+      chatStream: vi.fn().mockImplementation(() => {
+        throw new Error('网络断开');
+      }),
+    });
+    const chat = new ChatStore();
+    chat.init(failClient);
+    chat.scope = 'work';
+    const key = chat.currentDraftKey();
+    chat.setDraft(key, '正文');
+    await chat.send('正文');
+    expect(chat.getDraft(key)).toBe('正文');
+
+    // 已有会话 + 流式期间用户改写：成功后保留新草稿（不误清）
+    let h!: ChatStreamHandlers;
+    let resolveStream!: () => void;
+    const chatStream = vi.fn().mockImplementation((_b: unknown, handlers: ChatStreamHandlers) => {
+      h = handlers;
+      return new Promise<void>((r) => {
+        resolveStream = r;
+      });
+    });
+    const chat2 = new ChatStore();
+    chat2.init(streamClient({ chatStream }));
+    chat2.sessionId = 's1';
+    const key2 = chat2.currentDraftKey(); // session:s1
+    chat2.setDraft(key2, '旧草稿');
+    const p = chat2.send('旧草稿');
+    chat2.setDraft(key2, '流式期间写的新内容');
+    h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    resolveStream();
+    await p;
+    expect(chat2.getDraft(key2)).toBe('流式期间写的新内容');
+  });
+
+  it('新会话建立：流式期间在输入框新写的草稿迁移到新会话键，不丢', async () => {
+    let h!: ChatStreamHandlers;
+    let resolveStream!: () => void;
+    const chatStream = vi.fn().mockImplementation((_b: unknown, handlers: ChatStreamHandlers) => {
+      h = handlers;
+      return new Promise<void>((r) => {
+        resolveStream = r;
+      });
+    });
+    const chat = new ChatStore();
+    chat.init(streamClient({ chatStream }));
+    chat.scope = 'work';
+    chat.sessionId = null;
+    const scopeKey = chat.currentDraftKey(); // scope:work
+    chat.setDraft(scopeKey, ''); // 发送瞬间 ChatColumn 已清空输入框
+    const p = chat.send('第一条');
+    chat.setDraft(scopeKey, '第二条：流式中新写'); // 流式期间用户接着打字
+    h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    resolveStream();
+    await p;
+    expect(chat.sessionId).toBe('s1');
+    expect(chat.getDraft('session:s1')).toBe('第二条：流式中新写'); // 已迁移到新会话键
+    expect(chat.getDraft(scopeKey)).toBe(''); // 原键清空
+  });
+});
+
+describe('ChatStore · AI 写完自动刷新（反馈#6）', () => {
+  it('write_chapter 命中当前章：loadStructure 刷字数 + reloadCurrent 以磁盘为准', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+      h.onToolCall?.({ id: 'w1', name: 'write_chapter', args: { relPath: 'manuscript/a.md', content: 'AI 新文' } });
+      h.onToolResult?.({ id: 'w1', name: 'write_chapter', result: { ok: true } });
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const callTool = vi.fn((name: string) => {
+      if (name === 'list_structure') return Promise.resolve([]);
+      if (name === 'read_chapter') {
+        return Promise.resolve({ content: 'AI 新文', frontmatter: {}, frontmatterRaw: '---\n---\n', body: 'AI 新文' });
+      }
+      return Promise.resolve(undefined);
+    });
+    const client = streamClient({ chatStream, callTool });
+    const chat = new ChatStore();
+    chat.init(client);
+    work.init(client, 'C:/works/demo');
+    work.current = {
+      relPath: 'manuscript/a.md',
+      title: '第一章',
+      frontmatterRaw: '---\n---\n',
+      frontmatter: {},
+      savedMd: '旧文',
+    };
+    settings.approvalMode = 'yolo'; // 直放 → 工具行落 done，刷新路径触发
+    await chat.send('帮我写');
+    expect(callTool).toHaveBeenCalledWith('list_structure', { workDir: 'C:/works/demo' });
+    expect(callTool).toHaveBeenCalledWith('read_chapter', { workDir: 'C:/works/demo', relPath: 'manuscript/a.md' });
+    expect(work.current?.savedMd).toBe('AI 新文');
+    expect(work.reloadNonce).toBe(1);
+  });
+
+  it('结构变更工具（create_chapter）→ loadStructure 刷结构树', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+      h.onToolCall?.({ id: 'c1', name: 'create_chapter', args: { volume: '第一卷·风起', title: '新章' } });
+      h.onToolResult?.({ id: 'c1', name: 'create_chapter', result: { ok: true, relPath: 'manuscript/第一卷·风起/第4章·新章.md' } });
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const callTool = vi.fn().mockResolvedValue([]);
+    const client = streamClient({ chatStream, callTool });
+    const chat = new ChatStore();
+    chat.init(client);
+    work.init(client, 'C:/works/demo');
+    await chat.send('新建一章');
+    expect(callTool).toHaveBeenCalledWith('list_structure', { workDir: 'C:/works/demo' });
+  });
+
+  it('非结构工具（word_count）不刷结构树', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+      h.onToolCall?.({ id: 'w1', name: 'word_count', args: { relPath: 'manuscript/a.md' } });
+      h.onToolResult?.({ id: 'w1', name: 'word_count', result: { count: 42 } });
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const callTool = vi.fn().mockResolvedValue([]);
+    const client = streamClient({ chatStream, callTool });
+    const chat = new ChatStore();
+    chat.init(client);
+    work.workDir = 'C:/works/demo';
+    await chat.send('查字数');
+    expect(callTool).not.toHaveBeenCalled();
+  });
+
+  it('自动刷新失败静默（console.warn），对话不受影响', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const chatStream = vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+      h.onToolCall?.({ id: 'w1', name: 'write_chapter', args: { relPath: 'manuscript/a.md' } });
+      h.onToolResult?.({ id: 'w1', name: 'write_chapter', result: { ok: true } });
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const callTool = vi.fn().mockRejectedValue(new Error('core 掉线'));
+    const client = streamClient({ chatStream, callTool });
+    const chat = new ChatStore();
+    chat.init(client);
+    work.init(client, 'C:/works/demo');
+    settings.approvalMode = 'yolo';
+    await chat.send('帮我写');
+    expect(chat.messages.at(-1)?.role).not.toBe('error'); // 刷新失败不炸对话
+    expect(chat.streaming).toBe(false);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});

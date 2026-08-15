@@ -76,6 +76,25 @@ export class ChatStore {
   tier = $state<'writing' | 'background'>(
     typeof localStorage !== 'undefined' && localStorage.getItem('chat.tier') === 'background' ? 'background' : 'writing',
   );
+  /**
+   * 对话草稿持久（反馈#1：关栏/切存区不再丢未发送文字）。键 = `session:<sessionId>`（有会话）
+   * 或 `scope:<scope>`（未建新会话）；ChatColumn composer 与 store 共用 currentDraftKey() 定位。
+   */
+  draftMap = $state<Record<string, string>>({});
+
+  /** 当前草稿键：有会话挂会话，无会话挂归属 scope（两者变化时草稿随键切换）。 */
+  currentDraftKey(): string {
+    if (this.sessionId) return `session:${this.sessionId}`;
+    return `scope:${this.scope}`;
+  }
+
+  getDraft(key: string): string {
+    return this.draftMap[key] ?? '';
+  }
+
+  setDraft(key: string, text: string): void {
+    this.draftMap[key] = text;
+  }
 
   setTier(t: 'writing' | 'background'): void {
     this.tier = t;
@@ -331,6 +350,9 @@ export class ChatStore {
     const trimmed = text.trim();
     if (!trimmed || this.streaming) return;
     this.abortedLastStream = false;
+    // 草稿键与内容在发送前捕获：流式期间用户可改写草稿，成功后仅当内容未变才清（见下方）
+    const draftKey = this.currentDraftKey();
+    const draftAtSend = this.draftMap[draftKey];
     this.messages.push({ role: 'user', content: trimmed });
     this.messages.push({ role: 'assistant', content: '', tools: [] });
     const idx = this.messages.length - 1;
@@ -383,9 +405,23 @@ export class ChatStore {
       // 流式正常完成（非中断）：若占位无内容也无工具行则清理
       if (!ac.signal.aborted) {
         const m = this.messages[idx];
-        if (m && m.content === '' && (m.tools?.length ?? 0) === 0) {
+        const tools = m?.tools ?? [];
+        if (m && m.content === '' && tools.length === 0) {
           this.messages.splice(idx, 1);
         }
+        // 任务3（反馈#6）：AI 写完自动刷新结构树/当前章，免按 F5；失败静默 + console.warn
+        await this.refreshAfterTools(tools);
+        // 新会话建立（键从 scope:<scope> 切到 session:<id>）：把流式期间用户在输入框新写的草稿
+        // 迁移到新会话键，避免键切换瞬间正在输入的文字从视野消失。
+        if (this.sessionId && draftKey !== this.currentDraftKey() && draftKey.startsWith('scope:')) {
+          const pending = this.draftMap[draftKey];
+          if (pending && pending !== '') {
+            this.draftMap[this.currentDraftKey()] = pending;
+            delete this.draftMap[draftKey];
+          }
+        }
+        // 任务1（反馈#1）：发送成功后清该键草稿（流式期间用户若已改写新内容则保留）
+        if (this.draftMap[draftKey] === draftAtSend) delete this.draftMap[draftKey];
       } else {
         this.abortedLastStream = true;
       }
@@ -401,6 +437,42 @@ export class ChatStore {
     } finally {
       this.streaming = false;
       this.streamAbort = null;
+    }
+  }
+
+  /**
+   * 任务3（反馈#6）：AI 写完自动刷新。流式正常结束后按本轮已落定（done）的工具：
+   * - 结构变更工具（建/改/删/移卷章）→ loadStructure 刷结构树；
+   * - write_chapter（命中任意章，字数会变）→ 同样 loadStructure；
+   * - write_chapter 命中当前打开章 → 再 reloadCurrent（磁盘为准重载编辑器，参照 snapshot.restore）。
+   * pending/rejected 不在此处理：pending 等审批裁决路径（resolveApproval/rejectApproval）已各自刷新。
+   * 刷新失败静默 catch + console.warn：不该炸对话。
+   */
+  private async refreshAfterTools(tools: ToolLine[]): Promise<void> {
+    if (tools.length === 0 || !work.workDir) return;
+    const STRUCTURE_TOOLS = new Set([
+      'create_volume',
+      'rename_volume',
+      'delete_volume',
+      'create_chapter',
+      'rename_chapter',
+      'delete_chapter',
+      'move_chapter',
+      'move_volume',
+    ]);
+    const done = tools.filter((t) => t.state === 'done');
+    const changedStructure = done.some((t) => STRUCTURE_TOOLS.has(t.name));
+    const wroteChapter = done.some((t) => t.name === 'write_chapter');
+    const wroteCurrent = done.some((t) => {
+      if (t.name !== 'write_chapter') return false;
+      const rel = (t.args as { relPath?: string } | null | undefined)?.relPath;
+      return typeof rel === 'string' && work.current?.relPath === rel;
+    });
+    try {
+      if (changedStructure || wroteChapter) await work.loadStructure();
+      if (wroteCurrent) await work.reloadCurrent();
+    } catch (err) {
+      console.warn('AI 写完自动刷新失败：', err);
     }
   }
 }

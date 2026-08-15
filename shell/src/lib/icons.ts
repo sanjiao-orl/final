@@ -26,7 +26,9 @@ export type IconName =
   | 'undo'
   | 'doc'
   | 'folder'
-  | 'warning';
+  | 'warning'
+  | 'book'
+  | 'refresh';
 
 const P = {
   save: '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/>',
@@ -58,6 +60,8 @@ const P = {
   folder:
     '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><path d="M12 11v6M9 14h6"/>',
   warning: '<path d="M12 9v4M12 17h.01M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/>',
+  book: '<path d="M4 4v16a2 2 0 0 0 2 2h14V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2z"/><path d="M8 8h8M8 11h8M8 14h5"/>',
+  refresh: '<path d="M3 12a9 9 0 0 1 15.7-6L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.7 6L3 16"/><path d="M3 21v-5h5"/>',
 };
 
 /** 生成内联 SVG 字符串（size 为宽高，strokeWidth 线宽）；模板里用 {@html iconSvg('name')}。 */

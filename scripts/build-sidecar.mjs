@@ -7,6 +7,7 @@
 //   node scripts/build-sidecar.mjs             # 构建 core + domain + 复制 node
 //   node scripts/build-sidecar.mjs --only core # 只构建 core（core/domain 包的 build script 用）
 import { build } from 'esbuild';
+import { execSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +16,16 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const only = process.argv.includes('--only')
   ? process.argv[process.argv.indexOf('--only') + 1]
   : undefined;
+
+// 构建时把当前 git 短 commit 注入 core 的 __CORE_COMMIT__ 全局（§五 prod 包自报 commit）。
+// 非 git 环境/命令失败兜底 'unknown'——commit 仅自报展示，不参与协议校验。
+const coreCommit = (() => {
+  try {
+    return execSync('git rev-parse --short HEAD', { cwd: root, encoding: 'utf8' }).trim() || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+})();
 
 if (only !== undefined && !['core', 'domain'].includes(only)) {
   throw new Error(`--only 只接受 core 或 domain，收到: ${only}`);
@@ -33,6 +44,7 @@ async function bundlePackage(name, entryFile, outFile) {
     target: 'node24',
     outfile: path.join(root, name, 'dist', outFile),
     banner: { js: banner },
+    define: { __CORE_COMMIT__: JSON.stringify(coreCommit) },
     logLevel: 'info',
   });
 }

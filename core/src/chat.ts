@@ -1,6 +1,14 @@
 // 模块职责：POST /v1/chat 的 SSE 聊天管道——落库用户消息 → streamText 多轮工具流 → 逐条转发 SSE → done 前落库完整 assistant 消息；客户端断连中止 LLM 请求。
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { stepCountIs, streamText, type LanguageModel, type ToolSet } from 'ai';
+import {
+  stepCountIs,
+  streamText,
+  type LanguageModel,
+  type ModelMessage,
+  type ToolCallPart,
+  type ToolResultPart,
+  type ToolSet,
+} from 'ai';
 import { z } from 'zod';
 import type { MessageRow, SessionRow, SessionStore } from './session-store.js';
 import { getLlmTimeoutSeconds, type Tier } from './config.js';
@@ -41,20 +49,30 @@ function systemPrompt(workDir: string | undefined): string {
 /** 多轮工具调用的步数上限。 */
 const MAX_STEPS = 8;
 
-/** 跨对话记忆：回放给模型的历史消息条数上限（含当前用户消息）。 */
+/** 跨对话记忆：回放给模型的历史消息条数上限（含当前用户消息；成对回放时 assistant+tool 算两条）。 */
 const MAX_REPLAY_MESSAGES = 20;
 
-/** 跨对话记忆：回放历史的总字符预算，超限从最旧处截断。 */
+/** 跨对话记忆：回放历史的总字符预算（正文+工具结果），超限从最旧处截断。 */
 const MAX_REPLAY_CHARS = 25_000;
 
+/** 工具结果落库截断：单条结果最多存 500 字符，仍放在 tool_calls JSON blob 元素的 result 字段。 */
+const STORED_TOOL_RESULT_MAX_CHARS = 500;
+
 /**
- * 跨对话记忆：把会话历史回放成 messages（替代单轮 prompt: text）。
- * 工具调用只回放一行摘要（[工具调用] name(args)），不重放 toolCalls 本体与工具结果——
- * AI SDK 要求 tool-call 与 tool-result 成对，而历史只存了 assistant 侧的 toolCalls，直接回放会校验失败；
- * 纯工具轮（content 为空但有 toolCalls）以摘要为回放内容，不再跳过。
- * 预算：最多最近 MAX_REPLAY_MESSAGES 条、合计 MAX_REPLAY_CHARS 字符，从最新往回取；
- * 当前用户消息刚落库，必在回放内且位于末尾。相邻同 role（纯工具轮被跳过/预算截断造成）
- * 需自合并——实测 AI SDK 不合并，而部分 provider 拒绝连续同角色消息。
+ * 工具结果回放截断：与落库同值 500——存什么回放什么，不做二次截断。
+ * 取舍实录(v5 验收实测):300 时 read_chapter 整章正文在开篇处被截，模型公开抱怨"只读到开头",
+ * 对最高频内容工具偏紧;500 仍受 MAX_REPLAY_CHARS 总预算兜底(整组裁,不留孤儿),语义更直白。
+ */
+const REPLAY_TOOL_RESULT_MAX_CHARS = 500;
+
+/**
+ * 跨对话记忆：把会话历史回放成 AI SDK v7 ModelMessage[]。
+ * - 历史 assistant 行 toolCalls 全部带 result 时，组装成对的 assistant(tool-call parts)+tool(tool-result parts)，
+ *   让跨轮模型读到上次工具结果；纯工具轮（content 为空）以 tool-call parts 数组回放。
+ * - 旧数据（无 result）或部分缺 result 时，整轮回退到 toolSummary 摘要行，不混合拼半对。
+ * 预算：最多最近 MAX_REPLAY_MESSAGES 条输出消息、合计 MAX_REPLAY_CHARS 字符（正文+回放结果），从最新往回取；
+ * 当前用户消息刚落库，必在回放内且位于末尾。截断后首条若不是 user 则成对裁掉，避免孤儿 tool-call/tool-result。
+ * 相邻同 role 的字符串消息需自合并——实测 AI SDK 不合并，而部分 provider 拒绝连续同角色消息。
  */
 
 /** 工具调用摘要：把 toolCalls（unknown[]，运行时收窄：元素须为对象且有 string name）拼成一行提示文本；参数 JSON 超 100 字符截断。 */
@@ -76,31 +94,125 @@ function toolSummary(toolCalls: unknown[]): string {
   return names.length > 0 ? `[工具调用] ${names.join('、')}` : '';
 }
 
-function buildReplayMessages(
-  rows: MessageRow[]
-): { role: 'user' | 'assistant'; content: string }[] {
-  const picked: { role: 'user' | 'assistant'; content: string }[] = [];
-  let total = 0;
-  for (let i = rows.length - 1; i >= 0 && picked.length < MAX_REPLAY_MESSAGES; i--) {
-    const row = rows[i]!;
-    // 工具摘要只作模型上下文提示、不落库；纯工具轮（content 空）以摘要为回放内容。
-    const summary = row.role === 'assistant' ? toolSummary(row.toolCalls) : '';
-    const content = summary ? (row.content === '' ? summary : `${row.content}\n${summary}`) : row.content;
-    // 仅当 content 为空且无有效工具摘要才跳过。
-    if (row.role === 'assistant' && content.trim() === '') continue;
-    if (picked.length > 0 && total + content.length > MAX_REPLAY_CHARS) break;
-    total += content.length;
-    picked.push({ role: row.role, content });
+/** 工具结果转文本：string 原样返回；其余 JSON 序列化（对象/数组等），不可序列化值走 String 兜底。 */
+function toolResultToText(output: unknown): string {
+  if (output === null || output === undefined) return '';
+  if (typeof output === 'string') return output;
+  try {
+    const json = JSON.stringify(output);
+    if (json !== undefined) return json;
+  } catch {
+    // 不可序列化值走 String 兜底
   }
-  picked.reverse();
-  // 截断后若首条是 assistant（其对应的 user 引导已被裁掉），丢掉。
-  if (picked[0]?.role === 'assistant') picked.shift();
-  // 相邻同 role 合并为一条，保证 user/assistant 交替。
-  const merged: { role: 'user' | 'assistant'; content: string }[] = [];
+  return String(output);
+}
+
+function truncateText(text: string, max: number): string {
+  return text.length > max ? text.slice(0, max) : text;
+}
+
+interface ParsedToolCall {
+  id: string;
+  name: string;
+  args: unknown;
+  result: string;
+}
+
+/** 仅当 toolCalls 每个元素都是可组装的 tool-call 且全部带 string result 时返回解析结果；否则返回 null（整轮回退摘要）。 */
+function parsePairedToolCalls(toolCalls: unknown[]): ParsedToolCall[] | null {
+  const parsed: ParsedToolCall[] = [];
+  for (const call of toolCalls) {
+    if (typeof call !== 'object' || call === null) return null;
+    const c = call as { id?: unknown; name?: unknown; args?: unknown; result?: unknown };
+    if (typeof c.id !== 'string' || typeof c.name !== 'string' || typeof c.result !== 'string') return null;
+    parsed.push({ id: c.id, name: c.name, args: c.args ?? {}, result: c.result });
+  }
+  return parsed;
+}
+
+function buildReplayRow(row: MessageRow): { messages: ModelMessage[]; chars: number } | null {
+  if (row.role === 'user') {
+    return { messages: [{ role: 'user', content: row.content }], chars: row.content.length };
+  }
+
+  // assistant 无工具调用：空文本跳过，否则按普通文本回放。
+  if (row.toolCalls.length === 0) {
+    if (row.content.trim() === '') return null;
+    return { messages: [{ role: 'assistant', content: row.content }], chars: row.content.length };
+  }
+
+  // 全部带 result → 组装成对 tool-call / tool-result。
+  const calls = parsePairedToolCalls(row.toolCalls);
+  if (calls) {
+    const toolCallParts: ToolCallPart[] = calls.map((c) => ({
+      type: 'tool-call',
+      toolCallId: c.id,
+      toolName: c.name,
+      input: c.args,
+    }));
+    const toolResultParts: ToolResultPart[] = calls.map((c) => ({
+      type: 'tool-result',
+      toolCallId: c.id,
+      toolName: c.name,
+      output: { type: 'text', value: truncateText(c.result, REPLAY_TOOL_RESULT_MAX_CHARS) },
+    }));
+    const assistantMessage: ModelMessage =
+      row.content.trim() === ''
+        ? { role: 'assistant', content: toolCallParts }
+        : { role: 'assistant', content: [{ type: 'text', text: row.content }, ...toolCallParts] };
+    const toolMessage: ModelMessage = { role: 'tool', content: toolResultParts };
+    const resultChars = toolResultParts.reduce(
+      (n, p) => n + (p.output.type === 'text' ? p.output.value.length : 0),
+      0
+    );
+    return {
+      messages: [assistantMessage, toolMessage],
+      chars: row.content.length + resultChars,
+    };
+  }
+
+  // 旧数据/部分缺 result → 整轮回退摘要行（保持既有行为）。
+  const summary = toolSummary(row.toolCalls);
+  if (!summary && row.content.trim() === '') return null;
+  const content = row.content === '' ? summary : `${row.content}\n${summary}`;
+  return { messages: [{ role: 'assistant', content }], chars: content.length };
+}
+
+function buildReplayMessages(rows: MessageRow[]): ModelMessage[] {
+  const pickedRows: { messages: ModelMessage[]; chars: number }[] = [];
+  let total = 0;
+  let messageCount = 0;
+  for (let i = rows.length - 1; i >= 0 && messageCount < MAX_REPLAY_MESSAGES; i--) {
+    const built = buildReplayRow(rows[i]!);
+    if (!built) continue;
+    // 成对消息不可拆半：整组超条数/字符预算就不放，避免孤儿 tool-call 或 tool-result。
+    if (messageCount > 0 && messageCount + built.messages.length > MAX_REPLAY_MESSAGES) break;
+    if (messageCount > 0 && total + built.chars > MAX_REPLAY_CHARS) break;
+    total += built.chars;
+    messageCount += built.messages.length;
+    pickedRows.push(built);
+  }
+  pickedRows.reverse();
+  const picked = pickedRows.flatMap((built) => built.messages);
+  // 截断后首条若不是 user（如 assistant/tool 的引导 user 已被裁掉），成对丢弃直到从 user 开始。
+  while (picked.length > 0 && picked[0]!.role !== 'user') picked.shift();
+  // 相邻同 role 的字符串消息合并为一条；成对消息是数组 content，不参与合并。
+  const merged: ModelMessage[] = [];
   for (const m of picked) {
     const last = merged[merged.length - 1];
-    if (last && last.role === m.role) last.content += '\n' + m.content;
-    else merged.push({ role: m.role, content: m.content });
+    if (
+      last &&
+      last.role === m.role &&
+      typeof last.content === 'string' &&
+      typeof m.content === 'string'
+    ) {
+      merged[merged.length - 1] = {
+        role: last.role,
+        content: `${last.content}\n${m.content}`,
+      } as ModelMessage;
+    } else {
+      merged.push(m);
+    }
   }
   return merged;
 }
@@ -153,7 +265,7 @@ export async function handleChatRequest(
   const pump = new EventPump(res, sessionId);
   pump.start();
   let assistantText = '';
-  const toolCalls: { id: string; name: string; args: unknown }[] = [];
+  const toolCalls: { id: string; name: string; args: unknown; result?: string }[] = [];
   /** 失败轮落库：非断连且已产出内容时，把部分 assistant 消息落库再发 error；落库失败只记 stderr，不掩盖原始错误。 */
   const persistPartial = (): void => {
     if (abort.signal.aborted || (assistantText === '' && toolCalls.length === 0)) return;
@@ -187,9 +299,13 @@ export async function handleChatRequest(
           pump.emit('tool-call', call);
           break;
         }
-        case 'tool-result':
+        case 'tool-result': {
+          const resultText = truncateText(toolResultToText(part.output ?? null), STORED_TOOL_RESULT_MAX_CHARS);
+          const call = toolCalls.find((c) => c.id === part.toolCallId);
+          if (call) call.result = resultText;
           pump.emit('tool-result', { id: part.toolCallId, name: part.toolName, result: part.output ?? null });
           break;
+        }
         case 'error':
           throw new Error(part.error instanceof Error ? part.error.message : String(part.error));
         default:

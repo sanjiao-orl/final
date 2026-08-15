@@ -1,16 +1,16 @@
 <script lang="ts">
-  // 顶栏 42px（v3）：作品名（可切换作品）/ 当前章+脏点 / 保存/导出/快照 / 审批模式指示 / 暂存 / 打字机/明暗/专注/AI/设置。
+  // 顶栏 42px（v3）：作品名（可切换作品）/ 当前章+脏点 / 保存/导出/快照 / 审批模式指示 / 暂存 / 光标锁/明暗/专注/AI/设置。
   import { open } from '@tauri-apps/plugin-dialog';
   import { tauriInvoke } from '../lib/core.js';
   import { iconSvg } from '../lib/icons.js';
   import { candidates } from '../lib/candidates.svelte.js';
   import { settings } from '../lib/settings.svelte.js';
-  import { snapshot } from '../lib/snapshot.svelte.js';
   import { dialog } from '../lib/dialog.svelte.js';
   import { review } from '../lib/review.svelte.js';
   import { ui } from '../lib/ui.svelte.js';
   import { work } from '../lib/work.svelte.js';
   import WorkMenu from './WorkMenu.svelte';
+  import SnapshotBrowser from './SnapshotBrowser.svelte';
 
   interface Props {
     onSave: () => void;
@@ -109,21 +109,14 @@
     if (ok) void work.deleteChapter(cur.relPath);
   }
 
-  /** 快照入口：列当前章快照，有则还原最新（B4）。 */
-  async function openSnapshot(): Promise<void> {
-    const cur = work.current;
-    if (!cur) return;
-    const list = await snapshot.listForChapter(cur.relPath);
-    if (list.length === 0) {
-      work.notice = '当前章还没有历史快照（保存覆写时自动滚动，最多 20 份）';
-      return;
-    }
-    const name = list[0]?.path.split('/').pop() ?? '';
-    const ok = await dialog.confirm({
-      message: `还原到最新快照 ${name}？当前未保存改动会先保留在编辑器里。`,
-      okLabel: '还原',
-    });
-    if (ok) void snapshot.restoreLatest(cur.relPath);
+  /** 快照浏览器模态（D v5 替换原 dialog 确认逻辑）：打开快照列表 + 预览 + 还原。 */
+  let snapshotBrowserOpen = $state(false);
+  function openSnapshotBrowser(): void {
+    if (!work.current) return;
+    snapshotBrowserOpen = true;
+  }
+  function closeSnapshotBrowser(): void {
+    snapshotBrowserOpen = false;
   }
 </script>
 
@@ -158,7 +151,7 @@
     {@html iconSvg('export', 15)}
     导出
   </button>
-  <button class="tb-btn" onclick={() => void openSnapshot()} disabled={!work.current} title="历史快照(B4)">
+  <button class="tb-btn" onclick={openSnapshotBrowser} disabled={!work.current} title="历史快照：浏览/预览/还原">
     {@html iconSvg('snapshot', 15)}
     快照
   </button>
@@ -179,9 +172,9 @@
     {@html iconSvg('drawer', 15)}
     暂存{#if candidates.pendingCount > 0}<i class="tb-badge">{candidates.pendingCount}</i>{/if}
   </button>
-  <button class="tb-btn" class:on={settings.typewriter} onclick={() => settings.setTypewriter(!settings.typewriter)} title="打字机滚动：光标锁 42%">
+  <button class="tb-btn" class:on={settings.typewriter} onclick={() => settings.setTypewriter(!settings.typewriter)} title="光标锁：光标行锁定屏幕 42% 处，长文输入不追底">
     {@html iconSvg('typewriter', 15)}
-    打字机
+    光标锁
   </button>
   <button class="tb-btn" onclick={() => settings.toggleMode()} title="明暗切换" aria-label="明暗切换">
     {@html iconSvg('moon', 15)}
@@ -197,6 +190,7 @@
     {@html iconSvg('settings', 15)}
   </button>
 </header>
+<SnapshotBrowser open={snapshotBrowserOpen} onClose={closeSnapshotBrowser} />
 
 <style>
   header {

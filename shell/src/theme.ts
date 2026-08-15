@@ -93,8 +93,13 @@ export const layout = {
   typewriterRatio: 0.42,
   /** 默认字号 17px 下的 px 行高（30px）；字号变化时由 applyTheme 重新派生 --body-line-px 注入文档根。 */
   lineHeight: DEFAULT_LINE_PX,
-  /** B1 多候选浮层宽度（px，与原型一致）。 */
+  /** B1 多候选浮层宽度（px，与原型一致）。新增覆盖层只准取以下两档：
+   *  - selPopWidth (580, 浮层一档) —— 选区候选/AI 暂存抽离推荐卡片等侧挂卡片
+   *  - overlayModal (480, 模态一档) —— 审批卡/速查卡/快照浏览器等居中模态
+   *  其他覆盖层宽度需求先沿用其中之一，不在 theme 私自开新档。 */
   selPopWidth: 580,
+  /** 居中模态宽度（px）：审批卡/速查卡/快照浏览器等；与 selPopWidth 同源取自原型一档。 */
+  overlayModal: 480,
   /** 选区浮动条估算高度（px），浮动条定位用。 */
   selBarHeight: 38,
   /** 浮动条相对行顶的垂直偏移（px）：主路径卡在 [行顶-8, 行顶+30] 行间隙，只覆盖选区行自身。 */
@@ -112,8 +117,8 @@ export const layout = {
  * --right-w 直接 = ui.colWidth（无求和）。
  */
 export const aiColumns = {
-  order: ['session', 'chat', 'tools', 'settings'] as const,
-  width: { session: 280, chat: 320, tools: 280, settings: 300 } as Record<string, number>,
+  order: ['session', 'chat', 'tools', 'context', 'settings'] as const,
+  width: { session: 280, chat: 320, tools: 280, context: 300, settings: 300 } as Record<string, number>,
 };
 
 export type ThemeMode = keyof typeof palette;
@@ -169,6 +174,7 @@ export function applyTheme(mode: ThemeMode, root: HTMLElement = document.documen
     '--tree-w': layout.treeWidth,
     '--rail-w': layout.railWidth,
     '--toolbar-h': layout.toolbarHeight,
+    '--overlay-modal': `${layout.overlayModal}px`,
     '--ease-fold': 'cubic-bezier(0.4, 0, 0.2, 1)',
     '--t-fold': '0.42s cubic-bezier(0.4, 0, 0.2, 1)',
     '--t-hover': '0.15s ease',

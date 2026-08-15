@@ -148,7 +148,13 @@ function renderMessage(m) {
   (m.toolCalls || []).forEach(function (tc) {
     var line = document.createElement('div');
     line.className = 'tool-line';
-    line.textContent = '[' + tc.name + '] ' + JSON.stringify(tc.args || {});
+    var argsText = JSON.stringify(tc.args || {});
+    // 兼容历史消息里新增的 result 字段：有结果时展示截断后的结果，否则维持旧的调用参数展示。
+    var resultText = typeof tc.result === 'string' ? tc.result : '';
+    if (resultText.length > 120) resultText = resultText.slice(0, 120) + '…';
+    line.textContent = resultText
+      ? '[' + tc.name + ' → ' + resultText + ']'
+      : '[' + tc.name + '] ' + argsText;
     el.appendChild(line);
   });
 }

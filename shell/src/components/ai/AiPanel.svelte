@@ -9,12 +9,14 @@
   import SessionColumn from './SessionColumn.svelte';
   import ChatColumn from './ChatColumn.svelte';
   import ToolsColumn from './ToolsColumn.svelte';
+  import ContextColumn from './ContextColumn.svelte';
   import SettingsColumn from './SettingsColumn.svelte';
 
   const COLS: { id: AiColId; title: string; hint: string }[] = [
     { id: 'session', title: '会话', hint: '挂载 / 会话(B7)' },
     { id: 'chat', title: '对话', hint: '消息流 / 输入' },
     { id: 'tools', title: '工具调用', hint: 'B3 就地审阅 · 点卡头展开/收起' },
+    { id: 'context', title: '上下文', hint: '四维账本 · 伏笔/道具/时钟/知情' },
     { id: 'settings', title: '设置', hint: 'B6 / 外观 / 快照' },
   ];
 
@@ -84,6 +86,8 @@
           <ChatColumn />
         {:else if current.id === 'tools'}
           <ToolsColumn />
+        {:else if current.id === 'context'}
+          <ContextColumn />
         {:else}
           <SettingsColumn />
         {/if}

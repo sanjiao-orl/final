@@ -291,4 +291,39 @@ describe('ReviewStore', () => {
     expect(s.report).toBeNull();
     expect(s.running).toBe(false);
   });
+
+  it('run 失败：错误内嵌面板（review.error）红字区，失败后按钮恢复可点（running=false）', async () => {
+    const callTool = vi.fn().mockRejectedValue(new Error('core 掉线'));
+    const s = new ReviewStore();
+    s.init(mockClient(callTool), 'd');
+    await s.run();
+    expect(s.error).toContain('审阅扫描失败');
+    expect(s.error).toContain('core 掉线');
+    expect(s.running).toBe(false);
+    s.dismissError();
+    expect(s.error).toBeNull();
+  });
+
+  it('runPremium 失败：错误内嵌面板，running 复位', async () => {
+    const reviewFn = vi.fn().mockRejectedValue(new Error('模型输出非法 JSON'));
+    const s = new ReviewStore();
+    s.init(mockClient(vi.fn(), reviewFn), 'd');
+    await s.runPremium('manuscript/第1章.md');
+    expect(s.error).toContain('贵档审阅失败');
+    expect(s.error).toContain('模型输出非法 JSON');
+    expect(s.running).toBe(false);
+  });
+
+  it('mode 区分扫描/贵档冷读（进度文案用）', async () => {
+    const callTool = vi.fn((name: string) =>
+      Promise.resolve(name === 'scan_quality' ? scanFixture() : diagFixture()),
+    );
+    const reviewFn = vi.fn().mockResolvedValue({ findings: [] });
+    const s = new ReviewStore();
+    s.init(mockClient(callTool, reviewFn), 'C:/works/demo');
+    await s.run();
+    expect(s.mode).toBe('scan');
+    await s.runPremium('manuscript/第1章.md');
+    expect(s.mode).toBe('premium');
+  });
 });

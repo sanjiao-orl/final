@@ -22,6 +22,18 @@
     return relPath.split(/[\\/]/).pop()?.replace(/\.md$/, '') ?? relPath;
   }
 
+  // 反馈#4：全书章数（扫描进度文案用；结构树未加载为 0 → 文案回落"可能需要数十秒"）。
+  const chapterCount = $derived(work.structure.reduce((n, v) => n + v.children.length, 0));
+
+  /** 处理中进度文案：便宜档扫描按章数写，拿不到写兜底；贵档冷读按章计费。 */
+  const busyText = $derived(
+    review.mode === 'premium'
+      ? '冷读审阅中（LLM 按章计费），需要数秒至数十秒…'
+      : chapterCount > 0
+        ? `扫描中，全书约 ${chapterCount} 章，需要数十秒…`
+        : '扫描中，可能需要数十秒…',
+  );
+
   function timeOf(ts: number): string {
     const d = new Date(ts);
     const p = (n: number) => String(n).padStart(2, '0');
@@ -46,15 +58,33 @@
       <span class="hint">全书扫描 + 账本诊断 · 确定性检查（零 LLM 成本）</span>
     {/if}
     <div class="actions">
-      {#if review.running}<span class="busy">扫描中…</span>{/if}
-      <button class="btn sm" disabled={review.running} onclick={() => void review.run()} title="重跑全书扫描与账本诊断（处理完问题后重跑，BLOCKER 清零徽标即消失）">重跑</button>
+      {#if review.running}<span class="busy" title="处理完成前按钮暂不可用">{busyText}</span>{/if}
+      <button
+        class="btn sm"
+        disabled={review.running}
+        onclick={() => void review.run()}
+        title={review.running ? '正在处理，完成后可点击' : '重跑全书扫描与账本诊断（处理完问题后重跑，BLOCKER 清零徽标即消失）'}
+      >重跑</button>
       <button class="icon-btn" onclick={() => review.close()} aria-label="关闭审阅报告">{@html iconSvg('close', 14, 2)}</button>
     </div>
   </div>
 
+  <!-- 反馈#4：三档说明（名字 + 干什么 + 贵不贵），点之前知道会发生什么 -->
+  <div class="tiers">
+    <div class="tier"><b>① 全书扫描</b><span class="t-desc">scan_quality 逐章量化「去 AI 味」指标，纯本地确定性计算，免费。</span></div>
+    <div class="tier"><b>② 账本诊断</b><span class="t-desc">ledger_diagnostics 四维账本确定性检查 + 问题日志 BLOCKER 计数，免费。</span></div>
+    <div class="tier"><b>③ 贵档冷读</b><span class="t-desc">对当前章 LLM 冷读审阅（只注入单章 + 账本切片），走主笔模型，按章计费、需数秒至数十秒。</span></div>
+  </div>
+
   <div class="body">
+    {#if review.error}
+      <div class="err-zone" role="alert">
+        <span>{review.error}</span>
+        <button onclick={() => review.dismissError()} aria-label="关闭错误">×</button>
+      </div>
+    {/if}
     {#if review.running && !review.report}
-      <div class="empty">正在扫描全书与账本…</div>
+      <div class="empty">{busyText}</div>
     {:else if review.report}
       {@const r = review.report}
 
@@ -72,7 +102,7 @@
             class="btn sm premium"
             disabled={review.running}
             onclick={() => void review.runPremium(work.current!.relPath)}
-            title="贵档审阅当前章（LLM 冷读，只注入单章，按章计费）"
+            title={review.running ? '正在处理，完成后可点击' : '贵档审阅当前章（LLM 冷读，只注入单章，按章计费）'}
           >
             {review.running ? '处理中…' : '贵档审阅当前章'}
           </button>
@@ -174,7 +204,7 @@
               class="btn sm premium"
               disabled={review.running}
               onclick={() => void review.runPremium(work.current!.relPath)}
-              title="不跑便宜档，直接贵档审阅当前章（LLM 冷读，只注入单章，按章计费）"
+              title={review.running ? '正在处理，完成后可点击' : '不跑便宜档，直接贵档审阅当前章（LLM 冷读，只注入单章，按章计费）'}
             >
               {review.running ? '处理中…' : '贵档审阅当前章'}
             </button>
@@ -244,6 +274,52 @@
   .busy {
     color: var(--accent);
     font-size: 12px;
+  }
+  /* 反馈#4：三档说明 + 内嵌错误 + 处理中提示的排版 */
+  .tiers {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--line);
+    background: color-mix(in srgb, var(--muted) 4%, transparent);
+  }
+  .tier {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 11px;
+    line-height: 1.6;
+  }
+  .tier b {
+    flex: none;
+    color: var(--ink);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .tier .t-desc {
+    color: var(--muted);
+  }
+  .err-zone {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 7px 10px;
+    border: 1px solid var(--danger);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--danger) 9%, var(--panel));
+    color: var(--danger);
+    font-size: 12px;
+    line-height: 1.6;
+  }
+  .err-zone button {
+    flex: none;
+    font-size: 14px;
+    line-height: 1;
+    padding: 0 3px;
+    color: var(--danger);
   }
   .btn {
     height: 26px;

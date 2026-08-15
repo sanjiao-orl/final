@@ -51,6 +51,24 @@ describe('SessionStore', () => {
     }
   });
 
+  it('工具结果 roundtrip：addMessage 带 result → listMessages 读回原样', () => {
+    const store = new SessionStore(tmpDbPath());
+    try {
+      const s = store.createSession('结果落库');
+      store.addMessage(s.id, {
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'tc1', name: 'word_count', args: { relPath: 'a.md' }, result: '{"relPath":"a.md","count":42}' }],
+      });
+      const messages = store.listMessages(s.id);
+      expect(messages[0]?.toolCalls).toEqual([
+        { id: 'tc1', name: 'word_count', args: { relPath: 'a.md' }, result: '{"relPath":"a.md","count":42}' },
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
   it('重启恢复：关闭后重开同一库文件，数据仍在', () => {
     const dbPath = tmpDbPath();
     let sessionId = '';

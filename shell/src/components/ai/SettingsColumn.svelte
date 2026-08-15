@@ -210,12 +210,13 @@
 <div class="group">
   <div class="label">暂 存 与 裁 决</div>
   <div class="row inline">
-    <span class="r-label">小改就地浮层，大改进暂存(B1)</span>
+    <span class="r-label" title="开 = 小改就地浮层；关 = 全部进暂存区">小改就地浮层(默认进暂存区)</span>
     <label class="switch">
       <input type="checkbox" checked={settings.inlineSplit} onchange={(e) => settings.setInlineSplit(e.currentTarget.checked)} />
       <span class="sl"></span>
     </label>
   </div>
+  <div class="r-desc">开：小改就地浮层；关（默认）：全部进暂存区。</div>
   <div class="row inline">
     <span class="r-label">采纳留痕:显示"为何采纳"(B8)</span>
     <label class="switch">

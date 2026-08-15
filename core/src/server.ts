@@ -4,6 +4,7 @@ import { createServer as createHttpServer, type IncomingMessage, type Server, ty
 import { asSchema, type FlexibleSchema } from 'ai';
 import { z } from 'zod';
 import { handleChatRequest, type ChatDeps } from './chat.js';
+import { getGitCommit } from './config.js';
 import { devPage } from './dev.js';
 import { CORS_HEADERS, HttpError, readJsonBody, toPublicErrorMessage, writeJson } from './http.js';
 import { handleReviewRequest } from './review.js';
@@ -11,6 +12,10 @@ import { handleRewriteRequest, type RewriteDeps } from './rewrite.js';
 import { PROTOCOL_VERSION } from './runtime.js';
 import type { CandidateStore, CandidateStatus } from './candidate-store.js';
 import type { SessionStore } from './session-store.js';
+
+/** esbuild 构建时注入的 git 短 commit（scripts/build-sidecar.mjs 的 define）；tsx 开发运行时未定义则回退到实时 git。 */
+declare const __CORE_COMMIT__: string | undefined;
+const CORE_COMMIT = typeof __CORE_COMMIT__ !== 'undefined' ? __CORE_COMMIT__ : getGitCommit();
 
 export interface ServerDeps {
   token: string;
@@ -64,7 +69,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
 
   // 公开端点（免鉴权）
   if (req.method === 'GET' && pathname === '/v1/health') {
-    writeJson(res, 200, { ok: true, version: deps.version, protocol: PROTOCOL_VERSION });
+    writeJson(res, 200, { ok: true, version: deps.version, protocol: PROTOCOL_VERSION, commit: CORE_COMMIT });
     return;
   }
   if (req.method === 'GET' && pathname === '/v1/dev') {

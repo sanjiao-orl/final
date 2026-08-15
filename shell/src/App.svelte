@@ -16,6 +16,7 @@
   import { dialog } from './lib/dialog.svelte.js';
   import Toolbar from './components/Toolbar.svelte';
   import TreeView from './components/tree/TreeView.svelte';
+  import NotesArea from './components/notes/NotesArea.svelte';
   import Editor from './components/editor/Editor.svelte';
   import StagingDrawer from './components/staging/StagingDrawer.svelte';
   import AiRail from './components/ai/AiRail.svelte';
@@ -155,7 +156,10 @@
     {/if}
 
     <div class="main">
-      <aside class="left" data-ai-zone><TreeView /></aside>
+      <aside class="left" data-ai-zone>
+        <div class="left-tree"><TreeView /></div>
+        <NotesArea />
+      </aside>
 
       <section class="center">
         <div class="editor-area">
@@ -233,7 +237,7 @@
     z-index: 90;
   }
   .help-card {
-    width: 340px;
+    width: var(--overlay-modal, 480px);
     background: var(--panel);
     border: 1px solid var(--line);
     border-radius: 10px;
@@ -307,6 +311,15 @@
     min-height: 0;
     overflow: hidden;
     transition: margin-left var(--t-fold);
+    /* v5 左栏上下结构：上结构树（flex:1 自身滚动），下作者笔记（NotesArea 可拖拽调高） */
+    display: flex;
+    flex-direction: column;
+  }
+  /* 结构树占左栏剩余空间（min-height:0 + 自身滚动），笔记区 flex:none 由自身高度决定 */
+  .left-tree {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
   }
   .app.focus .left {
     margin-left: calc(-1 * var(--tree-w));
