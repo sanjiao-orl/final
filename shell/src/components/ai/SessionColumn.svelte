@@ -95,7 +95,7 @@
 
 <div class="list">
   {#if chat.visibleSessions.length === 0}
-    <p class="hint">{chat.searchText ? '没有匹配的会话' : '还没有会话。发一条消息即新建（挂载当前层级）。'}</p>
+    <p class="hint">{chat.searchText ? '没有匹配的会话' : '还没有会话。发一条消息即新建（挂载当前层级）。例：切到「对话」栏，说一句「通读第 1 章，挑三个问题」。'}</p>
   {/if}
   {#each chat.visibleSessions as s (s.id)}
     <div

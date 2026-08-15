@@ -1,5 +1,6 @@
 <script lang="ts">
-  // AI 窄条 48px（v3）：默认收起形态，点图标开/关栏，滚轮增减栏数，hover 左侧弹出提示。
+  // AI 窄条 48px（v4）：默认收起形态，点图标切换单活动栏（同栏再点=收起），hover 左侧弹出提示。
+  // 滚轮增减栏手势已删除（与单栏切换冲突；栏宽由 AiPanel 左缘拖拽手柄调）。
   import { iconSvg } from '../../lib/icons.js';
   import { ui, type AiColId } from '../../lib/ui.svelte.js';
 
@@ -11,7 +12,7 @@
 </script>
 
 <aside class="rail" aria-label="AI 面板窄条">
-  <span class="logo" title="AI 面板 · 默认收起；点图标开/关栏，滚轮增减栏数">{@html iconSvg('spark', 18)}</span>
+  <span class="logo" title="AI 面板 · 默认收起；点图标切换活动栏">{@html iconSvg('spark', 18)}</span>
   {#each VIEWS as v (v.id)}
     <button
       class="btn"

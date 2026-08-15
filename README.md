@@ -55,5 +55,9 @@ node core/scripts/e2e.mjs   # 真实 LLM e2e(key 在场才跑)
 
 ## 验收口径
 
-- `npm run check` / `npm test`(295 用例:core 74 + domain 140 + shell 81)
+- `npm run check` / `npm test`(417 用例:core 98 + domain 162 + shell 146;另 cargo test 11)
 - 每周出口 = 作者用本仓真实写作;不以测试绿为验收
+
+## 已知现象
+
+- **AI 对话"不流式"**:壳全链路是流式的(core 逐帧 SSE → 壳 40ms 批次渲染)。若观感是整段一次性蹦出,多半是 provider/代理端不流式或粗粒度吐——可用 `/v1/dev` 联调页直接观察 SSE 帧间隔验证(免鉴权,浏览器开 `http://127.0.0.1:<port>/v1/dev`)。属供应商行为,壳不兜底。

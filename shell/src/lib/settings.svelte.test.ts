@@ -32,6 +32,8 @@ beforeEach(() => {
   settings.appApiKey = '';
   settings.appModel = '';
   settings.appModelCheap = '';
+  settings.appLlmPresets = [];
+  settings.appLlmAssign = {};
   settings.configStatus = null;
   settings.appNotice = null;
   settings.appError = null;
@@ -68,6 +70,96 @@ describe('应用级配置（config.json）', () => {
     expect(settings.appWorks).toEqual(['C:/works/demo']); // 来自 workDir.value 自愈注册
   });
 
+  it('loadAppConfig：预设与 assign 从 config_status 全量带回', async () => {
+    const presets = [
+      { id: 'MAIN-WRITER-1', name: '主笔', baseUrl: 'https://w.example/v1', apiKey: 'sk-w', model: 'writer-m' },
+      { id: 'BG-HELPER-2', name: '后台', baseUrl: 'https://b.example/v1', apiKey: 'sk-b', model: 'bg-m' },
+    ];
+    const assign = { writing: 'MAIN-WRITER-1', background: 'BG-HELPER-2' };
+    mockTauri(async (cmd) => {
+      if (cmd === 'config_status') {
+        return { ...STATUS, config: { ...STATUS.config, llm: { ...STATUS.config.llm, presets, assign } } };
+      }
+      throw new Error(`unexpected ${cmd}`);
+    });
+    await settings.loadAppConfig();
+    expect(settings.appLlmPresets).toEqual(presets);
+    expect(settings.appLlmAssign).toEqual(assign);
+  });
+
+  it('saveAppConfig：预设/assign 全量写进 write_config，不丢字段', async () => {
+    settings.appWorkDir = 'C:/works/新书';
+    settings.appWorks = ['C:/works/新书'];
+    settings.appBaseUrl = 'https://legacy.example/v1';
+    settings.appApiKey = 'sk-legacy';
+    settings.appModel = 'legacy-m';
+    settings.appModelCheap = 'legacy-cheap';
+    settings.appLlmPresets = [
+      { id: 'MAIN-WRITER-1', name: '主笔', baseUrl: 'https://w.example/v1', apiKey: 'sk-w', model: 'writer-m' },
+    ];
+    settings.appLlmAssign = { writing: 'MAIN-WRITER-1', review: 'MAIN-WRITER-1' };
+    const invoke = mockTauri(async (cmd) => {
+      if (cmd === 'write_config') return undefined;
+      if (cmd === 'config_status') {
+        return {
+          ...STATUS,
+          config: {
+            ...STATUS.config,
+            llm: {
+              ...STATUS.config.llm,
+              presets: settings.appLlmPresets,
+              assign: settings.appLlmAssign,
+            },
+          },
+        };
+      }
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const ok = await settings.saveAppConfig();
+    expect(ok).toBe(true);
+    expect(invoke).toHaveBeenCalledWith('write_config', {
+      config: {
+        workDir: 'C:/works/新书',
+        works: ['C:/works/新书'],
+        llm: {
+          baseUrl: 'https://legacy.example/v1',
+          apiKey: 'sk-legacy',
+          model: 'legacy-m',
+          modelCheap: 'legacy-cheap',
+          presets: settings.appLlmPresets,
+          assign: settings.appLlmAssign,
+        },
+      },
+    });
+  });
+
+  it('saveAppConfig：预设校验（空字段 / 重复 id / assign 指向不存在）拦截并红条', async () => {
+    const invoke = mockTauri(async (cmd) => {
+      if (cmd === 'write_config') return undefined;
+      throw new Error(`unexpected ${cmd}`);
+    });
+    settings.appLlmPresets = [
+      { id: 'P1', name: '', baseUrl: 'https://x', apiKey: 'k', model: 'm' },
+    ];
+    expect(await settings.saveAppConfig()).toBe(false);
+    expect(settings.appError).toContain('存在空字段');
+
+    settings.appLlmPresets = [
+      { id: 'P1', name: 'a', baseUrl: 'https://x', apiKey: 'k', model: 'm' },
+      { id: 'P1', name: 'b', baseUrl: 'https://y', apiKey: 'k', model: 'm' },
+    ];
+    expect(await settings.saveAppConfig()).toBe(false);
+    expect(settings.appError).toContain('重复');
+
+    settings.appLlmPresets = [
+      { id: 'P1', name: 'a', baseUrl: 'https://x', apiKey: 'k', model: 'm' },
+    ];
+    settings.appLlmAssign = { writing: 'NOPE' };
+    expect(await settings.saveAppConfig()).toBe(false);
+    expect(settings.appError).toContain('指向不存在的预设');
+    expect(invoke).not.toHaveBeenCalledWith('write_config', expect.anything());
+  });
+
   it('saveAppConfig：write_config 带 camelCase 配置（含作品注册表），成功后刷新 config_status 并给提示', async () => {
     settings.appWorkDir = 'C:/works/新书';
     settings.appWorks = ['C:/works/新书', 'C:/works/旧书'];
@@ -86,7 +178,14 @@ describe('应用级配置（config.json）', () => {
       config: {
         workDir: 'C:/works/新书',
         works: ['C:/works/新书', 'C:/works/旧书'],
-        llm: { baseUrl: 'https://llm.example/v1', apiKey: 'sk-test', model: 'm1', modelCheap: 'm2' },
+        llm: {
+          baseUrl: 'https://llm.example/v1',
+          apiKey: 'sk-test',
+          model: 'm1',
+          modelCheap: 'm2',
+          presets: [],
+          assign: {},
+        },
       },
     });
     expect(settings.appNotice).toContain('已保存');
@@ -129,7 +228,14 @@ describe('应用级配置（config.json）', () => {
       config: {
         workDir: 'C:/works/b',
         works: ['C:/works/a', 'C:/works/b'],
-        llm: { baseUrl: 'https://llm.example/v1', apiKey: 'sk-test', model: 'm1', modelCheap: 'm2' },
+        llm: {
+          baseUrl: 'https://llm.example/v1',
+          apiKey: 'sk-test',
+          model: 'm1',
+          modelCheap: 'm2',
+          presets: [],
+          assign: {},
+        },
       },
     });
     expect(invoke).toHaveBeenCalledWith('restart_core');

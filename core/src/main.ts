@@ -4,11 +4,10 @@ import path from 'node:path';
 import type { Server } from 'node:http';
 import {
   assertNodeVersion,
-  createModelForTier,
   getGitCommit,
   getNovelDir,
   getRuntimeFilePath,
-  loadLlmConfig,
+  modelForPurpose,
   VERSION,
   type Tier,
 } from './config.js';
@@ -49,8 +48,10 @@ async function main(): Promise<void> {
 
   const args = parseArgs(process.argv.slice(2));
 
-  // 配置缺失（LLM 环境变量）在启动即抛错，不静默降级。
-  const llm = loadLlmConfig();
+  // 配置缺失（LLM 环境变量/预设）在启动即抛错，不静默降级；三种用途各触一次，把错误暴露在启动期并预热模型缓存。
+  modelForPurpose(process.env, 'writing');
+  modelForPurpose(process.env, 'background');
+  modelForPurpose(process.env, 'review');
   const dbPath = path.join(getNovelDir(), 'sessions.sqlite');
   const store = new SessionStore(dbPath);
   const candidates = new CandidateStore(dbPath); // 与 sessions 同库（FK 到 sessions）
@@ -65,12 +66,12 @@ async function main(): Promise<void> {
     version: VERSION,
     chat: {
       store,
-      modelForTier: (tier: Tier) => createModelForTier(llm, tier),
+      modelForTier: (tier: Tier) => modelForPurpose(process.env, tier),
       tools: mcp.tools,
       toolsAvailable: () => mcp.isConnected(),
     },
     rewrite: {
-      modelForTier: (tier: Tier) => createModelForTier(llm, tier),
+      modelForTier: (tier: Tier) => modelForPurpose(process.env, tier),
     },
   });
 

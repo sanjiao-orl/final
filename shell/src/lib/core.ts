@@ -128,7 +128,7 @@ export class CoreClient {
 
   /** POST /v1/chat 的 SSE 流：手工解析帧，text-delta 经 DeltaBatcher 批次后才进 onDelta。 */
   async chatStream(
-    body: { sessionId?: string; text: string; workDir?: string; scope?: string },
+    body: { sessionId?: string; text: string; workDir?: string; scope?: string; tier?: 'writing' | 'background' },
     handlers: ChatStreamHandlers,
     signal?: AbortSignal,
   ): Promise<void> {

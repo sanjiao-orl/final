@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { stepCountIs, streamText, type LanguageModel, type ToolSet } from 'ai';
 import { z } from 'zod';
 import type { MessageRow, SessionRow, SessionStore } from './session-store.js';
-import { getLlmTimeoutSeconds } from './config.js';
+import { getLlmTimeoutSeconds, type Tier } from './config.js';
 import { EventPump } from './event-pump.js';
 import { toPublicErrorMessage, writeJson } from './http.js';
 
@@ -21,7 +21,7 @@ export type ChatBody = z.infer<typeof chatBodySchema>;
 export interface ChatDeps {
   store: SessionStore;
   /** 按档位返回模型；测试注入 mock。 */
-  modelForTier: (tier: 'writing' | 'background') => LanguageModel;
+  modelForTier: (tier: Tier) => LanguageModel;
   /** MCP 领域工具，连不上时为 undefined。 */
   tools: ToolSet | undefined;
   /** MCP 当前是否可用；缺省视为可用（保持无 MCP 注入时的旧行为）。 */

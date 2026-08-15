@@ -436,7 +436,7 @@
     white-space: nowrap;
   }
   .prose {
-    /* 行高按 --body-line-px 派生（默认 17px×1.75=30，theme.ts 的 lineHeightPx 派生），
+    /* 行高按 --body-line-px 派生（默认 17px×1.6=27，theme.ts 的 lineHeightPx 派生），
        选区浮动条按此卡行间隙定位；改字号/行高由 applyTheme 自动重算 --body-line-px。 */
     font-family: var(--body-font);
     font-size: var(--body-size);

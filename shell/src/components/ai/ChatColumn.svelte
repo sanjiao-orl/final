@@ -1,8 +1,13 @@
 <script lang="ts">
-  // 对话栏（B7/B8）：当前会话名（双击重命名）+ 消息流 + composer；
-  // AI 直调工具在此列以工具状态行跟随（卡片详情在工具栏）。
+  // 对话栏（D2 · v4）：B7/B8 会话名（双击重命名）+ 消息流 + composer；
+  // D2.1 assistant 气泡 marked 渲染 markdown（{@html} 输出——本地单用户 BYOK,信任面已记入方案）；
+  // D2.2 工具 chip 堆叠 → 一行摘要「N 个工具调用 · 查看」+ ui.showCol('tools') + chat.focusToolsGroupKey 跳转；
+  // D2.3 仅在接近底部(40px)时跟底，用户上翻即停；
+  // D2.5 流式中气泡末尾 ▎ 光标 + "正在调用 XX" 指示；40ms 批次机制不动（0002 决策）。
+  import { marked } from 'marked';
   import { iconSvg } from '../../lib/icons.js';
   import { chat } from '../../lib/chat.svelte.js';
+  import { ui } from '../../lib/ui.svelte.js';
   import { work } from '../../lib/work.svelte.js';
   import { candidates } from '../../lib/candidates.svelte.js';
 
@@ -17,12 +22,20 @@
     void chat.send(text);
   }
 
-  // 流式期间跟底
+  // D2.3：仅当用户已接近底部时才跟底；上翻阅读旧文不再被强行拉回。
+  let stickToBottom = $state(true);
+  function onScroll(e: Event): void {
+    const el = e.currentTarget as HTMLDivElement;
+    stickToBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 40;
+  }
   $effect(() => {
+    // 订阅消息内容变化（流式 delta / 工具行追加 / 错误插入都会触发）
+    const _len = chat.messages.length;
+    const _stream = chat.streaming;
+    const _contentSig = chat.messages.map((m) => m.content.length).join(',');
     const el = listEl;
-    if (el && chat.messages.length) {
-      el.scrollTop = el.scrollHeight;
-    }
+    if (!el) return;
+    if (stickToBottom) el.scrollTop = el.scrollHeight;
   });
 
   function mountHint(): string {
@@ -36,6 +49,35 @@
       return node ? `挂载：${node.title}` : '挂载：本章';
     }
     return `挂载：${scope}`;
+  }
+
+  // D2.1 markdown 渲染：assistant 气泡用 marked 转 HTML，{@html} 输出。
+  // 本地单用户 BYOK 信任面（v4 方案 §三 D2）—— 不引入 DOMPurify。
+  function renderAiHtml(content: string): string {
+    return marked.parse(content, { async: false, gfm: true }) as string;
+  }
+
+  // D2.5：最后一条 assistant 消息若在 streaming，追加 ▎ 光标；并在摘要行展示"正在调用 XX"。
+  const streamingIdx = $derived(chat.streaming ? chat.messages.length - 1 : -1);
+
+  /** 当前消息是否有未完成工具（running/pending）—— 摘要行脉冲点 + "正在调用"提示用。 */
+  function hasPending(tools: ChatMsgTools): boolean {
+    return tools.some((t) => t.state === 'running' || t.state === 'pending');
+  }
+  /** 取该消息最后一个未完成工具的名字（"正在调用 XX"）；无返回 null。 */
+  function streamingToolName(tools: ChatMsgTools): string | null {
+    for (let i = tools.length - 1; i >= 0; i--) {
+      const t = tools[i]!;
+      if (t.state === 'running' || t.state === 'pending') return t.name;
+    }
+    return null;
+  }
+  type ChatMsgTools = NonNullable<(typeof chat.messages)[number]['tools']>;
+
+  /** D2.2 摘要跳转：ui.showCol('tools') + 标 focusToolsGroupKey（下标字符串）。 */
+  function jumpToTools(msgIndex: number): void {
+    chat.focusToolsGroupKey = String(msgIndex);
+    ui.showCol('tools');
   }
 </script>
 
@@ -70,12 +112,12 @@
   </span>
 </div>
 
-<div class="messages" bind:this={listEl}>
+<div class="messages" bind:this={listEl} onscroll={onScroll}>
   {#if chat.messages.length === 0}
     <p class="hint">
       {chat.scope === ''
-        ? '无归属讨论：大纲、设定、灵感、全书方向。助手会经工具读真实文件。'
-        : `当前挂载：${chat.scopeLabel()}。围绕这一层的问题、方向、改写思路。`}
+        ? '无归属讨论：大纲、设定、灵感、全书方向。助手会经工具读真实文件。例：「帮我把前三章的伏笔理一遍」'
+        : `当前挂载：${chat.scopeLabel()}。围绕这一层的问题、方向、改写思路。例：「这一章节奏拖了，给个收紧方案」`}
     </p>
   {/if}
   {#each chat.messages as m, i (i)}
@@ -83,24 +125,28 @@
       {#if m.role === 'assistant' && m.content !== ''}
         <span class="who">AI · {chat.scopeLabel()}{#if chat.abortedLastStream && i === chat.messages.length - 1}<i class="aborted">已中断</i>{/if}</span>
       {/if}
-      {#if m.content !== ''}<div class="bubble">{m.content}</div>{/if}
-      {#each m.tools ?? [] as t (t.id)}
-        <div class="tool" class:pending={t.state === 'pending'} class:done={t.state === 'done'} class:rejected={t.state === 'rejected'}>
-          {t.state === 'pending'
-            ? `${t.name} 挂起待审批`
-            : t.state === 'rejected'
-              ? `${t.name} 已拒绝`
-              : t.state === 'running'
-                ? `${t.name} 调用中…`
-                : `${t.name} ✓`}
+      {#if m.content !== ''}
+        <div class="bubble">
+          {#if m.role === 'assistant'}
+            {@html renderAiHtml(m.content)}
+            {#if i === streamingIdx && chat.streaming}<span class="cursor" aria-hidden="true">▍</span>{/if}
+          {:else}
+            {m.content}
+          {/if}
         </div>
-      {/each}
+      {/if}
+      {#if m.role === 'assistant' && m.tools && m.tools.length > 0}
+        <button class="tool-summary" class:has-pending={hasPending(m.tools)} onclick={() => jumpToTools(i)} title="切到工具面板并定位到该轮">
+          {#if hasPending(m.tools)}<i class="pulse-dot"></i>{/if}
+          {m.tools.length} 个工具调用 · 查看
+          {#if streamingToolName(m.tools) && i === streamingIdx}
+            <span class="running-tool">正在调用 {streamingToolName(m.tools)}</span>
+          {/if}
+        </button>
+      {/if}
       {#if m.role === 'error'}<span class="err">{m.content}</span>{/if}
     </div>
   {/each}
-  {#if chat.streaming}
-    <div class="msg assistant muted">…</div>
-  {/if}
   {#if candidates.pendingCount > 0}
     <div class="staged-note" role="button" tabindex="0" onclick={() => candidates.toggleDrawer()} onkeydown={(e) => e.key === "Enter" && candidates.toggleDrawer()}>
       {@html iconSvg('drawer', 13)}
@@ -122,6 +168,14 @@
       }}
     ></textarea>
     <div class="bar">
+      <button
+        class="tier"
+        class:cheap={chat.tier === 'background'}
+        onclick={() => chat.setTier(chat.tier === 'writing' ? 'background' : 'writing')}
+        title={chat.tier === 'writing' ? '当前：写作档（主笔模型）· 点击切到背景档' : '当前：背景档（便宜模型，杂活/整理用）· 点击切回写作档'}
+      >
+        {chat.tier === 'writing' ? '写作档' : '背景档'}
+      </button>
       <span class="hint">Enter 发送 · Shift+Enter 换行</span>
       {#if chat.streaming}
         <button class="stop" onclick={() => chat.abortStream()} aria-label="停止" title="停止生成（已收内容会保留，已中断）">{@html iconSvg('close', 12, 2)} 停止</button>
@@ -244,8 +298,70 @@
     padding: 2px 0 2px 11px;
     font-size: 12.5px;
     line-height: 1.75;
-    white-space: pre-wrap;
     word-break: break-word;
+  }
+  /* D2.1：assistant 气泡内 markdown 基础排版（继承正文字体）。 */
+  .msg-ai .bubble :global(h1),
+  .msg-ai .bubble :global(h2),
+  .msg-ai .bubble :global(h3),
+  .msg-ai .bubble :global(h4) {
+    font-family: var(--body-font);
+    font-weight: 600;
+    line-height: 1.4;
+    margin: 0.6em 0 0.3em;
+    text-indent: 0;
+  }
+  .msg-ai .bubble :global(h1) { font-size: 1.25em; }
+  .msg-ai .bubble :global(h2) { font-size: 1.15em; }
+  .msg-ai .bubble :global(h3) { font-size: 1.05em; }
+  .msg-ai .bubble :global(h4) { font-size: 1em; }
+  .msg-ai .bubble :global(p) {
+    margin: 0 0 0.4em;
+    text-indent: 0;
+  }
+  .msg-ai .bubble :global(ul),
+  .msg-ai .bubble :global(ol) {
+    margin: 0 0 0.4em;
+    padding-left: 1.5em;
+  }
+  .msg-ai .bubble :global(li) {
+    margin: 0 0 0.15em;
+  }
+  .msg-ai .bubble :global(a) {
+    color: var(--accent);
+    text-decoration: underline;
+  }
+  /* D2.1：行内 code 用等宽 + 底色小块；pre 代码块走预格式滚动区。 */
+  .msg-ai .bubble :global(code) {
+    font-family: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas, monospace;
+    font-size: 0.92em;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--muted) 14%, transparent);
+    color: var(--ink);
+  }
+  .msg-ai .bubble :global(pre) {
+    font-family: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas, monospace;
+    font-size: 0.92em;
+    line-height: 1.55;
+    margin: 0 0 0.5em;
+    padding: 8px 10px;
+    background: color-mix(in srgb, var(--muted) 8%, var(--paper));
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    overflow-x: auto;
+  }
+  .msg-ai .bubble :global(pre code) {
+    padding: 0;
+    background: transparent;
+    border-radius: 0;
+    color: inherit;
+  }
+  .msg-ai .bubble :global(blockquote) {
+    margin: 0 0 0.4em;
+    padding: 2px 10px;
+    border-left: 3px solid var(--line);
+    color: var(--muted);
   }
 
   .msg.muted {
@@ -258,25 +374,61 @@
     border-radius: 6px;
     padding: 6px 9px;
   }
-  .tool {
+  /* D2.5：流式中气泡末尾 ▎ 光标（闪烁）。 */
+  .cursor {
+    display: inline-block;
+    margin-left: 1px;
+    animation: cursor-blink 1s steps(2, end) infinite;
+    color: var(--accent);
+  }
+  @keyframes cursor-blink {
+    0%, 50% { opacity: 1; }
+    50.01%, 100% { opacity: 0; }
+  }
+  /* D2.2：工具调用摘要行（替代原 chip 堆叠）。 */
+  .tool-summary {
     align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     font-size: 11px;
     color: var(--muted);
-    padding: 3px 8px;
+    padding: 4px 10px;
     border-radius: 9px;
     border: 1px solid var(--line);
+    background: var(--paper);
+    cursor: pointer;
+    transition: all var(--t-hover);
+    text-align: left;
+    line-height: 1.5;
   }
-  .tool.done {
-    color: var(--ok);
-    border-color: color-mix(in srgb, var(--ok) 35%, var(--line));
+  .tool-summary:hover {
+    border-color: var(--accent-line);
+    color: var(--ink);
   }
-  .tool.pending {
-    color: var(--status-draft);
+  .tool-summary.has-pending {
     border-color: color-mix(in srgb, var(--status-draft) 40%, var(--line));
     background: var(--warn-bg);
+    color: var(--ink);
   }
-  .tool.rejected {
-    color: var(--danger);
+  .tool-summary .pulse-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--status-draft);
+    animation: pulse 1.5s ease-in-out infinite;
+    flex: none;
+  }
+  .tool-summary .running-tool {
+    margin-left: 4px;
+    padding-left: 6px;
+    border-left: 1px solid var(--line);
+    color: var(--accent);
+    font-weight: 500;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.35; }
+    50% { opacity: 1; }
   }
   .staged-note {
     display: flex;
@@ -329,6 +481,25 @@
     flex: 1;
     font-size: 10.5px;
     color: var(--muted);
+  }
+  .tier {
+    flex: none;
+    height: 20px;
+    padding: 0 8px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    font-size: 10.5px;
+    color: var(--muted);
+    transition: border-color var(--t-hover), color var(--t-hover), background var(--t-hover);
+  }
+  .tier:hover {
+    border-color: var(--accent-line);
+    color: var(--accent);
+  }
+  .tier.cheap {
+    background: var(--accent-soft);
+    border-color: var(--accent-line);
+    color: var(--accent);
   }
   .send {
     width: 26px;

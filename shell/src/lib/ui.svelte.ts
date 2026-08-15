@@ -1,60 +1,113 @@
 /**
- * ui.svelte.ts —— 界面状态：v3 AI 面板（窄条 48px + 按功能分栏）、F8 专注。
- * 栏序固定：会话(session) / 对话(chat) / 工具(tools) / 设置(settings)。
- * 交互（与 prototype/index.html v3 逻辑一致）：
- * - 默认收起（窄条）；点窄条图标：收起→展开 2 栏（该栏+左邻）；已开→未显栏=增栏，已显栏=减栏（≥2 栏）；仅 2 栏时点已显栏=收起
- * - 设置栏例外（固定宽切换式）：点开=单栏替换当前组合（记住原组合），再点/×=还原原组合（无则收起）；
- *   设置开着时点其他功能栏=切到该栏默认组合。多栏叠加时设置栏会被 .ai 的 max-width 裁掉右缘，故不入叠加体系。
- * - 滚轮：窄条任意位置 / 面板非内容区，上滚=右端增栏，下滚=右端减栏；2 栏下滚=收起，收起上滚=开 2 栏；增至设置栏=切单栏设置
- * - Esc/点外部=收起；Ctrl+J/顶栏 AI 按钮=开合；F8 专注连窄条隐藏
- * 明暗/打字机归 settings store（本文件不再持有）。
+ * ui.svelte.ts —— 界面状态：v4 AI 面板（单栏切换 + 拖拽调宽）、F8 专注。
+ * 单活动栏 activeCol（session/chat/tools/settings 四选一），栏宽为运行时 ui.colWidth，
+ * 左缘拖拽手柄钳制到 [280, 可用宽]，持久化到 localStorage。
+ * 从机制上不存在多栏求和裁切：宽度即栏宽，溢出在面板内滚动，降级是"收起"不是"裁切"。
+ * 兼容保留：ui.aiOpen 仍为外部可读字段（与 activeCol !== null 同步），供 App.svelte/Toolbar 使用；
+ * 已废弃的 ui.cols / ui.wheelAi / preSettingsCols / openSettings/closeSettings 全部删除。
  */
 import { aiColumns } from '../theme.js';
 
 export type AiColId = (typeof aiColumns.order)[number];
 
+/** 栏宽下限（原型最窄宽度）；上限由窗口内可用宽决定（availableWidth）。 */
+const MIN_COL_W = 280;
+/** openAi() 无记忆时默认落到的栏。 */
+const DEFAULT_COL: AiColId = 'chat';
+/** colWidth 初值：取 chat 栏宽作为统一初始值；其余栏宽仅作历史/参考。 */
+const DEFAULT_WIDTH: number = aiColumns.width[DEFAULT_COL] ?? aiColumns.width.chat ?? 280;
+/** 持久化键名。 */
+const KEY_ACTIVE = 'ui.activeCol';
+const KEY_WIDTH = 'ui.colWidth';
+
 export class UiStore {
   /** F8 专注：隐藏左右栏与 AI 窄条，只留编辑器。 */
   focus = $state(false);
-  /** AI 面板开合（展开态显示当前可见栏）。 */
+  /** 当前活动栏 id；null = 面板收起（只剩窄条）。 */
+  activeCol = $state<AiColId | null>(null);
+  /** AI 面板开合：与 activeCol !== null 同步保留，供 App.svelte / Toolbar 读取。 */
   aiOpen = $state(false);
-  /** 当前可见栏（按栏序排序），默认 2 栏起。 */
-  cols = $state<AiColId[]>(['session', 'chat']);
-
-  /** 进设置切换态前记住的栏组合；null=进设置前是收起态。 */
-  private preSettingsCols: AiColId[] | null = null;
+  /** 当前栏宽（运行时，所有栏共享一个统一值；切栏不重置）。 */
+  colWidth = $state<number>(DEFAULT_WIDTH);
+  /** openAi() 回退用的"上次活动栏"；首次启动为默认 chat。 */
+  lastCol = $state<AiColId>(DEFAULT_COL);
 
   constructor() {
+    if (typeof localStorage !== 'undefined') this.hydrate();
+    if (typeof window !== 'undefined') this.bindResize();
     this.syncWidth();
   }
 
-  /** 按可见栏求和更新 --right-w（0.42s 宽度动效）。 */
-  private syncWidth(): void {
-    if (typeof document === 'undefined') return;
-    const w = this.aiOpen ? this.cols.reduce((s, id) => s + (aiColumns.width[id] ?? 0), 0) : 0;
-    document.documentElement.style.setProperty('--right-w', `${w}px`);
+  /** 还原持久化状态；node / 隐私模式等无 localStorage 时静默跳过。 */
+  private hydrate(): void {
+    try {
+      const a = localStorage.getItem(KEY_ACTIVE);
+      if (a && (aiColumns.order as readonly string[]).includes(a)) {
+        this.activeCol = a as AiColId;
+        this.aiOpen = true;
+        this.lastCol = a as AiColId;
+      }
+      const w = Number(localStorage.getItem(KEY_WIDTH));
+      if (Number.isFinite(w) && w >= MIN_COL_W) this.colWidth = Math.round(w);
+    } catch {
+      // localStorage 不可写（隐私模式 / 受限环境）：忽略，内存态生效即可
+    }
   }
 
+  /** 窗口变窄时同步收缩栏宽——保留用户既定宽度不变窄侧重排。 */
+  private bindResize(): void {
+    window.addEventListener('resize', () => {
+      const max = this.availableWidth();
+      if (this.colWidth > max) {
+        this.colWidth = max;
+        this.persist();
+        this.syncWidth();
+      }
+    });
+  }
+
+  /** 窗口内可用宽 = 视口 - 树宽 - 窄条宽 - 编辑器最小宽(160)。 */
+  availableWidth(): number {
+    if (typeof window === 'undefined') return 800;
+    const root = document.documentElement;
+    const tree = parseInt(getComputedStyle(root).getPropertyValue('--tree-w'), 10) || 260;
+    const rail = parseInt(getComputedStyle(root).getPropertyValue('--rail-w'), 10) || 48;
+    return Math.max(MIN_COL_W, window.innerWidth - tree - rail - 160);
+  }
+
+  /** 钳制栏宽到 [280, 可用宽]。 */
+  clampWidth(px: number): number {
+    const max = Math.max(MIN_COL_W, this.availableWidth());
+    const v = Math.round(px);
+    return Math.min(max, Math.max(MIN_COL_W, v));
+  }
+
+  /** 由拖拽手柄 / AiPanel 调用：钳制 + 持久化 + 同步 CSS 变量。 */
+  setColWidth(px: number): void {
+    this.colWidth = this.clampWidth(px);
+    this.persist();
+    this.syncWidth();
+  }
+
+  /** 栏是否可见：面板开 且 该栏为当前活动栏（取代 v3 的 ui.cols.includes）。 */
   isOpen(id: AiColId): boolean {
-    return this.aiOpen && this.cols.includes(id);
+    return this.aiOpen && this.activeCol === id;
   }
 
-  toggleFocus(): void {
-    this.focus = !this.focus;
-  }
-
+  /** 打开面板：恢复到 lastCol 或默认 chat。 */
   openAi(): void {
     this.aiOpen = true;
+    if (!this.activeCol) this.activeCol = this.lastCol;
+    this.persist();
     this.syncWidth();
   }
 
+  /** 收起面板：记住当前栏作为 lastCol，下次 openAi 还原。 */
   collapseAi(): void {
+    if (this.activeCol) this.lastCol = this.activeCol;
+    this.activeCol = null;
     this.aiOpen = false;
-    // 设置切换态被整体收起（Esc/点外部/Ctrl+J）：还原进设置前的栏组合，重开面板回到原视图。
-    if (this.preSettingsCols) {
-      this.cols = this.preSettingsCols;
-      this.preSettingsCols = null;
-    }
+    this.persist();
     this.syncWidth();
   }
 
@@ -63,90 +116,42 @@ export class UiStore {
     else this.openAi();
   }
 
-  /** 开设置：记住当前栏组合，切到单栏固定宽设置。 */
-  private openSettings(): void {
-    if (!this.isOpen('settings')) {
-      this.preSettingsCols = this.aiOpen ? [...this.cols] : null;
-      this.cols = ['settings'];
-    }
-    this.openAi();
+  /** 显式打开并切到指定栏（外部跳转 / 顶部按钮 / 超链接用）。 */
+  showCol(id: AiColId): void {
+    this.activeCol = id;
+    this.aiOpen = true;
+    this.lastCol = id;
+    this.persist();
+    this.syncWidth();
   }
 
-  /** 关设置：还原进设置前的栏组合；之前是收起态则直接收起。 */
-  private closeSettings(): void {
-    const prev = this.preSettingsCols;
-    this.preSettingsCols = null;
-    if (prev && prev.length > 0) {
-      this.cols = prev;
-      this.syncWidth();
-    } else {
-      this.collapseAi();
-    }
-  }
-
-  /**
-   * 点窄条图标 / 栏头 × / 顶栏设置钮：
-   * 设置栏走切换式（开=单栏替换，关=还原）；其余栏：收起→展开 2 栏（该栏 + 左邻，首位取右邻），
-   * 已显→减栏（≥2 栏），仅 2 栏时=收起；未显→增栏。设置开着时点其他栏=切到该栏默认组合。
-   */
+  /** 窄条图标 / AiPanel 栏头 ×：同栏再点 = 收起；否则切过去。 */
   toggleCol(id: AiColId): void {
-    if (id === 'settings') {
-      if (this.isOpen('settings')) this.closeSettings();
-      else this.openSettings();
-      return;
-    }
-    if (!this.aiOpen || this.isOpen('settings')) {
-      // 收起态点栏，或设置切换态改点其他功能栏：都切到该栏默认组合。
-      this.preSettingsCols = null;
-      const i = aiColumns.order.indexOf(id);
-      const n = i > 0 ? aiColumns.order[i - 1]! : aiColumns.order[i + 1]!;
-      this.cols = [n, id].sort(byOrder);
-      this.openAi();
-    } else if (this.cols.includes(id)) {
-      if (this.cols.length > 2) {
-        this.cols = this.cols.filter((x) => x !== id);
-        this.syncWidth();
-      } else {
-        this.collapseAi();
-      }
-    } else {
-      this.cols = [...this.cols, id].sort(byOrder);
-      this.syncWidth();
-    }
+    if (this.activeCol === id) this.collapseAi();
+    else this.showCol(id);
   }
 
-  /** 滚轮切换：dir>0 上滚=右端增栏；dir<0 下滚=右端减栏；收起态上滚=开 2 栏。 */
-  wheelAi(dir: number): void {
-    if (!this.aiOpen) {
-      if (dir < 0) return;
-      this.cols = ['session', 'chat'];
-      this.openAi();
-      return;
-    }
-    if (dir > 0) {
-      const last = [...this.cols].sort(byOrder).pop()!;
-      const add = aiColumns.order[aiColumns.order.indexOf(last) + 1];
-      if (add === 'settings') {
-        // 增至设置栏 = 切单栏设置（切换式，不叠加）
-        this.openSettings();
-      } else if (add) {
-        this.cols = [...this.cols, add].sort(byOrder);
-        this.syncWidth();
-      }
-    } else {
-      if (this.cols.length > 2) {
-        const last = [...this.cols].sort(byOrder).pop()!;
-        this.cols = this.cols.filter((x) => x !== last);
-        this.syncWidth();
-      } else {
-        this.collapseAi();
-      }
+  toggleFocus(): void {
+    this.focus = !this.focus;
+  }
+
+  /** --right-w：单栏宽（不存在求和），0 = 收起。 */
+  private syncWidth(): void {
+    if (typeof document === 'undefined') return;
+    const w = this.aiOpen ? this.colWidth : 0;
+    document.documentElement.style.setProperty('--right-w', `${w}px`);
+  }
+
+  private persist(): void {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      if (this.activeCol) localStorage.setItem(KEY_ACTIVE, this.activeCol);
+      else localStorage.removeItem(KEY_ACTIVE);
+      localStorage.setItem(KEY_WIDTH, String(this.colWidth));
+    } catch {
+      // 隐私模式 / 受限环境下忽略，内存态生效
     }
   }
-}
-
-function byOrder(a: AiColId, b: AiColId): number {
-  return aiColumns.order.indexOf(a) - aiColumns.order.indexOf(b);
 }
 
 export const ui = new UiStore();

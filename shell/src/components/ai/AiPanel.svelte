@@ -1,23 +1,15 @@
 <script lang="ts">
-  // AI 面板 v3：按功能分栏——会话 / 对话 / 工具 / 设置。
-  // 2 栏起可增至多栏，栏序固定，--right-w 由可见栏求和（App 按 ui 状态注入）；
-  // 滚轮在面板非内容区（栏头/空白）增减栏数，内容区正常滚动。
+  // AI 面板 v4：单栏切换 + 拖拽调宽（根治 P1 多栏叠加裁切）。
+  // 单活动栏 activeCol，栏宽为运行时 ui.colWidth；栏左缘 5px 拖拽手柄（cursor: col-resize），
+  // 复用 TreeView.svelte L117-258 已验证的 pointer 拖拽范式（setPointerCapture + window 监听），
+  // 钳制到 [280, 可用宽]，拖拽中跳过宽度动效，松手恢复。
   import { iconSvg } from '../../lib/icons.js';
   import { chat } from '../../lib/chat.svelte.js';
-  import { aiColumns } from '../../theme.js';
   import { ui, type AiColId } from '../../lib/ui.svelte.js';
   import SessionColumn from './SessionColumn.svelte';
   import ChatColumn from './ChatColumn.svelte';
   import ToolsColumn from './ToolsColumn.svelte';
   import SettingsColumn from './SettingsColumn.svelte';
-
-  function wheel(e: WheelEvent): void {
-    // 内容区（栏体/输入框）正常滚动，栏头与空白区走栏数切换
-    const t = e.target as HTMLElement;
-    if (t.closest('.col-body, textarea, input, select')) return;
-    e.preventDefault();
-    ui.wheelAi(e.deltaY < 0 ? 1 : -1);
-  }
 
   const COLS: { id: AiColId; title: string; hint: string }[] = [
     { id: 'session', title: '会话', hint: '挂载 / 会话(B7)' },
@@ -25,41 +17,89 @@
     { id: 'tools', title: '工具调用', hint: 'B3 就地审阅 · 点卡头展开/收起' },
     { id: 'settings', title: '设置', hint: 'B6 / 外观 / 快照' },
   ];
+
+  /** 当前活动栏条目（null = 收起只剩窄条）。 */
+  const current = $derived(
+    ui.activeCol ? COLS.find((c) => c.id === ui.activeCol) ?? null : null,
+  );
+
+  // ---------- 拖拽调宽（pointer 范式：参照 TreeView dragStart/dragMove/dragEnd） ----------
+  let colEl: HTMLElement | undefined = $state();
+  let resizing = $state(false);
+
+  function startDrag(e: PointerEvent): void {
+    if (e.button !== 0) return;
+    const target = e.currentTarget as HTMLElement;
+    // 捕获指针：拖出窗口 / 面板边界后松手也能收到 pointerup（jsdom / 某些 WebView2 不支持：忽略）
+    try {
+      target.setPointerCapture(e.pointerId);
+    } catch {
+      // 事件仍走 window 监听，拖拽态可恢复
+    }
+    resizing = true;
+    e.preventDefault();
+  }
+  function moveDrag(e: PointerEvent): void {
+    if (!resizing) return;
+    const rect = colEl?.getBoundingClientRect();
+    if (!rect) return;
+    // 拖拽左移=加宽：新宽 = 栏右缘 - 当前 X
+    const next = rect.right - e.clientX;
+    ui.setColWidth(next);
+  }
+  function endDrag(_e?: PointerEvent): void {
+    if (!resizing) return;
+    resizing = false;
+  }
 </script>
 
-<aside class="ai" class:open={ui.aiOpen} onwheel={wheel} aria-label="AI 面板">
-  {#each COLS as c (c.id)}
-    {#if ui.cols.includes(c.id)}
-      <section class="col" id={`col-${c.id}`} style:width={`${aiColumns.width[c.id]}px`} aria-label={c.title}>
-        <div class="head">
-          <span class="title">{c.title}{#if c.id === 'tools'}<i class="n">{chat.messages.reduce((n, m) => n + (m.tools?.length ?? 0), 0)}</i>{/if}</span>
-          <span class="hint">{c.hint}</span>
-          <button class="icon-btn" onclick={() => ui.toggleCol(c.id)} title="关此栏 (点窄条图标/滚轮可调)" aria-label={`关闭${c.title}栏`}>
-            {@html iconSvg('close', 14, 2)}
-          </button>
-        </div>
-        <div class="body">
-          {#if c.id === 'session'}
-            <SessionColumn />
-          {:else if c.id === 'chat'}
-            <ChatColumn />
-          {:else if c.id === 'tools'}
-            <ToolsColumn />
-          {:else}
-            <SettingsColumn />
-          {/if}
-        </div>
-      </section>
-    {/if}
-  {/each}
+<aside class="ai" class:open={ui.aiOpen} class:resizing aria-label="AI 面板">
+  {#if current}
+    <section
+      class="col"
+      id={`col-${current.id}`}
+      bind:this={colEl}
+      aria-label={current.title}
+    >
+      <!-- 左缘 5px 拖拽热区（位于栏内 padding 空白处，不抢占内容点击） -->
+      <div
+        class="resize-handle"
+        onpointerdown={startDrag}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="拖拽调宽"
+        tabindex="-1"
+      ></div>
+      <div class="head">
+        <span class="title">{current.title}{#if current.id === 'tools'}<i class="n">{chat.messages.reduce((n, m) => n + (m.tools?.length ?? 0), 0)}</i>{/if}</span>
+        <span class="hint">{current.hint}</span>
+        <button class="icon-btn" onclick={() => ui.toggleCol(current.id)} title="关此栏（点窄条图标切换）" aria-label={`关闭${current.title}栏`}>
+          {@html iconSvg('close', 14, 2)}
+        </button>
+      </div>
+      <div class="body">
+        {#if current.id === 'session'}
+          <SessionColumn />
+        {:else if current.id === 'chat'}
+          <ChatColumn />
+        {:else if current.id === 'tools'}
+          <ToolsColumn />
+        {:else}
+          <SettingsColumn />
+        {/if}
+      </div>
+    </section>
+  {/if}
 </aside>
+
+<svelte:window onpointermove={moveDrag} onpointerup={endDrag} onpointercancel={endDrag} />
 
 <style>
   .ai {
     width: 0;
     /* 固定高度面板：与窗口等高，列内 body 滚动，面板本身永不拉长 */
     height: 100%;
-    /* 小窗口兜底：面板总宽不挤压正文到不可用（列内 overflow 裁切，仍可滚轮增减） */
+    /* 小窗口兜底：栏宽不挤压正文到不可用（钳制 + 列内 overflow 滚动，不再裁切） */
     max-width: calc(100vw - var(--tree-w) - var(--rail-w) - 160px);
     flex: none;
     display: flex;
@@ -73,17 +113,47 @@
     width: var(--right-w);
     border-left-color: var(--line);
   }
+  /* 拖拽期间跳过宽度过渡，松手再恢复 */
+  .ai.resizing {
+    transition: none;
+  }
   .col {
+    position: relative; /* resize-handle 绝对定位锚点 */
     flex: none;
+    /* 宽填满 .ai 内容盒（.ai 含 1px 左边线）：栏宽唯一来源是 --right-w，
+       栏不再自带宽度——否则 1px 边线会把栏挤出容器（P1 类裁切）。 */
+    width: 100%;
     height: 100%;
     min-height: 0;
     display: flex;
     flex-direction: column;
     background: var(--panel);
-    border-right: 1px solid transparent;
   }
-  .col:not(:last-child) {
-    border-right-color: var(--line);
+  .resize-handle {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 5px; /* 4-6px 热区，落 5px */
+    cursor: col-resize;
+    z-index: 2;
+    /* 透明热区：hover / 拖拽时由 ::after 画 1px 视觉线 */
+    background: transparent;
+    touch-action: none;
+  }
+  .resize-handle::after {
+    content: '';
+    position: absolute;
+    left: 2px;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: transparent;
+    transition: background var(--t-hover);
+  }
+  .resize-handle:hover::after,
+  .ai.resizing .resize-handle::after {
+    background: var(--accent);
   }
   .head {
     flex: none;

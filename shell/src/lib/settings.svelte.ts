@@ -12,12 +12,30 @@ import { tauriInvoke } from './core.js';
 
 export type ApprovalMode = 'ask' | 'auto' | 'yolo';
 
+/** 单个模型预设（D4）：id 由壳生成并保持稳定；name 仅展示。 */
+export interface AppLlmPreset {
+  id: string;
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
+/** 用途→预设 id 分配（D4）：未指定的用途回退第一预设（core 侧规则）。 */
+export interface AppLlmAssign {
+  writing?: string;
+  background?: string;
+  review?: string;
+}
+
 /** 应用级 LLM 配置（与 Rust AppConfig 的 llm 字段对应；空串=回落环境变量）。 */
 export interface AppLlmShape {
   baseUrl: string;
   apiKey: string;
   model: string;
   modelCheap: string;
+  presets?: AppLlmPreset[];
+  assign?: AppLlmAssign;
 }
 
 /** 应用级配置（config.json）：workDir 空串=默认目录；works=作品注册表（绝对路径列表）。 */
@@ -100,6 +118,10 @@ class SettingsStore {
   appApiKey = $state('');
   appModel = $state('');
   appModelCheap = $state('');
+  /** 模型预设列表（D4）：非空时优先走预设分配，旧四字段仅作无预设时的兼容回退。 */
+  appLlmPresets = $state<AppLlmPreset[]>([]);
+  /** 用途→预设 id 分配（D4）。 */
+  appLlmAssign = $state<AppLlmAssign>({});
   /** 当前生效值/来源（config/env/default）；null=尚未加载（非 Tauri 环境）。 */
   configStatus = $state<ConfigStatus | null>(null);
   saving = $state(false);
@@ -185,6 +207,45 @@ class SettingsStore {
     this.persist();
   }
 
+  // ---------- 模型预设（D4：多预设 + 按用途分配） ----------
+
+  /** 生成短随机字母数字后缀（nanoid 风格，本地够用）。 */
+  private randomSuffix(): string {
+    return Math.random().toString(36).slice(2, 8).toUpperCase();
+  }
+
+  /** 新预设 id：slug 化 name（大写、非字母数字→-），空名/全符号回落 PRESET，再拼随机后缀防撞。 */
+  presetIdFrom(name: string): string {
+    const slug = name
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 20);
+    return `${slug || 'PRESET'}-${this.randomSuffix()}`;
+  }
+
+  /** 添加一个空预设并返回其 id。 */
+  addLlmPreset(name = ''): string {
+    const id = this.presetIdFrom(name);
+    this.appLlmPresets.push({ id, name, baseUrl: '', apiKey: '', model: '' });
+    return id;
+  }
+
+  /** 删除预设；引用它的用途分配一并清掉，避免指向悬空 id。 */
+  removeLlmPreset(id: string): void {
+    this.appLlmPresets = this.appLlmPresets.filter((p) => p.id !== id);
+    for (const purpose of ['writing', 'background', 'review'] as const) {
+      if (this.appLlmAssign[purpose] === id) delete this.appLlmAssign[purpose];
+    }
+  }
+
+  /** 设置用途→预设 id；undefined 清空该用途分配（回退第一预设）。 */
+  setLlmAssign(purpose: keyof AppLlmAssign, presetId: string | undefined): void {
+    if (presetId) this.appLlmAssign[purpose] = presetId;
+    else delete this.appLlmAssign[purpose];
+  }
+
   // ---------- 应用级配置（config.json，Tauri 侧持久化） ----------
 
   /** 启动时加载：拉 config_status（已存配置 + 各字段生效值/来源）。非 Tauri 环境静默跳过。 */
@@ -205,19 +266,51 @@ class SettingsStore {
       this.appApiKey = s.config.llm?.apiKey ?? '';
       this.appModel = s.config.llm?.model ?? '';
       this.appModelCheap = s.config.llm?.modelCheap ?? '';
+      this.appLlmPresets = s.config.llm?.presets ?? [];
+      this.appLlmAssign = s.config.llm?.assign ?? {};
       this.appError = null;
     } catch (err) {
       this.appError = `读取配置失败：${err instanceof Error ? err.message : String(err)}`;
     }
   }
 
-  /** 保存应用级配置（作品目录 + 作品注册表 + LLM 四字段，明文存本机 config.json）；保存后需重启 core 生效。 */
+  /** 保存应用级配置（作品目录 + 作品注册表 + LLM 预设/回退字段，明文存本机 config.json）；保存后需重启 core 生效。 */
   async saveAppConfig(): Promise<boolean> {
     const invoke = tauriInvoke();
     if (!invoke) {
       this.appError = '应用配置仅 Tauri 环境支持';
       return false;
     }
+    // 保存前校验：预设 id 非空唯一、四个输入非空；assign 只能指向已存在的预设 id。
+    const ids = new Set<string>();
+    for (const p of this.appLlmPresets) {
+      if (!p.id.trim()) {
+        this.appError = '模型预设 id 不能为空';
+        return false;
+      }
+      if (ids.has(p.id)) {
+        this.appError = `模型预设 id 重复：${p.id}`;
+        return false;
+      }
+      ids.add(p.id);
+      if (!p.name.trim() || !p.baseUrl.trim() || !p.apiKey.trim() || !p.model.trim()) {
+        this.appError = `预设「${p.name.trim() || p.id}」存在空字段：名称/Base URL/API Key/模型 均必填`;
+        return false;
+      }
+    }
+    const purposeNames: Record<keyof AppLlmAssign, string> = {
+      writing: '写作档',
+      background: '后台档',
+      review: '审阅档',
+    };
+    for (const purpose of ['writing', 'background', 'review'] as const) {
+      const pid = this.appLlmAssign[purpose];
+      if (pid && !ids.has(pid)) {
+        this.appError = `${purposeNames[purpose]}指向不存在的预设：${pid}`;
+        return false;
+      }
+    }
+
     this.saving = true;
     this.appError = null;
     try {
@@ -230,6 +323,8 @@ class SettingsStore {
             apiKey: this.appApiKey,
             model: this.appModel,
             modelCheap: this.appModelCheap,
+            presets: this.appLlmPresets,
+            assign: this.appLlmAssign,
           },
         },
       });

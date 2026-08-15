@@ -12,6 +12,12 @@
     { mode: 'yolo', name: 'yolo · 完全放手', desc: '全部自动放行。所有写入仍强制事前快照（B4 不受模式影响）。' },
   ];
 
+  const ASSIGNS: { purpose: 'writing' | 'background' | 'review'; name: string }[] = [
+    { purpose: 'writing', name: '写作档' },
+    { purpose: 'background', name: '后台档' },
+    { purpose: 'review', name: '审阅档' },
+  ];
+
   const SRC_LABEL: Record<ResolvedField['source'], string> = {
     config: '配置',
     env: '环境变量',
@@ -94,7 +100,72 @@
 </div>
 
 <div class="group">
-  <div class="label">模 型 配 置（BYOK 双档）</div>
+  <div class="label">模 型 预 设（按用途分配）</div>
+  {#each settings.appLlmPresets as preset, i (preset.id)}
+    <div class="preset-card">
+      <div class="preset-head">
+        <span class="preset-title">{preset.name || `预设 ${i + 1}`}</span>
+        <button class="btn mini" onclick={() => settings.removeLlmPreset(preset.id)}>删除</button>
+      </div>
+      <div class="row">
+        <div class="r-label">名称</div>
+        <input class="text" bind:value={preset.name} placeholder="如：主笔模型" />
+      </div>
+      <div class="row">
+        <div class="r-label">Base URL</div>
+        <input class="text" bind:value={preset.baseUrl} placeholder="https://…/v1" />
+      </div>
+      <div class="row">
+        <div class="r-label">API Key</div>
+        <input class="text" type="password" bind:value={preset.apiKey} placeholder="sk-…" />
+      </div>
+      <div class="row">
+        <div class="r-label">模型</div>
+        <input class="text" bind:value={preset.model} placeholder="模型 id" />
+      </div>
+    </div>
+  {/each}
+  <div class="row-inline">
+    <button class="btn" onclick={() => settings.addLlmPreset()}>+ 添加预设</button>
+  </div>
+
+  <div class="sub-label">用途分配</div>
+  {#each ASSIGNS as a (a.purpose)}
+    <div class="row inline">
+      <span class="r-label">{a.name}</span>
+      <select
+        class="inline-sel"
+        value={settings.appLlmAssign[a.purpose] ?? ''}
+        onchange={(e) => settings.setLlmAssign(a.purpose, e.currentTarget.value || undefined)}
+      >
+        <option value="">未指定（回退第一预设）</option>
+        {#each settings.appLlmPresets as p (p.id)}
+          <option value={p.id}>{p.name || p.id}</option>
+        {/each}
+      </select>
+    </div>
+  {/each}
+
+  <div class="row-inline">
+    <button class="btn primary" disabled={settings.saving} onclick={() => void settings.saveAppConfig()}>
+      {settings.saving ? '保存中…' : '保存配置'}
+    </button>
+    <button class="btn" disabled={settings.restarting || settings.saving} onclick={() => void settings.restartCore()}>
+      {settings.restarting ? '重启中…' : '立即重启 core'}
+    </button>
+  </div>
+  {#if settings.appNotice}
+    <div class="status ok-line"><span>{settings.appNotice}</span><button onclick={() => settings.dismissAppNotice()} aria-label="关闭">×</button></div>
+  {/if}
+  {#if settings.appError}
+    <div class="status err-line"><span>{settings.appError}</span><button onclick={() => settings.dismissAppError()} aria-label="关闭">×</button></div>
+  {/if}
+  <div class="note">每个预设的 名称/Base URL/API Key/模型 均必填，保存前会校验。API Key 明文存储于本机应用数据目录（config.json），纯本地单用户使用。保存后点「立即重启 core」生效，无需重启应用。</div>
+</div>
+
+<div class="group">
+  <div class="label">模 型 配 置（兼容回退）</div>
+  <div class="r-desc">以下四字段仅在「无任何预设」时生效：写作档→LLM_MODEL，后台/审阅档→LLM_MODEL_CHEAP（缺省同写作档）。已配置预设时忽略以下字段。</div>
   <div class="row">
     <div class="r-label">Base URL</div>
     <input class="text" placeholder={ph(settings.configStatus?.baseUrl, '回落环境变量 LLM_BASE_URL')} bind:value={settings.appBaseUrl} />
@@ -111,21 +182,6 @@
     <div class="r-label">后台档模型（便宜）</div>
     <input class="text" placeholder={ph(settings.configStatus?.modelCheap, '回落环境变量 LLM_MODEL_CHEAP，再缺省同写作档')} bind:value={settings.appModelCheap} />
   </div>
-  <div class="row-inline">
-    <button class="btn primary" disabled={settings.saving} onclick={() => void settings.saveAppConfig()}>
-      {settings.saving ? '保存中…' : '保存配置'}
-    </button>
-    <button class="btn" disabled={settings.restarting || settings.saving} onclick={() => void settings.restartCore()}>
-      {settings.restarting ? '重启中…' : '立即重启 core'}
-    </button>
-  </div>
-  {#if settings.appNotice}
-    <div class="status ok-line"><span>{settings.appNotice}</span><button onclick={() => settings.dismissAppNotice()} aria-label="关闭">×</button></div>
-  {/if}
-  {#if settings.appError}
-    <div class="status err-line"><span>{settings.appError}</span><button onclick={() => settings.dismissAppError()} aria-label="关闭">×</button></div>
-  {/if}
-  <div class="note">API Key 明文存储于本机应用数据目录（config.json），纯本地单用户使用。模型/作品目录是 core 启动时读取的：保存配置后点「立即重启 core」即可生效，无需重启应用。</div>
 </div>
 
 <div class="group">
@@ -425,5 +481,39 @@
     font-size: 11px;
     color: var(--muted);
     line-height: 1.7;
+  }
+  .sub-label {
+    margin: 12px 0 6px;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    color: var(--muted);
+  }
+  .preset-card {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 9px 11px;
+    margin-bottom: 8px;
+    background: color-mix(in srgb, var(--panel) 55%, transparent);
+  }
+  .preset-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .preset-title {
+    font-size: 12.5px;
+    font-weight: 600;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .btn.mini {
+    height: 22px;
+    padding: 0 8px;
+    font-size: 11px;
+    flex: none;
   }
 </style>

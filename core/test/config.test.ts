@@ -12,9 +12,26 @@ import {
   getRuntimeFilePath,
   loadLlmConfig,
   MIN_NODE_MAJOR,
+  modelForPurpose,
+  normalizePresetId,
+  scanLlmAssign,
+  scanLlmPresets,
 } from '../src/config.js';
 
 const FULL_ENV = { LLM_BASE_URL: 'http://127.0.0.1:11434/v1', LLM_API_KEY: 'k', LLM_MODEL: 'm1', LLM_MODEL_CHEAP: 'm2' };
+
+/** 三个预设：main-writer / bg-helper / reviewer；归一化后依次为 MAIN_WRITER / BG_HELPER / REVIEWER。 */
+const PRESET_ENV = {
+  LLM_PRESET_main_writer_BASE_URL: 'http://w/v1',
+  LLM_PRESET_main_writer_API_KEY: 'kw',
+  LLM_PRESET_main_writer_MODEL: 'writer-m',
+  'LLM_PRESET_bg-helper_BASE_URL': 'http://b/v1',
+  'LLM_PRESET_bg-helper_API_KEY': 'kb',
+  'LLM_PRESET_bg-helper_MODEL': 'bg-m',
+  LLM_PRESET_reviewer_BASE_URL: 'http://r/v1',
+  LLM_PRESET_reviewer_API_KEY: 'kr',
+  LLM_PRESET_reviewer_MODEL: 'review-m',
+};
 
 describe('config', () => {
   it('LLM 三要素缺任一即抛错，不静默降级', () => {
@@ -38,11 +55,94 @@ describe('config', () => {
     expect(() => getLlmTimeoutSeconds({ LLM_TIMEOUT_SECONDS: 'abc' })).toThrow(/LLM_TIMEOUT_SECONDS 取值非法/);
   });
 
-  it('双档模型映射：writing 用 LLM_MODEL，background 用 LLM_MODEL_CHEAP', () => {
+  it('三档模型映射（legacy）：writing 用 LLM_MODEL，background/review 用 LLM_MODEL_CHEAP', () => {
     const config = loadLlmConfig(FULL_ENV);
     const modelId = (model: { modelId: string }): string => model.modelId;
     expect(modelId(createModelForTier(config, 'writing') as { modelId: string })).toBe('m1');
     expect(modelId(createModelForTier(config, 'background') as { modelId: string })).toBe('m2');
+    expect(modelId(createModelForTier(config, 'review') as { modelId: string })).toBe('m2');
+  });
+
+  it('预设 id 归一化：大写、非字母数字→下划线', () => {
+    expect(normalizePresetId('main-writer')).toBe('MAIN_WRITER');
+    expect(normalizePresetId('Reviewer 2')).toBe('REVIEWER_2');
+    expect(normalizePresetId('already_NORM')).toBe('ALREADY_NORM');
+  });
+
+  it('预设表解析：LLM_PRESET_<ID>_* 按归一化 id 组表', () => {
+    const presets = scanLlmPresets(PRESET_ENV);
+    expect([...presets.keys()]).toEqual(['MAIN_WRITER', 'BG_HELPER', 'REVIEWER']);
+    expect(presets.get('MAIN_WRITER')).toEqual({
+      id: 'MAIN_WRITER',
+      baseUrl: 'http://w/v1',
+      apiKey: 'kw',
+      model: 'writer-m',
+    });
+    expect(presets.get('BG_HELPER')).toEqual({
+      id: 'BG_HELPER',
+      baseUrl: 'http://b/v1',
+      apiKey: 'kb',
+      model: 'bg-m',
+    });
+  });
+
+  it('预设表解析：归一化后撞名 / 缺字段均启动报错', () => {
+    expect(() =>
+      scanLlmPresets({
+        LLM_PRESET_a_b_BASE_URL: 'http://x',
+        LLM_PRESET_a_b_API_KEY: 'k',
+        LLM_PRESET_a_b_MODEL: 'm1',
+        LLM_PRESET_a_b_BASE_URL_EXTRA: 'x',
+        'LLM_PRESET_a-b_BASE_URL': 'http://y',
+        'LLM_PRESET_a-b_API_KEY': 'k',
+        'LLM_PRESET_a-b_MODEL': 'm2',
+      }),
+    ).toThrow(/归一化后撞名/);
+    expect(() => scanLlmPresets({ LLM_PRESET_x_BASE_URL: 'http://x' })).toThrow(/缺字段/);
+  });
+
+  it('assign 解析：有效用途收表，空白值忽略，未知用途忽略', () => {
+    const assign = scanLlmAssign({
+      LLM_ASSIGN_WRITING: 'main-writer',
+      LLM_ASSIGN_BACKGROUND: 'bg-helper',
+      LLM_ASSIGN_REVIEW: '   ',
+      LLM_ASSIGN_OTHER: 'ignored',
+    });
+    expect(assign.get('writing')).toBe('main-writer');
+    expect(assign.get('background')).toBe('bg-helper');
+    expect(assign.has('review')).toBe(false);
+  });
+
+  it('modelForPurpose：有预设走 assign，未分配用途回退第一预设，assign 指向不存在 id 报错', () => {
+    const modelId = (model: { modelId: string }): string => model.modelId;
+    const env = {
+      ...PRESET_ENV,
+      LLM_ASSIGN_WRITING: 'main-writer',
+      LLM_ASSIGN_BACKGROUND: 'bg-helper',
+      LLM_ASSIGN_REVIEW: 'reviewer',
+    };
+    expect(modelId(modelForPurpose(env, 'writing') as { modelId: string })).toBe('writer-m');
+    expect(modelId(modelForPurpose(env, 'background') as { modelId: string })).toBe('bg-m');
+    expect(modelId(modelForPurpose(env, 'review') as { modelId: string })).toBe('review-m');
+
+    // 未分配用途：回退第一预设（按环境变量扫描顺序）
+    expect(modelId(modelForPurpose(PRESET_ENV, 'review') as { modelId: string })).toBe('writer-m');
+
+    expect(() => modelForPurpose({ ...PRESET_ENV, LLM_ASSIGN_REVIEW: 'missing' }, 'review')).toThrow(
+      /LLM_ASSIGN_REVIEW 指向不存在的预设/,
+    );
+  });
+
+  it('modelForPurpose：无预设时完全按 legacy 四变量，缺变量维持报错语义', () => {
+    const modelId = (model: { modelId: string }): string => model.modelId;
+    expect(modelId(modelForPurpose(FULL_ENV, 'writing') as { modelId: string })).toBe('m1');
+    expect(modelId(modelForPurpose(FULL_ENV, 'background') as { modelId: string })).toBe('m2');
+    expect(modelId(modelForPurpose(FULL_ENV, 'review') as { modelId: string })).toBe('m2');
+    expect(() => modelForPurpose({ LLM_BASE_URL: 'http://x', LLM_API_KEY: 'k' }, 'writing')).toThrow();
+  });
+
+  it('modelForPurpose：同一配置只构建一次 LanguageModel（缓存复用）', () => {
+    expect(modelForPurpose(FULL_ENV, 'writing')).toBe(modelForPurpose(FULL_ENV, 'writing'));
   });
 
   it('.novel 目录与 MCP 命令的默认值及覆盖', () => {

@@ -30,6 +30,8 @@
 
   let booted = $state(false);
   let bootError = $state<string | null>(null);
+  /** D5 键盘速查卡开合（? 或 Ctrl+/）。 */
+  let helpOpen = $state(false);
 
   /** 连接 core 并初始化各 store + D2 握手 + 首屏数据加载；初次启动与 restart_core 后共用。 */
   async function connectAndBootCore(): Promise<void> {
@@ -78,8 +80,28 @@
 
   function onKeydown(e: KeyboardEvent): void {
     if (dialog.current) return; // 模态对话框打开时全局快捷键让位（Esc/Enter 由对话框消费）
+    // D2.4：Esc 在输入态（textarea/input/contentEditable）只 blur，不收起 AI 面板——
+    // 避免用户正在打字时被意外打断。
+    const t = e.target;
+    const inEditable =
+      t instanceof HTMLElement &&
+      (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable);
+    // D5：?（非输入态）或 Ctrl+/ 开关键盘速查卡。
+    if (((e.key === '?' || e.key === '？') && !inEditable) || ((e.ctrlKey || e.metaKey) && e.key === '/')) {
+      e.preventDefault();
+      helpOpen = !helpOpen;
+      return;
+    }
     if (e.key === 'Escape') {
+      if (inEditable) {
+        (t as HTMLElement).blur();
+        return;
+      }
       // 浮层/审批卡/面板逐级收起；审批卡 Esc 关闭后挂起卡仍在工具列可重新打开
+      if (helpOpen) {
+        helpOpen = false;
+        return;
+      }
       approval.active = null;
       ui.collapseAi();
     } else if (e.key === 'F8') {
@@ -100,12 +122,6 @@
     const t = e.target as HTMLElement;
     if (t.closest('[data-ai-zone], #approval-overlay')) return;
     if (ui.aiOpen) ui.collapseAi();
-  }
-
-  // 窄条滚轮：任意位置增减栏数（内容区滚动不受影响）
-  function onRailWheel(e: WheelEvent): void {
-    e.preventDefault();
-    ui.wheelAi(e.deltaY < 0 ? 1 : -1);
   }
 </script>
 
@@ -155,7 +171,7 @@
         <StagingDrawer />
       </section>
 
-      <div class="rail-wrap" data-ai-zone onwheel={onRailWheel}>
+      <div class="rail-wrap" data-ai-zone>
         <AiRail />
       </div>
       <div class="ai-wrap" data-ai-zone>
@@ -169,6 +185,22 @@
     {/if}
     <SnapshotToast />
     <DialogHost />
+    {#if helpOpen}
+      <!-- D5 键盘速查卡：? / Ctrl+/ 开合，Esc/点遮罩关闭 -->
+      <div class="help-mask" role="presentation" onmousedown={(e) => { if (e.target === e.currentTarget) helpOpen = false; }}>
+        <div class="help-card" role="dialog" aria-modal="true" aria-label="键盘快捷键">
+          <div class="help-title">键盘快捷键</div>
+          <div class="help-row"><span class="key">Ctrl+S</span><span>保存当前章</span></div>
+          <div class="help-row"><span class="key">Ctrl+J</span><span>开合 AI 面板</span></div>
+          <div class="help-row"><span class="key">F8</span><span>专注模式（只留编辑器）</span></div>
+          <div class="help-row"><span class="key">Esc</span><span>关闭浮层 / 收起面板（输入中只取消聚焦）</span></div>
+          <div class="help-row"><span class="key">Enter</span><span>发送（对话输入框）</span></div>
+          <div class="help-row"><span class="key">Shift+Enter</span><span>换行（对话输入框）</span></div>
+          <div class="help-row"><span class="key">双击</span><span>重命名（会话名 / 卷章名）</span></div>
+          <div class="help-row"><span class="key">? / Ctrl+/</span><span>本帮助</span></div>
+        </div>
+      </div>
+    {/if}
   </div>
 {/if}
 
@@ -186,6 +218,50 @@
     color: var(--danger);
     font-size: 13px;
     max-width: 70ch;
+  }
+  /* D5 键盘速查卡 */
+  .help-mask {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.28);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 90;
+  }
+  .help-card {
+    width: 340px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: var(--shadow-pop);
+    padding: 14px 16px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .help-title {
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 2px;
+  }
+  .help-row {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--ink);
+  }
+  .help-row .key {
+    flex: none;
+    width: 86px;
+    font-size: 11px;
+    color: var(--muted);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 1px 6px;
+    text-align: center;
+    background: color-mix(in srgb, var(--muted) 8%, transparent);
   }
   .app {
     height: 100%;

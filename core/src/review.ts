@@ -4,7 +4,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { streamText, type LanguageModel, type ToolSet } from 'ai';
 import { z } from 'zod';
-import { getLlmTimeoutSeconds } from './config.js';
+import { getLlmTimeoutSeconds, type Tier } from './config.js';
 import { HttpError, writeJson } from './http.js';
 
 export const reviewBodySchema = z.object({
@@ -14,7 +14,7 @@ export const reviewBodySchema = z.object({
 export type ReviewBody = z.infer<typeof reviewBodySchema>;
 
 export interface ReviewDeps {
-  modelForTier: (tier: 'writing' | 'background') => LanguageModel;
+  modelForTier: (tier: Tier) => LanguageModel;
   /** MCP 领域工具注册表；ledger_slice 从这里取。 */
   tools: ToolSet | undefined;
   /** MCP 当前是否可用；缺省视为可用（与工具代理口径一致）。 */
@@ -71,7 +71,7 @@ export async function handleReviewRequest(
 
     // 第二步：main 档模型一次性调用。用 streamText 收全量文本后统一解析（非 SSE）。
     const result = streamText({
-      model: deps.modelForTier('writing'),
+      model: deps.modelForTier('review'),
       system: SYSTEM_PROMPT,
       prompt: slice,
       abortSignal: AbortSignal.any([abort.signal, timeoutSignal]),

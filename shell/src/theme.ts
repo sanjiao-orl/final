@@ -56,7 +56,7 @@ export const palette: Record<'light' | 'dark', ThemePalette> = {
 export const body = {
   fontFamily: '"Source Han Serif SC", "思源宋体", "Noto Serif CJK SC", "Songti SC", serif',
   fontSize: '17px',
-  lineHeight: '1.75',
+  lineHeight: '1.6',
   /** 段首缩进（排版层实现，正文不落全角空格）。 */
   indent: '2em',
   /** 行长 ≤38 字（17px × 38 ≈ 646px，列宽 720 内留白）。 */
@@ -68,11 +68,11 @@ export const uiFont = '"Microsoft YaHei", "PingFang SC", system-ui, sans-serif';
 /**
  * 默认字号（17px）下正文行高（px）= fontSize × lineHeight，取整对齐 .prose line-height。
  * Editor 选区浮动条按此基准定位行间隙；改字号时 lineHeight 应同步重算（见 applyTheme 的派生逻辑）。
- * 显式声明耦合：17 × 1.75 = 29.75 → 30。
+ * 显式声明耦合（v4 D5 行距校到 1.6 区间）：17 × 1.6 = 27.2 → 27。
  */
 const DEFAULT_FONT_SIZE = 17;
-const DEFAULT_LINE_RATIO = 1.75;
-const DEFAULT_LINE_PX = Math.round(DEFAULT_FONT_SIZE * DEFAULT_LINE_RATIO); // 30
+const DEFAULT_LINE_RATIO = 1.6;
+const DEFAULT_LINE_PX = Math.round(DEFAULT_FONT_SIZE * DEFAULT_LINE_RATIO); // 27
 
 /**
  * 给定字号按 lineHeight 比例派生 px 行高。Editor 用以在字号变化后保持选区浮动条贴行间隙。
@@ -105,7 +105,12 @@ export const layout = {
   selBarMinLeft: 8,
 };
 
-/** v3 AI 面板分栏：栏序固定，宽度（px）与原型一致；--right-w 由可见栏求和。 */
+/**
+ * v4 AI 面板：单栏切换 + 拖拽调宽——多栏求和裁切已从机制上消除。
+ * - order：栏 id 字面量来源（AiColId 推导）；栏序不再驱动叠加，但仍是规范列表。
+ * - width：各栏初始宽度（px），仅作 UiStore 冷启动默认值；运行时栏宽统一由 ui.colWidth 持有。
+ * --right-w 直接 = ui.colWidth（无求和）。
+ */
 export const aiColumns = {
   order: ['session', 'chat', 'tools', 'settings'] as const,
   width: { session: 280, chat: 320, tools: 280, settings: 300 } as Record<string, number>,

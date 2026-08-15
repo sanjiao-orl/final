@@ -35,6 +35,28 @@ struct LlmConfig {
   api_key: Option<String>,
   model: Option<String>,
   model_cheap: Option<String>,
+  presets: Option<Vec<LlmPreset>>,
+  assign: Option<LlmAssign>,
+}
+
+/// 单个模型预设（D4）：id 为稳定身份，其余字段可空=不注入环境变量。
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmPreset {
+  id: String,
+  name: Option<String>,
+  base_url: Option<String>,
+  api_key: Option<String>,
+  model: Option<String>,
+}
+
+/// 用途→预设 id 分配（D4）：未分配用途回落第一预设（core 侧规则）。
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmAssign {
+  writing: Option<String>,
+  background: Option<String>,
+  review: Option<String>,
 }
 
 /// 单字段当前生效值与来源（config/env/default），设置面板占位符展示用。
@@ -300,24 +322,62 @@ fn resolve_startup_paths(app: &tauri::AppHandle, cfg: &AppConfig) -> Result<(Pat
   Ok((work, Some(resource_dir)))
 }
 
+/// 预设 id 归一化（与 core 侧规则一致）：大写，非字母数字→下划线。
+fn normalize_preset_id(raw: &str) -> String {
+  raw
+    .to_uppercase()
+    .chars()
+    .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+    .collect()
+}
+
 /// 配置里的 LLM 字段转成 core 子进程环境变量覆盖：仅非空值（空=继承壳进程环境变量，即"环境变量档"）。
-fn llm_env_overrides(cfg: &AppConfig) -> Vec<(&'static str, String)> {
+/// legacy 四字段照旧注入；presets 非空时追加 LLM_PRESET_<ID>_* 与 LLM_ASSIGN_<PURPOSE>（只注非空）。
+fn llm_env_overrides(cfg: &AppConfig) -> Vec<(String, String)> {
   let Some(llm) = &cfg.llm else {
     return Vec::new();
   };
-  let mut out = Vec::new();
+  let mut out: Vec<(String, String)> = Vec::new();
   if let Some(v) = llm.base_url.as_deref().filter(|s| !s.trim().is_empty()) {
-    out.push(("LLM_BASE_URL", v.to_string()));
+    out.push(("LLM_BASE_URL".to_string(), v.to_string()));
   }
   if let Some(v) = llm.api_key.as_deref().filter(|s| !s.trim().is_empty()) {
-    out.push(("LLM_API_KEY", v.to_string()));
+    out.push(("LLM_API_KEY".to_string(), v.to_string()));
   }
   if let Some(v) = llm.model.as_deref().filter(|s| !s.trim().is_empty()) {
-    out.push(("LLM_MODEL", v.to_string()));
+    out.push(("LLM_MODEL".to_string(), v.to_string()));
   }
   if let Some(v) = llm.model_cheap.as_deref().filter(|s| !s.trim().is_empty()) {
-    out.push(("LLM_MODEL_CHEAP", v.to_string()));
+    out.push(("LLM_MODEL_CHEAP".to_string(), v.to_string()));
   }
+
+  if let Some(presets) = &llm.presets {
+    for preset in presets.iter().filter(|p| !p.id.trim().is_empty()) {
+      let id = normalize_preset_id(preset.id.trim());
+      if let Some(v) = preset.base_url.as_deref().filter(|s| !s.trim().is_empty()) {
+        out.push((format!("LLM_PRESET_{id}_BASE_URL"), v.to_string()));
+      }
+      if let Some(v) = preset.api_key.as_deref().filter(|s| !s.trim().is_empty()) {
+        out.push((format!("LLM_PRESET_{id}_API_KEY"), v.to_string()));
+      }
+      if let Some(v) = preset.model.as_deref().filter(|s| !s.trim().is_empty()) {
+        out.push((format!("LLM_PRESET_{id}_MODEL"), v.to_string()));
+      }
+    }
+  }
+
+  if let Some(assign) = &llm.assign {
+    for (purpose, id) in [
+      ("WRITING", assign.writing.as_deref()),
+      ("BACKGROUND", assign.background.as_deref()),
+      ("REVIEW", assign.review.as_deref()),
+    ] {
+      if let Some(v) = id.filter(|s| !s.trim().is_empty()) {
+        out.push((format!("LLM_ASSIGN_{purpose}"), v.to_string()));
+      }
+    }
+  }
+
   out
 }
 
@@ -732,6 +792,18 @@ mod tests {
         api_key: Some("sk-test-123".to_string()),
         model: Some("m1".to_string()),
         model_cheap: Some("m2".to_string()),
+        presets: Some(vec![LlmPreset {
+          id: "main-writer".to_string(),
+          name: Some("主笔".to_string()),
+          base_url: Some("https://w.example/v1".to_string()),
+          api_key: Some("sk-w".to_string()),
+          model: Some("writer-m".to_string()),
+        }]),
+        assign: Some(LlmAssign {
+          writing: Some("main-writer".to_string()),
+          background: None,
+          review: Some("main-writer".to_string()),
+        }),
       }),
     };
     write_config_at(&file, &cfg).expect("write");
@@ -752,6 +824,16 @@ mod tests {
     assert_eq!(llm.api_key.as_deref(), Some("sk-test-123"));
     assert_eq!(llm.model.as_deref(), Some("m1"));
     assert_eq!(llm.model_cheap.as_deref(), Some("m2"));
+    let presets = llm.presets.expect("presets");
+    assert_eq!(presets.len(), 1);
+    assert_eq!(presets[0].id, "main-writer");
+    assert_eq!(presets[0].name.as_deref(), Some("主笔"));
+    assert_eq!(presets[0].base_url.as_deref(), Some("https://w.example/v1"));
+    assert_eq!(presets[0].model.as_deref(), Some("writer-m"));
+    let assign = llm.assign.expect("assign");
+    assert_eq!(assign.writing.as_deref(), Some("main-writer"));
+    assert_eq!(assign.background.as_deref(), None);
+    assert_eq!(assign.review.as_deref(), Some("main-writer"));
 
     let _ = std::fs::remove_dir_all(&dir);
   }
@@ -766,12 +848,68 @@ mod tests {
         api_key: None,
         model: Some("m1".to_string()),
         model_cheap: Some("  ".to_string()),
+        presets: None,
+        assign: None,
       }),
       ..Default::default()
     };
     assert_eq!(
       llm_env_overrides(&cfg),
-      vec![("LLM_BASE_URL", "https://llm.example/v1".to_string()), ("LLM_MODEL", "m1".to_string())]
+      vec![
+        ("LLM_BASE_URL".to_string(), "https://llm.example/v1".to_string()),
+        ("LLM_MODEL".to_string(), "m1".to_string())
+      ]
+    );
+  }
+
+  /// D4：presets 非空时按归一化 id 注入 LLM_PRESET_<ID>_*，assign 只注非空。
+  #[test]
+  fn llm_env_overrides_injects_presets_and_non_empty_assign() {
+    let cfg = AppConfig {
+      llm: Some(LlmConfig {
+        base_url: Some("https://legacy.example/v1".to_string()),
+        api_key: Some("sk-legacy".to_string()),
+        model: Some("legacy-m".to_string()),
+        model_cheap: None,
+        presets: Some(vec![
+          LlmPreset {
+            id: "main-writer".to_string(),
+            name: Some("主笔".to_string()),
+            base_url: Some("https://w.example/v1".to_string()),
+            api_key: Some("sk-w".to_string()),
+            model: Some("writer-m".to_string()),
+          },
+          LlmPreset {
+            id: "bg helper".to_string(),
+            name: Some("后台".to_string()),
+            base_url: Some("https://b.example/v1".to_string()),
+            api_key: Some("sk-b".to_string()),
+            model: Some("bg-m".to_string()),
+          },
+        ]),
+        assign: Some(LlmAssign {
+          writing: Some("main-writer".to_string()),
+          background: Some("  ".to_string()),
+          review: Some("bg helper".to_string()),
+        }),
+      }),
+      ..Default::default()
+    };
+    assert_eq!(
+      llm_env_overrides(&cfg),
+      vec![
+        ("LLM_BASE_URL".to_string(), "https://legacy.example/v1".to_string()),
+        ("LLM_API_KEY".to_string(), "sk-legacy".to_string()),
+        ("LLM_MODEL".to_string(), "legacy-m".to_string()),
+        ("LLM_PRESET_MAIN_WRITER_BASE_URL".to_string(), "https://w.example/v1".to_string()),
+        ("LLM_PRESET_MAIN_WRITER_API_KEY".to_string(), "sk-w".to_string()),
+        ("LLM_PRESET_MAIN_WRITER_MODEL".to_string(), "writer-m".to_string()),
+        ("LLM_PRESET_BG_HELPER_BASE_URL".to_string(), "https://b.example/v1".to_string()),
+        ("LLM_PRESET_BG_HELPER_API_KEY".to_string(), "sk-b".to_string()),
+        ("LLM_PRESET_BG_HELPER_MODEL".to_string(), "bg-m".to_string()),
+        ("LLM_ASSIGN_WRITING".to_string(), "main-writer".to_string()),
+        ("LLM_ASSIGN_REVIEW".to_string(), "bg helper".to_string()),
+      ]
     );
   }
 

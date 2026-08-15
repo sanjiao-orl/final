@@ -63,7 +63,7 @@ describe('ChatStore', () => {
     expect(chat.sessionId).toBe('s1');
     expect(chat.streaming).toBe(false);
     expect(chatStream).toHaveBeenCalledWith(
-      { text: '帮我看看', workDir: 'C:/works/demo', scope: '' },
+      { text: '帮我看看', workDir: 'C:/works/demo', scope: '', tier: 'writing' },
       expect.anything(),
       expect.anything(),
     );
@@ -79,7 +79,26 @@ describe('ChatStore', () => {
     chat.init(client);
     chat.sessionId = 's1';
     await chat.send('继续');
-    expect(chatStream).toHaveBeenCalledWith({ sessionId: 's1', text: '继续', workDir: '' }, expect.anything(), expect.anything());
+    expect(chatStream).toHaveBeenCalledWith({ sessionId: 's1', text: '继续', workDir: '', tier: 'writing' }, expect.anything(), expect.anything());
+  });
+
+  it('send：tier=background 时请求带 background 档', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_body: unknown, h: ChatStreamHandlers) => {
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const client = streamClient({ chatStream });
+    const chat = new ChatStore();
+    chat.init(client);
+    chat.setTier('background');
+    expect(chat.tier).toBe('background');
+    await chat.send('用便宜档跑');
+    expect(chatStream).toHaveBeenCalledWith(
+      { text: '用便宜档跑', workDir: '', scope: '', tier: 'background' },
+      expect.anything(),
+      expect.anything(),
+    );
+    chat.setTier('writing');
+    expect(chat.tier).toBe('writing');
   });
 
   it('send：空文本或流式进行中不发请求', async () => {
@@ -452,5 +471,97 @@ describe('ChatStore · B6 审批联动', () => {
   it('abortStream：流式未开始时调用为 no-op', async () => {
     const chat = new ChatStore();
     expect(() => chat.abortStream()).not.toThrow();
+  });
+});
+
+describe('ChatStore · D3 分组与定位', () => {
+  it('focusToolsGroupKey 初始为 null，可设可清', () => {
+    const chat = new ChatStore();
+    expect(chat.focusToolsGroupKey).toBeNull();
+    chat.focusToolsGroupKey = '3';
+    expect(chat.focusToolsGroupKey).toBe('3');
+    chat.focusToolsGroupKey = null;
+    expect(chat.focusToolsGroupKey).toBeNull();
+  });
+
+  it('toolGroups：按 assistant 消息聚合，组头=前一条 user 消息前 20 字', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+      h.onToolCall?.({ id: 'a1', name: 'word_count', args: { relPath: 'a.md' } });
+      h.onToolResult?.({ id: 'a1', name: 'word_count', result: { total: 10 } });
+      h.onToolCall?.({ id: 'a2', name: 'search_content', args: { query: '林渡' } });
+      h.onToolResult?.({ id: 'a2', name: 'search_content', result: [] });
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const chat = new ChatStore();
+    chat.init(streamClient({ chatStream }));
+    await chat.send('帮我查一下字数并搜主角名');
+    expect(chat.toolGroups).toHaveLength(1);
+    const g = chat.toolGroups[0]!;
+    expect(g.key).toBe('1'); // assistant 在 messages 下标 1
+    expect(g.userPrompt).toBe('帮我查一下字数并搜主角名'); // 不足 20 字，原样
+    expect(g.tools.map((t) => t.name)).toEqual(['word_count', 'search_content']);
+    expect(g.hasPending).toBe(false);
+  });
+
+  it('toolGroups：多条含工具的 assistant 消息 → 多组；userPrompt 跟随各自前一条', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+      h.onToolCall?.({ id: 'a1', name: 'word_count', args: {} });
+      h.onToolResult?.({ id: 'a1', name: 'word_count', result: { total: 10 } });
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const chat = new ChatStore();
+    chat.init(streamClient({ chatStream }));
+    await chat.send('第一轮：查字数');
+    // 模拟第二轮：push 新 user + assistant + tool（直接操作 store，绕过 send）
+    chat.messages.push({ role: 'user', content: '第二轮：再来一次' });
+    chat.messages.push({
+      role: 'assistant',
+      content: '',
+      tools: [{ id: 'b1', name: 'list_structure', args: {}, state: 'running' }],
+    });
+    expect(chat.toolGroups).toHaveLength(2);
+    expect(chat.toolGroups[0]!.key).toBe('1');
+    expect(chat.toolGroups[0]!.userPrompt).toBe('第一轮：查字数');
+    expect(chat.toolGroups[1]!.key).toBe('3');
+    expect(chat.toolGroups[1]!.userPrompt).toBe('第二轮：再来一次');
+    expect(chat.toolGroups[1]!.hasPending).toBe(true); // running 计入
+  });
+
+  it('toolGroups：userPrompt 截断到 20 字', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+      h.onToolCall?.({ id: 'a1', name: 'word_count', args: {} });
+      h.onToolResult?.({ id: 'a1', name: 'word_count', result: {} });
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const chat = new ChatStore();
+    chat.init(streamClient({ chatStream }));
+    await chat.send('一二三四五六七八九十一二三四五六七八九十'); // 22 字
+    expect(chat.toolGroups[0]!.userPrompt).toBe('一二三四五六七八九十一二三四五六七八九十'); // 前 20
+    expect(chat.toolGroups[0]!.userPrompt.length).toBe(20);
+  });
+
+  it('toolStarted：send 中产生的 ToolLine 可查到起始时间；未记录的 tool 返回 undefined', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+      h.onToolCall?.({ id: 'a1', name: 'word_count', args: {} });
+      h.onToolResult?.({ id: 'a1', name: 'word_count', result: {} });
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const chat = new ChatStore();
+    chat.init(streamClient({ chatStream }));
+    const before = Date.now();
+    await chat.send('测耗时');
+    const after = Date.now();
+    const tool = chat.messages[1]!.tools![0]!;
+    const t = chat.toolStarted(tool);
+    expect(t).toBeDefined();
+    expect(t!).toBeGreaterThanOrEqual(before);
+    expect(t!).toBeLessThanOrEqual(after);
+    // 未通过 send 产生的 tool（外部 push）查不到
+    const fake: import('./chat.svelte.js').ToolLine = {
+      id: 'fake',
+      name: 'noop',
+      state: 'done',
+    };
+    expect(chat.toolStarted(fake)).toBeUndefined();
   });
 });

@@ -1,122 +1,250 @@
-// ui.svelte.ts 单测：v3 AI 面板分栏状态机——点窄条图标开/关栏、滚轮增减栏数、设置栏切换式、专注模式。
+// ui.svelte.ts 单测：v4 AI 面板状态机——单栏切换、拖拽钳制、localStorage 持久化、专注独立。
+// 不再覆盖 ui.cols / ui.wheelAi / preSettingsCols（已废弃并删除）。
 import { beforeEach, describe, expect, it } from 'vitest';
 import { UiStore } from './ui.svelte.js';
+import { aiColumns } from '../theme.js';
+
+// node 测试环境无 localStorage：polyfill 一个最小可写实现（参照 work.svelte.test.ts 的同款做法）。
+const _store = new Map<string, string>();
+const _localStorage = {
+  getItem: (k: string): string | null => _store.get(k) ?? null,
+  setItem: (k: string, v: string): void => {
+    _store.set(k, v);
+  },
+  removeItem: (k: string): void => {
+    _store.delete(k);
+  },
+  clear: (): void => {
+    _store.clear();
+  },
+  key: (i: number): string | null => [..._store.keys()][i] ?? null,
+  get length(): number {
+    return _store.size;
+  },
+};
+Object.defineProperty(globalThis, 'localStorage', { configurable: true, get: () => _localStorage });
 
 beforeEach(() => {
-  // syncWidth 只在浏览器环境写 CSS 变量，node 环境跳过
+  _store.clear();
 });
 
-describe('UiStore 分栏状态机', () => {
-  it('初始：收起、默认 2 栏（会话+对话）', () => {
+describe('UiStore 初始状态', () => {
+  it('默认收起：activeCol=null, aiOpen=false, isOpen 全部 false', () => {
     const ui = new UiStore();
+    expect(ui.activeCol).toBeNull();
     expect(ui.aiOpen).toBe(false);
-    expect(ui.cols).toEqual(['session', 'chat']);
-    expect(ui.isOpen('chat')).toBe(false); // 收起时不可见
+    expect(ui.isOpen('session')).toBe(false);
+    expect(ui.isOpen('chat')).toBe(false);
+    expect(ui.isOpen('tools')).toBe(false);
+    expect(ui.isOpen('settings')).toBe(false);
+    expect(ui.colWidth).toBeGreaterThanOrEqual(280);
   });
 
-  it('点窄条图标：收起 → 展开 2 栏（该栏 + 左邻；首位取右邻）', () => {
+  it('默认 colWidth 取 theme 默认 chat 栏宽（来自 aiColumns.width.chat）', () => {
     const ui = new UiStore();
-    ui.toggleCol('tools'); // 左邻 chat
+    expect(ui.colWidth).toBe(aiColumns.width.chat);
+  });
+
+  it('已废弃 API 不再存在：cols / wheelAi / preSettingsCols', () => {
+    const ui = new UiStore() as unknown as Record<string, unknown>;
+    expect('cols' in ui).toBe(false);
+    expect('wheelAi' in ui).toBe(false);
+    expect('preSettingsCols' in ui).toBe(false);
+  });
+});
+
+describe('UiStore 单栏切换', () => {
+  it('showCol(id)：打开并切到该栏；isOpen 只对当前栏为 true', () => {
+    const ui = new UiStore();
+    ui.showCol('tools');
     expect(ui.aiOpen).toBe(true);
-    expect(ui.cols).toEqual(['chat', 'tools']);
-    ui.collapseAi();
-
-    const ui2 = new UiStore();
-    ui2.toggleCol('session'); // 首位取右邻 chat
-    expect(ui2.cols).toEqual(['session', 'chat']);
+    expect(ui.activeCol).toBe('tools');
+    expect(ui.isOpen('tools')).toBe(true);
+    expect(ui.isOpen('chat')).toBe(false);
+    expect(ui.isOpen('settings')).toBe(false);
   });
 
-  it('点已显栏：>2 栏减栏；仅 2 栏 = 收起', () => {
+  it('toggleCol(id)：同栏再点 = 收起；其他栏点 = 切过去', () => {
     const ui = new UiStore();
-    ui.toggleCol('tools'); // chat+tools
-    ui.toggleCol('session'); // session+chat+tools
-    expect(ui.cols).toEqual(['session', 'chat', 'tools']);
-    ui.toggleCol('tools'); // 减栏
-    expect(ui.cols).toEqual(['session', 'chat']);
-    ui.toggleCol('chat'); // 仅 2 栏 → 收起
+    ui.toggleCol('chat'); // 收起 → 打开
+    expect(ui.activeCol).toBe('chat');
+    expect(ui.aiOpen).toBe(true);
+
+    ui.toggleCol('chat'); // 同栏再点 → 收起
+    expect(ui.activeCol).toBeNull();
     expect(ui.aiOpen).toBe(false);
+
+    ui.toggleCol('tools'); // 收起 → 切到 tools
+    expect(ui.activeCol).toBe('tools');
+    expect(ui.aiOpen).toBe(true);
+
+    ui.toggleCol('session'); // 切到 session
+    expect(ui.activeCol).toBe('session');
+    expect(ui.isOpen('tools')).toBe(false);
   });
 
-  it('点未显栏：增栏（栏序固定排序）', () => {
+  it('切换栏不重置 colWidth（统一运行时宽）', () => {
     const ui = new UiStore();
-    ui.toggleCol('session'); // session+chat
+    ui.toggleCol('chat');
+    ui.setColWidth(420);
+    expect(ui.colWidth).toBe(420);
     ui.toggleCol('tools');
-    expect(ui.cols).toEqual(['session', 'chat', 'tools']);
-  });
-
-  it('滚轮：上滚右端增栏、下滚右端减栏；2 栏下滚收起；收起上滚开 2 栏；收起下滚不动', () => {
-    const ui = new UiStore();
-    ui.wheelAi(1); // 收起上滚 → session+chat
-    expect(ui.aiOpen).toBe(true);
-    expect(ui.cols).toEqual(['session', 'chat']);
-
-    ui.wheelAi(1); // 增 tools
-    expect(ui.cols).toEqual(['session', 'chat', 'tools']);
-    ui.wheelAi(1); // 增至设置栏 → 切换式单栏设置
-    expect(ui.cols).toEqual(['settings']);
-    ui.wheelAi(1); // 到顶不动
-    expect(ui.cols).toEqual(['settings']);
-
-    ui.wheelAi(-1); // 设置单栏下滚 → 收起并还原进设置前的组合
-    expect(ui.aiOpen).toBe(false);
-    expect(ui.cols).toEqual(['session', 'chat', 'tools']);
-
-    ui.wheelAi(1); // 收起上滚 → 重开默认 2 栏
-    expect(ui.aiOpen).toBe(true);
-    expect(ui.cols).toEqual(['session', 'chat']);
-    ui.wheelAi(-1); // 2 栏下滚 → 收起
-    expect(ui.aiOpen).toBe(false);
-
-    ui.wheelAi(-1); // 收起下滚不动
-    expect(ui.aiOpen).toBe(false);
-  });
-
-  it('设置栏为固定宽切换式：开 = 单栏替换，关 = 还原原组合', () => {
-    const ui = new UiStore();
-    ui.toggleCol('tools'); // chat+tools
-    ui.toggleCol('settings'); // 切单栏设置
-    expect(ui.aiOpen).toBe(true);
-    expect(ui.cols).toEqual(['settings']);
-    ui.toggleCol('settings'); // 关 → 还原
-    expect(ui.cols).toEqual(['chat', 'tools']);
-    expect(ui.aiOpen).toBe(true);
-  });
-
-  it('设置从收起态打开：关闭后直接收起', () => {
-    const ui = new UiStore();
+    expect(ui.colWidth).toBe(420);
     ui.toggleCol('settings');
-    expect(ui.cols).toEqual(['settings']);
-    expect(ui.aiOpen).toBe(true);
-    ui.toggleCol('settings');
-    expect(ui.aiOpen).toBe(false);
+    expect(ui.colWidth).toBe(420);
   });
+});
 
-  it('设置开着时点其他功能栏：切到该栏默认组合', () => {
+describe('UiStore openAi / collapseAi / toggleAi', () => {
+  it('collapseAi 后 openAi 回到 lastCol（记忆上次活动栏）', () => {
     const ui = new UiStore();
-    ui.toggleCol('settings');
-    ui.toggleCol('chat'); // 切到 chat 默认组合 session+chat
-    expect(ui.cols).toEqual(['session', 'chat']);
-    expect(ui.aiOpen).toBe(true);
-  });
-
-  it('设置切换态被整体收起：重开还原进设置前的组合', () => {
-    const ui = new UiStore();
-    ui.toggleCol('tools'); // chat+tools
-    ui.toggleCol('settings');
-    ui.collapseAi(); // Esc/点外部/Ctrl+J
+    ui.toggleCol('tools');
+    ui.collapseAi();
+    expect(ui.activeCol).toBeNull();
     expect(ui.aiOpen).toBe(false);
     ui.openAi();
-    expect(ui.cols).toEqual(['chat', 'tools']);
+    expect(ui.activeCol).toBe('tools');
+    expect(ui.aiOpen).toBe(true);
   });
 
-  it('专注模式切换与 AI 开合独立', () => {
+  it('首次 openAi 无 lastCol：默认落 chat', () => {
+    const ui = new UiStore();
+    ui.openAi();
+    expect(ui.activeCol).toBe('chat');
+    expect(ui.aiOpen).toBe(true);
+  });
+
+  it('toggleAi：开 ↔ 收（与 activeCol 同步）', () => {
+    const ui = new UiStore();
+    expect(ui.aiOpen).toBe(false);
+    ui.toggleAi();
+    expect(ui.aiOpen).toBe(true);
+    expect(ui.activeCol).toBe('chat');
+    ui.toggleAi();
+    expect(ui.aiOpen).toBe(false);
+    expect(ui.activeCol).toBeNull();
+  });
+
+  it('collapseAi 期间 activeCol 被记住；切到别的栏后 openAi 仍回最后那个', () => {
+    const ui = new UiStore();
+    ui.showCol('tools');
+    ui.collapseAi();
+    ui.showCol('settings'); // 显式切过另一栏
+    ui.collapseAi();
+    ui.openAi(); // 应该回到 settings（最后活动的栏）
+    expect(ui.activeCol).toBe('settings');
+  });
+});
+
+describe('UiStore isOpen 语义', () => {
+  it('aiOpen=false 时所有栏均不可见', () => {
+    const ui = new UiStore();
+    ui.showCol('chat');
+    ui.collapseAi();
+    expect(ui.isOpen('chat')).toBe(false);
+    expect(ui.isOpen('tools')).toBe(false);
+  });
+
+  it('aiOpen=true 但 activeCol 是另一栏：该栏 isOpen=false', () => {
+    const ui = new UiStore();
+    ui.showCol('chat');
+    expect(ui.isOpen('chat')).toBe(true);
+    expect(ui.isOpen('tools')).toBe(false);
+  });
+});
+
+describe('UiStore focus 独立', () => {
+  it('focus 与 AI 开合互不影响', () => {
     const ui = new UiStore();
     expect(ui.focus).toBe(false);
     ui.toggleFocus();
     expect(ui.focus).toBe(true);
+    expect(ui.aiOpen).toBe(false);
     ui.toggleAi();
     expect(ui.aiOpen).toBe(true);
-    ui.toggleAi();
-    expect(ui.aiOpen).toBe(false);
+    expect(ui.focus).toBe(true); // 仍为 true
+    ui.toggleFocus();
+    expect(ui.focus).toBe(false);
+    expect(ui.aiOpen).toBe(true); // 仍为 true
+  });
+});
+
+describe('UiStore colWidth 钳制', () => {
+  it('setColWidth(小于 280) 钳到下限 280', () => {
+    const ui = new UiStore();
+    ui.setColWidth(100);
+    expect(ui.colWidth).toBe(280);
+    ui.setColWidth(0);
+    expect(ui.colWidth).toBe(280);
+    ui.setColWidth(-50);
+    expect(ui.colWidth).toBe(280);
+  });
+
+  it('clampWidth：上下界合理', () => {
+    const ui = new UiStore();
+    // node 环境：availableWidth() 回退 800
+    expect(ui.clampWidth(100)).toBe(280);
+    expect(ui.clampWidth(280)).toBe(280);
+    expect(ui.clampWidth(500)).toBe(500);
+    expect(ui.clampWidth(800)).toBe(800);
+    expect(ui.clampWidth(99999)).toBe(800); // 上限 = availableWidth
+  });
+
+  it('availableWidth：node 环境回退到 800', () => {
+    const ui = new UiStore();
+    expect(ui.availableWidth()).toBe(800);
+  });
+});
+
+describe('UiStore localStorage 持久化', () => {
+  it('构造时还原 activeCol + colWidth', () => {
+    _store.set('ui.activeCol', 'tools');
+    _store.set('ui.colWidth', '456');
+    const ui = new UiStore();
+    expect(ui.activeCol).toBe('tools');
+    expect(ui.aiOpen).toBe(true);
+    expect(ui.colWidth).toBe(456);
+  });
+
+  it('localStorage 中无效 activeCol（不在 order 内）被忽略', () => {
+    _store.set('ui.activeCol', 'bogus');
+    _store.set('ui.colWidth', '456');
+    const ui = new UiStore();
+    expect(ui.activeCol).toBeNull();
+    expect(ui.colWidth).toBe(456); // width 仍可用
+  });
+
+  it('localStorage 中 colWidth 小于 280 被忽略（保留默认值）', () => {
+    _store.set('ui.colWidth', '100');
+    const ui = new UiStore();
+    expect(ui.colWidth).toBeGreaterThanOrEqual(280);
+  });
+
+  it('showCol/collapseAi 写回 localStorage', () => {
+    const ui = new UiStore();
+    ui.showCol('chat');
+    expect(_store.get('ui.activeCol')).toBe('chat');
+    expect(_store.has('ui.colWidth')).toBe(true);
+
+    ui.collapseAi();
+    expect(_store.has('ui.activeCol')).toBe(false); // null 时 removeItem
+    expect(_store.has('ui.colWidth')).toBe(true);
+  });
+
+  it('setColWidth 写回 localStorage', () => {
+    const ui = new UiStore();
+    ui.setColWidth(500);
+    expect(_store.get('ui.colWidth')).toBe('500');
+  });
+
+  it('第二次构造还原上一次的状态（跨实例）', () => {
+    const a = new UiStore();
+    a.showCol('settings');
+    a.setColWidth(480);
+    // 新实例：构造时应还原
+    const b = new UiStore();
+    expect(b.activeCol).toBe('settings');
+    expect(b.aiOpen).toBe(true);
+    expect(b.colWidth).toBe(480);
   });
 });

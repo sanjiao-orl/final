@@ -30,6 +30,17 @@ export interface ChatMsg {
   tools?: ToolLine[];
 }
 
+/** D3 分组（按 assistant 消息聚合）：组头=该轮用户消息前 20 字，key=该 assistant 消息下标（单会话内稳定）。 */
+export interface ToolGroup {
+  /** 该 assistant 消息在 messages 里的下标（字符串化）—— ChatColumn 摘要跳转与 ToolsColumn 定位共用。 */
+  key: string;
+  /** 触发该轮工具调用的用户消息前 20 字（无 user 时为空串）。 */
+  userPrompt: string;
+  tools: ToolLine[];
+  /** 该组是否含未完成工具（running/pending）—— 摘要行的脉冲点与"正在调用"提示用。 */
+  hasPending: boolean;
+}
+
 /** 会话 overlay（壳私有：重命名/归档，core 会话库不动）。 */
 interface SessionMeta {
   title?: string;
@@ -59,6 +70,21 @@ export class ChatStore {
   /** 重命名中的会话 id（行内输入态）。 */
   renamingId = $state<string | null>(null);
   renameDraft = $state('');
+  /** D3：ChatColumn 摘要跳转请求 ToolsColumn 定位的组 key（下标字符串）。ToolsColumn 消费后清空。 */
+  focusToolsGroupKey = $state<string | null>(null);
+  /** 发送档位（D4）：writing=写作档模型，background=背景档（便宜模型，杂活用）。持久化 localStorage。 */
+  tier = $state<'writing' | 'background'>(
+    typeof localStorage !== 'undefined' && localStorage.getItem('chat.tier') === 'background' ? 'background' : 'writing',
+  );
+
+  setTier(t: 'writing' | 'background'): void {
+    this.tier = t;
+    try {
+      localStorage.setItem('chat.tier', t);
+    } catch {
+      // 隐私模式等：内存态生效即可
+    }
+  }
 
   /** 显示层会话列表：归档隐藏 + 搜索过滤。 */
   visibleSessions = $derived.by(() => {
@@ -75,6 +101,33 @@ export class ChatStore {
 
   private client!: CoreClient;
   private meta: Record<string, SessionMeta> = loadMeta();
+  /** 工具调用的起始时间（毫秒）—— 用 WeakMap 不污染 ToolLine 形状（保留现有 toEqual 断言语义）。
+   *  key 为 messages 里的 ToolLine proxy 对象引用；切存区 / 新会话旧 key 自动 GC。 */
+  private toolStartTimes = new WeakMap<object, number>();
+
+  /** 查工具调用起始时间；未记录返回 undefined（历史会话 / 跨会话迁移时）。 */
+  toolStarted(tool: ToolLine): number | undefined {
+    return this.toolStartTimes.get(tool as object);
+  }
+
+  /** D3 工具调用分组（按 assistant 消息聚合），下游 ChatColumn 摘要 / ToolsColumn 列表共用。 */
+  toolGroups = $derived.by(() => {
+    const out: ToolGroup[] = [];
+    let lastUser = '';
+    for (let i = 0; i < this.messages.length; i++) {
+      const m = this.messages[i]!;
+      if (m.role === 'user') lastUser = m.content;
+      if (m.role === 'assistant' && m.tools && m.tools.length > 0) {
+        out.push({
+          key: String(i),
+          userPrompt: lastUser.slice(0, 20),
+          tools: m.tools,
+          hasPending: m.tools.some((t) => t.state === 'pending' || t.state === 'running'),
+        });
+      }
+    }
+    return out;
+  });
 
   init(client: CoreClient): void {
     this.client = client;
@@ -287,8 +340,8 @@ export class ChatStore {
     this.streamAbort = ac;
     try {
       const body = this.sessionId
-        ? { sessionId: this.sessionId, text: trimmed, workDir: work.workDir }
-        : { text: trimmed, workDir: work.workDir, scope: this.scope };
+        ? { sessionId: this.sessionId, text: trimmed, workDir: work.workDir, tier: this.tier }
+        : { text: trimmed, workDir: work.workDir, scope: this.scope, tier: this.tier };
       await this.client.chatStream(body, {
         onDelta: (t) => {
           const m = this.messages[idx];
@@ -301,12 +354,14 @@ export class ChatStore {
           // 工具实际已在 core 内执行完（约束见 approval.ts 头注）；卡先显挂起，等裁决后落定。
           const args = (c.args ?? {}) as Record<string, unknown>;
           const decision = approval.decide(c.id, c.name, args, settings.approvalMode);
-          m.tools?.push({
+          const tool: ToolLine = {
             id: c.id,
             name: c.name,
             args: c.args,
             state: decision === 'pending' ? 'pending' : 'running',
-          });
+          };
+          this.toolStartTimes.set(tool, Date.now()); // 记录起始时间（D3 工具卡"耗时"用）
+          m.tools?.push(tool);
         },
         onToolResult: (r) => {
           const m = this.messages[idx];
