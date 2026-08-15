@@ -29,7 +29,7 @@ import { diagnosticsForWork, ledgerSlice, readLedger, upsertLedger, type LedgerO
 
 const server = new McpServer({
   name: 'domain',
-  version: '0.1.4',
+  version: '0.1.5',
 });
 
 /** 工具结果统一序列化为 JSON 文本。 */
