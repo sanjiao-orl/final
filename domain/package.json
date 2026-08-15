@@ -1,6 +1,6 @@
 {
   "name": "domain",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "private": true,
   "type": "module",
   "description": "小说写作工作台的 MCP 领域服务（stdio，被 core 经 MCP spawn 调用）",
