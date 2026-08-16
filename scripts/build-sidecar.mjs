@@ -8,7 +8,7 @@
 //   node scripts/build-sidecar.mjs --only core # 只构建 core（core/domain 包的 build script 用）
 import { build } from 'esbuild';
 import { execSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -51,6 +51,21 @@ async function bundlePackage(name, entryFile, outFile) {
 
 if (only === undefined || only === 'core') {
   await bundlePackage('core', 'main.ts', 'main.mjs');
+  copyCorePrompts();
+}
+
+// 把 core/prompts/ 拷到 core/dist/prompts/（与 main.mjs 同级旁），供 prod 包内释放缺省文件。
+// core/prompts/ 的内容文件由内容代理维护；目录缺失时跳过，不阻断构建。
+function copyCorePrompts() {
+  const source = path.join(root, 'core', 'prompts');
+  const target = path.join(root, 'core', 'dist', 'prompts');
+  if (!existsSync(source) || !statSync(source).isDirectory()) {
+    console.warn('[build-sidecar] core/prompts 不存在，跳过提示词随包拷贝');
+    return;
+  }
+  rmSync(target, { recursive: true, force: true });
+  cpSync(source, target, { recursive: true });
+  console.log(`[build-sidecar] ${source} -> ${target}`);
 }
 
 if (only === undefined || only === 'domain') {

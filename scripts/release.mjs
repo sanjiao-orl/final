@@ -1,5 +1,5 @@
 // release.mjs —— 真实发布脚本（零依赖 node）。
-// 职责：同步三处版本号 → 带签名私钥跑 tauri build → 收集 bundle/.sig → 生成 latest.json → gh release 上传。
+// 职责：同步五处版本号（tauri.conf.json、shell/package.json、Cargo.toml、core/package.json、domain/package.json，写完后自检）→ 带签名私钥跑 tauri build → 收集 bundle/.sig → 生成 latest.json → gh release 上传。
 // 用法：
 //   npm run release -- 0.1.1            # 指定版本
 //   npm run release -- patch            # patch/minor/major 自增
@@ -123,20 +123,6 @@ function syncVersions(version) {
     pkg.version = version;
     writeJson(pkgPath, pkg);
   }
-
-  // core/src/config.ts 与 domain/src/server.ts 里的硬编码版本常量
-  const coreConfig = readFileSync(path.join(root, 'core', 'src', 'config.ts'), 'utf8');
-  if (!coreConfig.includes(`VERSION = '${version}'`)) {
-    writeFileSync(
-      path.join(root, 'core', 'src', 'config.ts'),
-      coreConfig.replace(/(VERSION = ')[^']*(')/, `$1${version}$2`),
-    );
-  }
-  const domainServer = readFileSync(path.join(root, 'domain', 'src', 'server.ts'), 'utf8');
-  writeFileSync(
-    path.join(root, 'domain', 'src', 'server.ts'),
-    domainServer.replace(/(version: ')[^']*(')/, `$1${version}$2`),
-  );
 }
 
 function defaultKeyPath() {
@@ -262,6 +248,10 @@ function main() {
 
   console.log(`[release] ${before} → v${version}（repo: ${repo}）`);
   syncVersions(version);
+
+  // 版本单一事实源自检：五处写入后必须一致，否则中止，防止带着漂移版本发布。
+  const checkStatus = run('node', [path.join(root, 'scripts', 'check-versions.mjs')]);
+  if (checkStatus !== 0) fail(`版本自检失败：check-versions.mjs 退出码 ${checkStatus}`);
 
   if (!skipBuild) {
     cleanBundles();

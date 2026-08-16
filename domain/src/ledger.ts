@@ -18,6 +18,7 @@ import path from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { atomicWrite, assertWorkDir, collectMdFiles, resolveInside, toPosix } from './fsutil.js';
 import { frontmatterEnd, parseFrontmatter } from './frontmatter.js';
+import { loadPrompt } from './prompts.js';
 import { SNAPSHOT_KEEP } from './tools.js';
 
 // ---------- 类型 ----------
@@ -582,21 +583,43 @@ export function parseLedger(content: string): Ledger {
 }
 
 /**
- * 账本文件绝对路径（相对 workDir 解析，越界抛错）。
- * 守卫口径：账本是元数据文件——必须是 .md，且不允许落在 manuscript/、.novel/history/、.novel/trash/ 下。
+ * 账本/问题日志元数据文件路径白名单（相对 workDir 的 POSIX 路径；.md 后缀大小写不敏感）。
+ * - 账本（ledgerPath）：只允许 .novel/ 根目录正下的 .md（不含子目录，匹配 ^\.novel/[^/]+\.md$），如 .novel/ledger.md；
+ * - 问题日志（issueLogPath）：只允许 .novel/ 根下的 .md 或 editorial_notes/ 下的 .md，如 editorial_notes/issues.md。
+ * 白名单化口径：账本/问题日志都是元数据文件，manuscript/ 章正文、.novel/history/ 旧章快照、.novel/notes/ 私有笔记、
+ * 根目录与 editorial_notes 下其他 .md 一律不得被整文件重写或注入（防 ledger_upsert 重写 AGENTS.md、防旧章正文尾段进 LLM 上下文）。
  */
-function ledgerAbs(workDir: string, ledgerPath: string): string {
+const LEDGER_PATH_RE = /^\.novel\/[^/]+\.md$/i;
+const ISSUE_LOG_PATH_RE = /^editorial_notes\/.+\.md$/i;
+
+/**
+ * 校验账本/问题日志路径（相对 workDir 解析，越界抛错），返回规范化绝对路径。
+ * 本文件内 ledgerAbs、ledger_slice、diagnosticsForWork 三处守卫共用此函数，禁止各自复制口径。
+ */
+function assertLedgerMetaPath(workDir: string, relPath: string, kind: 'ledger' | 'issueLog'): string {
+  const label = kind === 'ledger' ? 'ledgerPath' : 'issueLogPath';
   const wd = assertWorkDir(workDir);
-  const rel = ledgerPath || DEFAULT_LEDGER_PATH;
-  const abs = resolveInside(wd, rel); // 越界在此抛错
+  const abs = resolveInside(wd, relPath); // 越界在此抛错
   const posix = toPosix(path.relative(wd, abs));
   if (!posix.toLowerCase().endsWith('.md')) {
-    throw new Error(`ledgerPath 只允许 .md 文件: ${rel}`);
+    throw new Error(`${label} 只允许 .md 文件: ${relPath}`);
   }
-  if (posix.startsWith('manuscript/') || posix.startsWith('.novel/history/') || posix.startsWith('.novel/trash/')) {
-    throw new Error(`ledgerPath 只允许 manuscript/、.novel/history/、.novel/trash/ 外的 .md 文件: ${rel}`);
+  const allowed = kind === 'ledger' ? LEDGER_PATH_RE.test(posix) : LEDGER_PATH_RE.test(posix) || ISSUE_LOG_PATH_RE.test(posix);
+  if (!allowed) {
+    const scope = kind === 'ledger' ? '只允许 .novel/ 根目录下的 .md 文件' : '只允许 .novel/ 根下或 editorial_notes/ 下的 .md 文件';
+    throw new Error(`${label} ${scope}: ${relPath}`);
   }
   return abs;
+}
+
+/**
+ * 账本文件绝对路径（相对 workDir 解析，越界抛错）。
+ * 守卫口径（白名单化）：账本是元数据文件，ledgerPath 必须是 .novel/ 根目录正下的 .md（相对路径匹配 ^\.novel/[^/]+\.md$，
+ * 不含子目录）；默认 DEFAULT_LEDGER_PATH（.novel/ledger.md）天然合法。manuscript/、editorial_notes/、.novel/ 子目录内
+ * 及根目录下的其他 .md 一律拒绝——防止 ledger_upsert 整文件重写 AGENTS.md、编辑笔记或章正文。
+ */
+function ledgerAbs(workDir: string, ledgerPath: string): string {
+  return assertLedgerMetaPath(workDir, ledgerPath || DEFAULT_LEDGER_PATH, 'ledger');
 }
 
 /** 本地时间戳（毫秒级）+ 随机后缀，避免同刻碰撞；字典序即时间序。 */
@@ -835,7 +858,7 @@ export function diagnoseSeasonConflict(body: string): { seasons: string[]; confl
 
 // ---------- 审阅输入组装（禁止全量注入正文） ----------
 
-/** 冷读契约摘要（注入 slice 顶部的固定文本，非全书正文）。 */
+/** 冷读契约摘要（兜底，正本在 core/prompts/cold-read.md；文件缺失/损坏时退回本串）。 */
 export const COLD_READ_CHARTER = `读者契约（fiction-forge v2 冷读摘要）：
 - 身份：刚付费买下本书的网文读者，带编辑的耳朵；先体验后诊断，每条问题都要能说出打断阅读的瞬间。
 - Rule zero：不改 manuscript 正文，全部产出进 editorial_notes。
@@ -844,8 +867,62 @@ export const COLD_READ_CHARTER = `读者契约（fiction-forge v2 冷读摘要�
 - 问题行格式：CR-### | ch:line | SEV | CAT | "quote" | why / reader-moment | fix direction | LINE/SCENE/STRUCT/META`;
 
 /**
+ * 冷读 slice 模板（兜底，正本在 core/prompts/cold-read.md）。
+ * 占位符契约（与 cold-read.md 一致）：
+ * {{账本切片}} 账本渲染、{{章节标题}} 章标题、{{章节内容}} 单章正文、{{问题日志尾部}} 问题日志尾部。
+ */
+const COLD_READ_SLICE_TEMPLATE = [
+  '# 冷读输入（单章 + 账本切片）',
+  '',
+  '## 读者契约',
+  COLD_READ_CHARTER,
+  '',
+  '## 账本（当前状态）',
+  '',
+  '{{账本切片}}',
+  '## 本章正文（唯一注入章）',
+  '',
+  '### {{章节标题}}',
+  '',
+  '{{章节内容}}',
+  '',
+  '## 问题日志（尾部，供续读上下文）',
+  '',
+  '{{问题日志尾部}}',
+  '',
+  '## 输出要求',
+  '- 逐条以 CR 格式追加进 issues.md，并更新账本全部区块；',
+  '- 只依据本章正文 + 账本状态判断，不臆造；',
+  '- 严禁读取/注入本书其他章节全文。',
+  '',
+].join('\n') + '\n';
+
+/** cold-read.md 模板占位符：四个动态段都必须存在，缺任一视为模板损坏，回退兜底模板。 */
+const COLD_READ_PLACEHOLDERS = ['{{账本切片}}', '{{章节标题}}', '{{章节内容}}', '{{问题日志尾部}}'] as const;
+
+/** 剥掉 md 里的 HTML 注释（cold-read.md 用注释给加载方说明占位符，注释里也含占位符文本，不能参与替换）。 */
+function stripHtmlComments(text: string): string {
+  return text.replace(/<!--[\s\S]*?-->\r?\n?/g, '');
+}
+
+function coldReadSliceTemplate(): string {
+  const loaded = loadPrompt('cold_read');
+  if (loaded !== null) {
+    const template = stripHtmlComments(loaded);
+    if (COLD_READ_PLACEHOLDERS.every((p) => template.includes(p))) {
+      return template;
+    }
+    console.warn(
+      '[ledger] cold-read.md 缺少模板占位符（{{账本切片}}/{{章节标题}}/{{章节内容}}/{{问题日志尾部}}），回退兜底模板'
+    );
+  }
+  return COLD_READ_SLICE_TEMPLATE;
+}
+
+/**
  * ledgerSlice：组装冷读输入（贵档模型用）——单章正文 + 账本切片 + 问题日志尾部。
  * 纪律：只注入「当前章」这一章正文，绝不注入其他章全文；账本为结构化切片（本就很小）。
+ * 模板从 cold-read.md 加载（改文件即生效），失败回退上面的兜底常量。
  */
 export function ledgerSlice(
   workDir: string,
@@ -871,14 +948,10 @@ export function ledgerSlice(
   const body = chapterContent.slice(frontmatterEnd(chapterContent));
   const title = chapterPosix.split('/').pop()?.replace(/\.md$/i, '') ?? chapterRelPath;
 
-  // 问题日志尾部（WS-9：最后约 40 行；守卫：编辑笔记，.md 且不在 manuscript/ 下）
+  // 问题日志尾部（WS-9：最后约 40 行；守卫：白名单 .novel/ 根下 .md 或 editorial_notes/ 下 .md，其余一律抛错）
   let issueTail = '';
   if (issueLogPath) {
-    const issueAbs = resolveInside(wd, issueLogPath); // 越界在此抛错
-    const issuePosix = toPosix(path.relative(wd, issueAbs));
-    if (!issuePosix.toLowerCase().endsWith('.md') || issuePosix.startsWith('manuscript/')) {
-      throw new Error(`ledger_slice 的 issueLogPath 只允许 manuscript/ 外的 .md 文件: ${issueLogPath}`);
-    }
+    const issueAbs = assertLedgerMetaPath(wd, issueLogPath, 'issueLog'); // 越界/白名单外在此抛错
     try {
       const issueContent = fs.readFileSync(issueAbs, 'utf8');
       const lines = issueContent.split(/\r?\n/);
@@ -888,31 +961,12 @@ export function ledgerSlice(
     }
   }
 
-  const slice = [
-    '# 冷读输入（单章 + 账本切片）',
-    '',
-    '## 读者契约',
-    COLD_READ_CHARTER,
-    '',
-    '## 账本（当前状态）',
-    '',
-    renderLedgerMarkdown(ledger),
-    '## 本章正文（唯一注入章）',
-    '',
-    `### ${title}`,
-    '',
-    body.trim(),
-    '',
-    '## 问题日志（尾部，供续读上下文）',
-    '',
-    issueTail || '（无）',
-    '',
-    '## 输出要求',
-    '- 逐条以 CR 格式追加进 issues.md，并更新账本全部区块；',
-    '- 只依据本章正文 + 账本状态判断，不臆造；',
-    '- 严禁读取/注入本书其他章节全文。',
-    '',
-  ].join('\n') + '\n';
+  const template = coldReadSliceTemplate();
+  const slice = template
+    .replaceAll('{{账本切片}}', renderLedgerMarkdown(ledger))
+    .replaceAll('{{章节标题}}', title)
+    .replaceAll('{{章节内容}}', body.trim())
+    .replaceAll('{{问题日志尾部}}', issueTail || '（无）');
 
   return { workDir: wd, chapterRelPath, slice, injectedChapters: [chapterRelPath] };
 }
@@ -979,8 +1033,9 @@ export function diagnosticsForWork(workDir: string, ledgerPath?: string, issueLo
   }
   let blockerCount = 0;
   if (issueLogPath) {
+    const issueAbs = assertLedgerMetaPath(wd, issueLogPath, 'issueLog'); // 越界/白名单外在此抛错（与 ledger_slice 同口径）
     try {
-      const issueLog = fs.readFileSync(resolveInside(wd, issueLogPath), 'utf8');
+      const issueLog = fs.readFileSync(issueAbs, 'utf8');
       blockerCount = countBlockers(issueLog).blockers;
     } catch {
       blockerCount = 0; // 问题日志缺失/不可读 → 视为无 BLOCKER 条目

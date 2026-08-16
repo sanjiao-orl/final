@@ -16,6 +16,10 @@ const EXPECTED_PROTOCOL: u64 = 1;
 /// 应用配置文件（app_config_dir 下）。字段可空：空=回落环境变量/缺省。
 const CONFIG_FILE: &str = "config.json";
 
+/// apiKey 脱敏占位串：read_config/config_status 回传前端前把非空 key 替换为该串；
+/// write_config 侧收到占位串或空串时保留磁盘原值（「占位即保留」）。
+const API_KEY_MASK: &str = "********";
+
 // ---------- 应用配置（serde JSON，字段可空=回落环境变量） ----------
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -157,14 +161,64 @@ fn write_config_at(file: &Path, cfg: &AppConfig) -> Result<(), String> {
   Ok(())
 }
 
+/// apiKey 脱敏：回传前端前把非空 apiKey 替换为占位串（llm.api_key 与每个 preset.api_key），
+/// 空/缺值保持原样（无 key 可脱敏）。返回克隆，不改原配置——core 启动注入环境变量仍用明文。
+fn mask_api_keys(cfg: &AppConfig) -> AppConfig {
+  let mut out = cfg.clone();
+  if let Some(llm) = out.llm.as_mut() {
+    if llm.api_key.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+      llm.api_key = Some(API_KEY_MASK.to_string());
+    }
+    if let Some(presets) = llm.presets.as_mut() {
+      for preset in presets {
+        if preset.api_key.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+          preset.api_key = Some(API_KEY_MASK.to_string());
+        }
+      }
+    }
+  }
+  out
+}
+
+/// write_config「占位即保留」：前端拿到的是脱敏配置（apiKey=占位串），用户不改动直接保存时
+/// 会原样回传占位串/空串；此时用磁盘上的原值顶回，避免把真实 key 覆盖成占位符。
+/// 按 preset id 对齐磁盘上的旧预设；磁盘没有的新预设按传入值照写。非 key 字段一律照写。
+fn merge_api_key_placeholders(incoming: &mut AppConfig, disk: &AppConfig) {
+  let keep = |v: &mut Option<String>, saved: &Option<String>| {
+    if v.as_deref().is_some_and(|s| s.trim().is_empty() || s == API_KEY_MASK) {
+      *v = saved.clone();
+    }
+  };
+  let Some(in_llm) = incoming.llm.as_mut() else { return };
+  let Some(disk_llm) = disk.llm.as_ref() else { return };
+  keep(&mut in_llm.api_key, &disk_llm.api_key);
+  if let (Some(in_presets), Some(disk_presets)) = (in_llm.presets.as_mut(), disk_llm.presets.as_ref()) {
+    for in_p in in_presets {
+      if let Some(disk_p) = disk_presets.iter().find(|p| p.id == in_p.id) {
+        keep(&mut in_p.api_key, &disk_p.api_key);
+      }
+    }
+  }
+}
+
 #[tauri::command]
 fn read_config(app: tauri::AppHandle) -> Result<AppConfig, String> {
-  read_config_at(&config_file(&app)?)
+  let cfg = read_config_at(&config_file(&app)?)?;
+  Ok(mask_api_keys(&cfg))
 }
 
 #[tauri::command]
 fn write_config(app: tauri::AppHandle, config: AppConfig) -> Result<(), String> {
-  write_config_at(&config_file(&app)?, &config)
+  let file = config_file(&app)?;
+  let mut incoming = config;
+  // 磁盘配置损坏（非法 JSON）时按无旧值继续写：保留「保存新配置覆盖坏文件」的自愈能力；
+  // 此时占位串/空串在 merge 中落为 None（不会把占位串当真 key 落盘），用户重填 key 即可。
+  let disk = read_config_at(&file).unwrap_or_else(|e| {
+    log::warn!("[shell] 读取旧配置失败，按无旧值写入: {e}");
+    AppConfig::default()
+  });
+  merge_api_key_placeholders(&mut incoming, &disk);
+  write_config_at(&file, &incoming)
 }
 
 // ---------- 作者笔记（作者私人笔记，AI 物理不可见） ----------
@@ -340,7 +394,7 @@ fn config_status(app: tauri::AppHandle) -> Result<ConfigStatus, String> {
   };
   let llm = cfg.llm.clone().unwrap_or_default();
   Ok(ConfigStatus {
-    config: cfg,
+    config: mask_api_keys(&cfg),
     work_dir: ResolvedField {
       value: work.to_string_lossy().to_string(),
       source: work_source.into(),
@@ -488,7 +542,7 @@ fn llm_env_overrides(cfg: &AppConfig) -> Vec<(String, String)> {
 /// 并通过 MCP_DOMAIN_CMD 让 core 拉起资源目录里的 domain bundle；CORE_RUNTIME_FILE 落到作品目录。
 /// 环境变量组装遵循 配置 > 环境变量 > 默认：作品目录已由 resolve_work_dir 落定（NOVEL_WORK_DIR 透传子进程），
 /// LLM_* 仅在配置非空时覆盖。
-fn spawn_core(resource_dir: Option<PathBuf>, work: &Path, cfg: &AppConfig) -> Result<Child, String> {
+fn spawn_core(resource_dir: Option<PathBuf>, work: &Path, prompt_dir: &Path, cfg: &AppConfig) -> Result<Child, String> {
   let novel_dir = work.join(".novel");
   std::fs::create_dir_all(&novel_dir).map_err(|e| format!("创建 .novel 目录失败: {e}"))?;
   log::info!("[shell] 作品目录: {}", work.display());
@@ -522,6 +576,7 @@ fn spawn_core(resource_dir: Option<PathBuf>, work: &Path, cfg: &AppConfig) -> Re
       .current_dir(&resources)
       .env("NOVEL_DIR", &novel_dir)
       .env("CORE_RUNTIME_FILE", novel_dir.join("core-runtime.local.json"))
+      .env("NOVEL_PROMPT_DIR", prompt_dir)
       .env(
         "MCP_DOMAIN_CMD",
         format!("\"{}\" \"{}\"", node_exe.display(), domain_js.display()),
@@ -567,8 +622,9 @@ fn watch_core(child: &mut Child, shared: Shared, generation: Arc<AtomicU64>, wor
   std::thread::spawn(move || {
     for line in BufReader::new(stdout).lines() {
       let Ok(line) = line else { break };
-      log::info!("[core] {line}");
+      // ready 行含明文 token：不打原始日志，解析后只打脱敏摘要；其余行照常
       if !line.contains("\"event\":\"ready\"") {
+        log::info!("[core] {line}");
         continue;
       }
       match serde_json::from_str::<serde_json::Value>(&line) {
@@ -579,6 +635,7 @@ fn watch_core(child: &mut Child, shared: Shared, generation: Arc<AtomicU64>, wor
           let commit = v.get("commit").and_then(|t| t.as_str()).unwrap_or("unknown").to_string();
           let protocol = v.get("protocol").and_then(|p| p.as_u64());
           if let (Some(port), Some(token)) = (port, token) {
+            log::info!("[core] ready port={port} token=***");
             if let Err(e) = validate_protocol(protocol) {
               log::error!("[shell] 握手校验失败: {e}");
               if generation.load(Ordering::SeqCst) == my_gen {
@@ -607,6 +664,8 @@ fn watch_core(child: &mut Child, shared: Shared, generation: Arc<AtomicU64>, wor
                 *guard = CoreState::Ready(info);
               }
             }
+          } else {
+            log::warn!("[core] ready 行缺 port/token，不打原始日志");
           }
         }
         Err(e) => log::warn!("[shell] 解析 core ready 行失败: {e}"),
@@ -628,7 +687,14 @@ fn spawn_and_watch(app: &tauri::AppHandle, core: &CoreProcess, shared: &Shared) 
   let outcome = (|| -> Result<(Child, PathBuf), String> {
     let cfg = read_config_at(&config_file(app)?)?;
     let (work, resource_dir) = resolve_startup_paths(app, &cfg)?;
-    Ok((spawn_core(resource_dir, &work, &cfg)?, work))
+    let prompt_dir = plain_path(
+      &app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("定位应用配置目录失败: {e}"))?,
+    )
+    .join("prompts");
+    Ok((spawn_core(resource_dir, &work, &prompt_dir, &cfg)?, work))
   })();
   match outcome {
     Ok((mut child, work)) => {
@@ -1035,6 +1101,126 @@ mod tests {
     assert!(masked.value.starts_with("sk-a"), "打码应保留前 4 位: {}", masked.value);
     assert_ne!(masked.value, "sk-abcdef123456", "打码不得回显整把 key");
     assert!(resolve_field_masked(None, "LLM_THIS_ENV_DOES_NOT_EXIST").value.is_empty());
+  }
+
+  /// 脱敏：llm.api_key 与每个 preset.api_key 非空即替换为占位串；空/缺值保持原样；
+  /// 原配置不被改动（克隆语义，core 启动注入环境变量仍用明文）。
+  #[test]
+  fn mask_api_keys_masks_all_keys_and_keeps_empty() {
+    let cfg = AppConfig {
+      llm: Some(LlmConfig {
+        base_url: Some("https://llm.example/v1".to_string()),
+        api_key: Some("sk-secret-legacy".to_string()),
+        model: Some("m1".to_string()),
+        model_cheap: None,
+        presets: Some(vec![
+          LlmPreset {
+            id: "main-writer".to_string(),
+            name: Some("主笔".to_string()),
+            base_url: Some("https://w.example/v1".to_string()),
+            api_key: Some("sk-w".to_string()),
+            model: Some("writer-m".to_string()),
+          },
+          LlmPreset {
+            id: "bg-helper".to_string(),
+            name: Some("后台".to_string()),
+            base_url: Some("https://b.example/v1".to_string()),
+            api_key: None,
+            model: Some("bg-m".to_string()),
+          },
+        ]),
+        assign: None,
+      }),
+      ..Default::default()
+    };
+    let masked = mask_api_keys(&cfg);
+    let llm = masked.llm.expect("llm");
+    assert_eq!(llm.api_key.as_deref(), Some(API_KEY_MASK), "llm.api_key 应打码");
+    let presets = llm.presets.expect("presets");
+    assert_eq!(presets[0].api_key.as_deref(), Some(API_KEY_MASK), "preset key 应打码");
+    assert_eq!(presets[1].api_key, None, "缺值保持原样");
+    assert_eq!(llm.base_url.as_deref(), Some("https://llm.example/v1"), "非 key 字段不动");
+    assert_eq!(
+      cfg.llm.as_ref().unwrap().api_key.as_deref(),
+      Some("sk-secret-legacy"),
+      "原配置不得被改动"
+    );
+  }
+
+  /// write_config「占位即保留」：收到的 apiKey 为占位串或空串时用磁盘原值顶回；
+  /// 真实新值照写；按 preset id 对齐，磁盘没有的新预设照写；非 key 字段一律照写。
+  #[test]
+  fn merge_api_key_placeholders_preserves_disk_keys() {
+    let disk = AppConfig {
+      llm: Some(LlmConfig {
+        base_url: Some("https://disk.example/v1".to_string()),
+        api_key: Some("sk-disk-legacy".to_string()),
+        model: Some("m-disk".to_string()),
+        model_cheap: None,
+        presets: Some(vec![
+          LlmPreset {
+            id: "main-writer".to_string(),
+            name: Some("主笔".to_string()),
+            base_url: Some("https://w.example/v1".to_string()),
+            api_key: Some("sk-disk-w".to_string()),
+            model: Some("writer-m".to_string()),
+          },
+          LlmPreset {
+            id: "bg-helper".to_string(),
+            name: Some("后台".to_string()),
+            base_url: Some("https://b.example/v1".to_string()),
+            api_key: Some("sk-disk-b".to_string()),
+            model: Some("bg-m".to_string()),
+          },
+        ]),
+        assign: None,
+      }),
+      ..Default::default()
+    };
+
+    // 前端不改动直接保存：legacy 与 main-writer 是占位串、bg-helper 空串 → 全保留磁盘值；
+    // base_url 等普通字段照写；new-preset 是磁盘没有的新预设，真实 key 照写
+    let mut incoming = AppConfig {
+      llm: Some(LlmConfig {
+        base_url: Some("https://new.example/v1".to_string()),
+        api_key: Some(API_KEY_MASK.to_string()),
+        model: Some("m-new".to_string()),
+        model_cheap: None,
+        presets: Some(vec![
+          LlmPreset {
+            id: "main-writer".to_string(),
+            name: Some("主笔".to_string()),
+            base_url: Some("https://w.example/v1".to_string()),
+            api_key: Some(API_KEY_MASK.to_string()),
+            model: Some("writer-m".to_string()),
+          },
+          LlmPreset {
+            id: "bg-helper".to_string(),
+            name: Some("后台".to_string()),
+            base_url: Some("https://b.example/v1".to_string()),
+            api_key: Some(String::new()),
+            model: Some("bg-m".to_string()),
+          },
+          LlmPreset {
+            id: "new-preset".to_string(),
+            name: Some("新档".to_string()),
+            base_url: Some("https://n.example/v1".to_string()),
+            api_key: Some("sk-brand-new".to_string()),
+            model: Some("n-m".to_string()),
+          },
+        ]),
+        assign: None,
+      }),
+      ..Default::default()
+    };
+    merge_api_key_placeholders(&mut incoming, &disk);
+    let llm = incoming.llm.expect("llm");
+    assert_eq!(llm.api_key.as_deref(), Some("sk-disk-legacy"), "占位串保留磁盘 legacy key");
+    let presets = llm.presets.expect("presets");
+    assert_eq!(presets[0].api_key.as_deref(), Some("sk-disk-w"), "占位串保留磁盘 preset key");
+    assert_eq!(presets[1].api_key.as_deref(), Some("sk-disk-b"), "空串保留磁盘 preset key");
+    assert_eq!(presets[2].api_key.as_deref(), Some("sk-brand-new"), "新预设真实 key 照写");
+    assert_eq!(llm.base_url.as_deref(), Some("https://new.example/v1"), "非 key 字段照写");
   }
 
   // ---------- 作者笔记：路径守卫 + 读写 roundtrip ----------

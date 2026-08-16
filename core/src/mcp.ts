@@ -39,6 +39,7 @@ export function startDomainMcp(options: DomainMcpOptions = {}): DomainMcp {
         command,
         args,
         cwd: path.resolve(import.meta.dirname, '..'),
+        env: Object.fromEntries(Object.entries(process.env).filter(([, v]) => v !== undefined)) as Record<string, string>,
         stderr: 'inherit',
       }));
   const backoffMs = options.backoffMs ?? DEFAULT_BACKOFF_MS;

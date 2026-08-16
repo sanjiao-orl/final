@@ -14,6 +14,7 @@ import type { MessageRow, SessionRow, SessionStore } from './session-store.js';
 import { getLlmTimeoutSeconds, type Tier } from './config.js';
 import { EventPump } from './event-pump.js';
 import { toPublicErrorMessage, writeJson } from './http.js';
+import { listSkills, loadPrompt } from './prompts.js';
 
 export const chatBodySchema = z.object({
   sessionId: z.string().uuid().optional(),
@@ -36,14 +37,20 @@ export interface ChatDeps {
   toolsAvailable?: () => boolean;
 }
 
-const SYSTEM_PROMPT =
-  '你是小说写作工作台的本地写作助手。回答精炼、贴合网文创作场景；' +
-  '涉及作品结构、章节内容时优先调用提供的领域工具去读取真实文件，不要凭记忆编造正文。';
+const SYSTEM_PROMPT = loadPrompt('chat');
 
-/** 壳传入当前作品文件夹时，拼进系统提示：调领域工具一律用这个 workDir。 */
+/** 壳传入当前作品文件夹时，拼进系统提示：调领域工具一律用这个 workDir；尾部再注入可用 skill 清单。 */
 function systemPrompt(workDir: string | undefined): string {
-  if (!workDir) return SYSTEM_PROMPT;
-  return `${SYSTEM_PROMPT}\n当前打开的作品文件夹：${workDir}。调用领域工具时 workDir 参数一律使用这个路径。`;
+  let prompt = SYSTEM_PROMPT;
+  if (workDir) {
+    prompt += `\n当前打开的作品文件夹：${workDir}。调用领域工具时 workDir 参数一律使用这个路径。`;
+  }
+  const skills = listSkills(workDir);
+  if (skills.length > 0) {
+    const lines = skills.map((s) => `- ${s.name}:${s.description}`).join('\n');
+    prompt += `\n\n## 可用 skill\n${lines}\n需要时调用领域工具 skill_read 传入 name 获取该 skill 正文并按其执行。`;
+  }
+  return prompt;
 }
 
 /** 多轮工具调用的步数上限。 */

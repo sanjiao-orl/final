@@ -2,11 +2,12 @@
 // 另含进程版本门禁（D2）：Node 版本下限校验、git commit 自报（供握手文件/ready 行携带）。
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import corePkg from '../package.json' with { type: 'json' };
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import type { LanguageModel } from 'ai';
 
-/** 与 core/package.json version 保持同步。 */
-export const VERSION = '0.2.0';
+/** 版本单一事实源：core/package.json version（esbuild 打包时内联，dev 下 tsx 直读）。 */
+export const VERSION = corePkg.version;
 
 /** Node 版本门禁下限（与根 package.json engines.node 对齐）：低于此版本直接拒启。 */
 export const MIN_NODE_MAJOR = 24;

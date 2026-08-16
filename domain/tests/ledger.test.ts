@@ -448,10 +448,10 @@ describe('读写（文件系统）', () => {
 
   it('upsert 成功路径在 .novel/history/ 留下旧账本快照', () => {
     const work = makeWorkDir();
-    const ledgerPath = 'editorial_notes/reader_ledger.md';
+    const ledgerPath = '.novel/review.md';
     writeLedger(work, sampleLedger(), ledgerPath);
     upsertLedger(work, [{ op: 'tripwire', item: '新增硬规则' }], ledgerPath);
-    const snapDir = path.join(work, '.novel', 'history', 'editorial_notes__reader_ledger');
+    const snapDir = path.join(work, '.novel', 'history', '.novel__review');
     const snaps = fs.readdirSync(snapDir).filter((n) => n.endsWith('.md'));
     expect(snaps).toHaveLength(1);
     const oldContent = fs.readFileSync(path.join(snapDir, snaps[0]!), 'utf8');
@@ -461,9 +461,9 @@ describe('读写（文件系统）', () => {
 
   it('ledgerPath 覆盖默认位置', () => {
     const work = makeWorkDir();
-    writeLedger(work, sampleLedger(), 'editorial_notes/reader_ledger.md');
+    writeLedger(work, sampleLedger(), '.novel/review.md');
     expect(readLedger(work).ledger).toEqual(emptyLedger()); // 默认位置为空
-    expect(readLedger(work, 'editorial_notes/reader_ledger.md').ledger).toEqual(sampleLedger());
+    expect(readLedger(work, '.novel/review.md').ledger).toEqual(sampleLedger());
   });
 
   it('ledgerPath 拒绝 manuscript/ 与 .novel/history/、.novel/trash/ 内的 .md', () => {
@@ -474,12 +474,26 @@ describe('读写（文件系统）', () => {
     expect(() => readLedger(work, 'manuscript/卷一/第1章.md')).toThrow(/只允许/);
   });
 
-  it('ledgerPath 放行 .novel/ledger.md 与 editorial_notes/xxx.md', () => {
+  it('ledgerPath 放行 .novel/ 根下 .md（.novel/ledger.md 与 .novel/review.md）', () => {
     const work = makeWorkDir();
     writeLedger(work, sampleLedger(), '.novel/ledger.md');
     expect(readLedger(work, '.novel/ledger.md').ledger).toEqual(sampleLedger());
-    writeLedger(work, sampleLedger(), 'editorial_notes/reader_ledger.md');
-    expect(readLedger(work, 'editorial_notes/reader_ledger.md').ledger).toEqual(sampleLedger());
+    writeLedger(work, sampleLedger(), '.novel/review.md');
+    expect(readLedger(work, '.novel/review.md').ledger).toEqual(sampleLedger());
+  });
+
+  it('ledgerPath 白名单化：拒绝 AGENTS.md、editorial_notes/、.novel/ 子目录与 history 内 .md', () => {
+    const work = makeWorkDir();
+    writeTree(work, {
+      'AGENTS.md': 'agent 规则',
+      'editorial_notes/issues.md': '编辑笔记',
+      '.novel/notes/book.md': '私有笔记',
+      '.novel/history/x.md': '旧章快照',
+    });
+    for (const rel of ['AGENTS.md', 'editorial_notes/issues.md', '.novel/notes/book.md', '.novel/history/x.md']) {
+      expect(() => readLedger(work, rel), rel).toThrow(/只允许/);
+      expect(() => writeLedger(work, sampleLedger(), rel), rel).toThrow(/只允许/);
+    }
   });
 });
 
@@ -524,6 +538,30 @@ describe('ledgerSlice（审阅输入组装，禁止全量注入）', () => {
     const work = makeWorkDir();
     writeTree(work, { 'manuscript/第1章.md': '---\ntitle: 第1章\n---\n正文。' });
     expect(() => ledgerSlice(work, 'manuscript/第1章.md', undefined, 'manuscript/第1章.md')).toThrow(/issueLogPath/);
+  });
+
+  it('issueLogPath 白名单化：拒绝 manuscript/ 章正文与 .novel/history/ 旧章快照', () => {
+    const work = makeWorkDir();
+    writeTree(work, {
+      'manuscript/第1章.md': '---\ntitle: 第1章\n---\n正文。',
+      'manuscript/章.md': '---\ntitle: 章\n---\n其他章正文。',
+      '.novel/history/旧章.md': '旧章正文尾段 40 行',
+    });
+    expect(() => ledgerSlice(work, 'manuscript/第1章.md', undefined, 'manuscript/章.md')).toThrow(/issueLogPath/);
+    expect(() => ledgerSlice(work, 'manuscript/第1章.md', undefined, '.novel/history/旧章.md')).toThrow(/issueLogPath/);
+  });
+
+  it('issueLogPath 放行 editorial_notes/issues.md（只注入最后约 40 行）', () => {
+    const work = makeWorkDir();
+    const issueLines = Array.from({ length: 45 }, (_, i) => `CR-${String(i + 1).padStart(3, '0')} | ch1:1 | MINOR | CONT | "x" | why | fix | LINE`);
+    writeTree(work, {
+      'manuscript/第1章.md': '---\ntitle: 第1章\n---\n正文。',
+      'editorial_notes/issues.md': issueLines.join('\n'),
+    });
+    const { slice } = ledgerSlice(work, 'manuscript/第1章.md', undefined, 'editorial_notes/issues.md');
+    const injected = slice.split(/\r?\n/).filter((l) => l.startsWith('CR-'));
+    expect(injected).toHaveLength(40); // 只注入最后 40 行
+    expect(injected[0]).toContain('CR-006'); // 45 条日志 slice(-40) 从第 6 条开始
   });
 });
 
@@ -587,5 +625,19 @@ describe('diagnosticsForWork（端到端）', () => {
     const res = diagnosticsForWork(work, undefined, 'editorial_notes/不存在.md');
     expect(res.blockerCount).toBe(0);
     expect(res.hasBlockers).toBe(false);
+  });
+
+  it('diagnosticsForWork 的 issueLogPath 复用同一白名单：白名单外一律抛错', () => {
+    const work = makeWorkDir();
+    writeTree(work, {
+      'manuscript/第1章.md': '---\ntitle: 第1章\n---\n正文。',
+      '.novel/history/旧章.md': '旧章快照',
+    });
+    expect(() => diagnosticsForWork(work, undefined, 'manuscript/章.md')).toThrow(/issueLogPath/);
+    expect(() => diagnosticsForWork(work, undefined, '.novel/history/旧章.md')).toThrow(/issueLogPath/);
+    expect(() => diagnosticsForWork(work, undefined, 'AGENTS.md')).toThrow(/issueLogPath/);
+    // 白名单内但文件缺失 → 仍计 0（与「缺失计 0」口径一致）
+    const res = diagnosticsForWork(work, undefined, 'editorial_notes/issues.md');
+    expect(res.blockerCount).toBe(0);
   });
 });

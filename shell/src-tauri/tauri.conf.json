@@ -20,7 +20,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:*"
     }
   },
   "plugins": {
@@ -48,7 +48,8 @@
     "resources": {
       "resources/sidecar/node.exe": "sidecar/node.exe",
       "../../core/dist/main.mjs": "sidecar/core/main.mjs",
-      "../../domain/dist/server.mjs": "sidecar/domain/server.mjs"
+      "../../domain/dist/server.mjs": "sidecar/domain/server.mjs",
+      "../../core/dist/prompts": "sidecar/core/prompts"
     },
     "android": {
       "debugApplicationIdSuffix": ".debug"

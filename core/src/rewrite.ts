@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { getLlmTimeoutSeconds } from './config.js';
 import { EventPump } from './event-pump.js';
 import { toPublicErrorMessage, writeJson } from './http.js';
+import { loadPrompt } from './prompts.js';
 
 export const rewriteBodySchema = z.object({
   /** 选区原文（锚定文本，改写对象）。 */
@@ -19,11 +20,7 @@ export interface RewriteDeps {
   modelForTier: (tier: 'writing' | 'background') => LanguageModel;
 }
 
-const SYSTEM_PROMPT =
-  '你是小说改写器。输入是一段小说正文和一条改写指令。' +
-  '只输出改写后的正文本身：不要解释、不要前后缀、不要引号、不要标题、不要任何标记；' +
-  '保持网文连载的叙事文体与原文人称、视角、事实不变；原文是多段的，输出保持同样的段落数与换行；' +
-  '指令为空时只做文字润色（疏通语句、增强画面感），不改变情节与细节。';
+const SYSTEM_PROMPT = loadPrompt('rewrite');
 
 /** 改写输出护栏：绝对长度上限（字符）。 */
 const MAX_OUTPUT_CHARS = 20_000;
