@@ -276,16 +276,19 @@ export interface SearchHit {
   excerpt: string;
 }
 
-const EXCERPT_CONTEXT = 30;
+/** search_content 默认最多返回条数（单一事实源；server.ts 工具描述串复用同一常量）。 */
+export const SEARCH_DEFAULT_LIMIT = 20;
+/** search_content 命中行 excerpt 前后各截断字数（单一事实源；server.ts 工具描述串复用同一常量）。 */
+export const SEARCH_EXCERPT_CHARS = 30;
 
 /**
  * search_content：大小写不敏感子串匹配，只搜 manuscript/** /*.md，最多 limit 条。
  * 口径（0004 定稿）：只搜正文——frontmatter 是结构元数据不参与搜索；命中行号按文件实际行号（含 fm 行）。
  */
-export function searchContent(workDir: string, query: string, limit = 20): SearchHit[] {
+export function searchContent(workDir: string, query: string, limit = SEARCH_DEFAULT_LIMIT): SearchHit[] {
   const q = query.toLowerCase();
   if (q === '') return [];
-  const lim = Number.isFinite(limit) && limit >= 1 ? Math.floor(limit) : 20;
+  const lim = Number.isFinite(limit) && limit >= 1 ? Math.floor(limit) : SEARCH_DEFAULT_LIMIT;
   const { files } = collectManuscriptFiles(workDir);
   const hits: SearchHit[] = [];
   for (const f of files) {
@@ -303,8 +306,8 @@ export function searchContent(workDir: string, query: string, limit = 20): Searc
       const line = lines[i] ?? '';
       const idx = line.toLowerCase().indexOf(q);
       if (idx === -1) continue;
-      const start = Math.max(0, idx - EXCERPT_CONTEXT);
-      const end = Math.min(line.length, idx + query.length + EXCERPT_CONTEXT);
+      const start = Math.max(0, idx - SEARCH_EXCERPT_CHARS);
+      const end = Math.min(line.length, idx + query.length + SEARCH_EXCERPT_CHARS);
       const excerpt =
         (start > 0 ? '…' : '') + line.slice(start, end) + (end < line.length ? '…' : '');
       hits.push({ relPath: toPosix(path.join('manuscript', f.rel)), line: bodyStartLine + i, excerpt });

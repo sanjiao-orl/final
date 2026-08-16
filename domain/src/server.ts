@@ -22,10 +22,19 @@ import {
   renameVolume,
   scanQuality,
   searchContent,
+  SEARCH_DEFAULT_LIMIT,
+  SEARCH_EXCERPT_CHARS,
   wordCount,
   writeChapter,
 } from './tools.js';
-import { diagnosticsForWork, ledgerSlice, readLedger, upsertLedger, type LedgerOp } from './ledger.js';
+import {
+  diagnosticsForWork,
+  ISSUE_LOG_TAIL_LINES,
+  ledgerSlice,
+  readLedger,
+  upsertLedger,
+  type LedgerOp,
+} from './ledger.js';
 import { readSkillBody } from './prompts.js';
 import domainPkg from '../package.json' with { type: 'json' };
 
@@ -84,11 +93,11 @@ server.registerTool(
   {
     title: '搜索正文',
     description:
-      '在 manuscript/**/*.md 内做大小写不敏感子串匹配，返回 { relPath, line, excerpt }（excerpt 前后各 30 字截断），默认最多 20 条。',
+      `在 manuscript/**/*.md 内做大小写不敏感子串匹配，返回 { relPath, line, excerpt }（excerpt 前后各 ${SEARCH_EXCERPT_CHARS} 字截断），默认最多 ${SEARCH_DEFAULT_LIMIT} 条。`,
     inputSchema: {
       workDir: z.string().describe('作品文件夹的绝对路径'),
       query: z.string().describe('要搜索的子串（大小写不敏感）'),
-      limit: z.number().int().positive().default(20).describe('最多返回条数，默认 20'),
+      limit: z.number().int().positive().default(SEARCH_DEFAULT_LIMIT).describe(`最多返回条数，默认 ${SEARCH_DEFAULT_LIMIT}`),
     },
   },
   async ({ workDir, query, limit }) => jsonResult(searchContent(workDir, query, limit)),
@@ -330,7 +339,7 @@ server.registerTool(
       workDir: z.string().describe('作品文件夹的绝对路径'),
       chapterRelPath: z.string().describe('当前审阅章相对 workDir 路径，必须是 manuscript/ 内的 .md，如 manuscript/卷一/第1章.md'),
       ledgerPath: z.string().optional().describe('可选：账本文件相对 workDir 路径，必须是 .novel/ 根目录正下的 .md（不含子目录）'),
-      issueLogPath: z.string().optional().describe('可选：问题日志相对 workDir 路径，必须是 .novel/ 根下或 editorial_notes/ 下的 .md（注入最后约 40 行作续读上下文）'),
+      issueLogPath: z.string().optional().describe(`可选：问题日志相对 workDir 路径，必须是 .novel/ 根下或 editorial_notes/ 下的 .md（注入最后约 ${ISSUE_LOG_TAIL_LINES} 行作续读上下文）`),
     },
   },
   async ({ workDir, chapterRelPath, ledgerPath, issueLogPath }) =>

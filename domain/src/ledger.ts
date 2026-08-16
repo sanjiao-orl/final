@@ -924,6 +924,9 @@ function coldReadSliceTemplate(): string {
   return COLD_READ_SLICE_TEMPLATE;
 }
 
+/** ledger_slice 注入问题日志尾部行数（单一事实源；server.ts ledger_slice 工具描述串复用同一常量）。 */
+export const ISSUE_LOG_TAIL_LINES = 40;
+
 /**
  * ledgerSlice：组装冷读输入（贵档模型用）——单章正文 + 账本切片 + 问题日志尾部。
  * 纪律：只注入「当前章」这一章正文，绝不注入其他章全文；账本为结构化切片（本就很小）。
@@ -953,14 +956,14 @@ export function ledgerSlice(
   const body = chapterContent.slice(frontmatterEnd(chapterContent));
   const title = chapterPosix.split('/').pop()?.replace(/\.md$/i, '') ?? chapterRelPath;
 
-  // 问题日志尾部（WS-9：最后约 40 行；守卫：白名单 .novel/ 根下 .md 或 editorial_notes/ 下 .md，其余一律抛错）
+  // 问题日志尾部（WS-9：最后约 ISSUE_LOG_TAIL_LINES 行；守卫：白名单 .novel/ 根下 .md 或 editorial_notes/ 下 .md，其余一律抛错）
   let issueTail = '';
   if (issueLogPath) {
     const issueAbs = assertLedgerMetaPath(wd, issueLogPath, 'issueLog'); // 越界/白名单外在此抛错
     try {
       const issueContent = fs.readFileSync(issueAbs, 'utf8');
       const lines = issueContent.split(/\r?\n/);
-      issueTail = lines.slice(-40).join('\n');
+      issueTail = lines.slice(-ISSUE_LOG_TAIL_LINES).join('\n');
     } catch {
       issueTail = '（问题日志不存在或不可读）';
     }
