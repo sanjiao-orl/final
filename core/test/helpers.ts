@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { MockLanguageModelV3, MockLanguageModelV4 } from 'ai/test';
-import type { LanguageModelV3StreamPart, LanguageModelV3StreamResult, LanguageModelV4StreamPart } from '@ai-sdk/provider';
+import type { LanguageModelV3GenerateResult, LanguageModelV3StreamPart, LanguageModelV3StreamResult, LanguageModelV4StreamPart } from '@ai-sdk/provider';
 import type { ChatDeps } from '../src/chat.js';
 import { createAppServer } from '../src/server.js';
 import { CandidateStore } from '../src/candidate-store.js';
@@ -141,6 +141,21 @@ export function toolCallResult(
 /** 多步对话：按调用次数依次返回结果数组里的流。 */
 export function stepModel(results: LanguageModelV3StreamResult[]): MockLanguageModelV3 {
   return new MockLanguageModelV3({ doStream: results });
+}
+
+/** 纯文本一步完成的 v3 generate 结果（generateText 走 doGenerate）。 */
+export function generateResult(text: string): LanguageModelV3GenerateResult {
+  return {
+    content: [{ type: 'text', text }],
+    finishReason: { unified: 'stop', raw: 'stop' },
+    usage: EMPTY_USAGE,
+    warnings: [],
+  };
+}
+
+/** 单步返回 doGenerate 文本的 mock 模型（generateText 用；按调用次数依次取 texts）。 */
+export function generateModel(texts: string[]): MockLanguageModelV3 {
+  return new MockLanguageModelV3({ doGenerate: texts.map(generateResult) });
 }
 
 /**

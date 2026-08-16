@@ -1,9 +1,11 @@
 // 测试：POST /v1/review —— 贵档冷读审阅（一次性 JSON，非 SSE）。
-// 覆盖：ledger_slice 组装提示词 → main 档模型 → 解析 findings；围栏/前后废话容错；非法 JSON → 502；
-// MCP 重连中/工具缺失 → 503；body 缺字段 → 400。
+// 覆盖：ledger_slice 组装提示词 → main 档模型（generateText + Output.array 结构化输出）→ findings；
+// 非法 JSON / 不合 schema → 502；MCP 重连中/工具缺失 → 503；body 缺字段 → 400。
+// 注：Output.array 由 SDK 按 responseFormat 约束模型输出 { elements: [...] } 并解析 + zod 校验，
+// 旧 streamText + 手剥 ```json 围栏的容错（parseFindings）已随批三-2 移除，故「带围栏与前后废话」用例删除。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ToolSet } from 'ai';
-import { startTestServer, stepModel, textResult } from './helpers.js';
+import { startTestServer, generateModel } from './helpers.js';
 
 function postReview(baseUrl: string, token: string, body: unknown): Promise<Response> {
   return fetch(`${baseUrl}/v1/review`, {
@@ -50,7 +52,7 @@ describe('POST /v1/review 贵档审阅', () => {
   it('正常返回解析后的 findings，并只把 ledger_slice 的 slice 作为用户提示词', async () => {
     const slice = '# 冷读输入（单章 + 账本切片）\n\n## 本章正文\n正文内容';
     const execute = vi.fn(async () => ({ slice, injectedChapters: ['manuscript/卷一/第1章.md'] }));
-    const model = stepModel([textResult([JSON.stringify(GOOD_FINDINGS)])]);
+    const model = generateModel([JSON.stringify({ elements: GOOD_FINDINGS })]);
     const s = await startTestServer({ modelForTier: () => model, tools: ledgerSliceTools(slice, execute) });
     try {
       const res = await postReview(s.baseUrl, s.token, GOOD_BODY);
@@ -63,34 +65,23 @@ describe('POST /v1/review 贵档审阅', () => {
       );
 
       // 模型收到的用户提示词就是 ledger_slice 返回的 slice（core 不额外注入文件内容）。
-      const prompt = model.doStreamCalls[0]!.prompt;
+      const prompt = model.doGenerateCalls[0]!.prompt;
       const user = prompt.find((m) => m.role === 'user');
       expect(JSON.stringify(user?.content)).toContain('单章 + 账本切片');
+      // 系统提示词（review.md）须与 Output.array 线格式同口径：{"elements": [...]} 对象。
       const system = prompt.find((m) => m.role === 'system');
-      expect(JSON.stringify(system?.content)).toContain('JSON 数组');
+      expect(JSON.stringify(system?.content)).toContain('elements');
     } finally {
       await s.close();
     }
   });
 
-  it('模型输出带 ```json 围栏与前后废话时能提取 JSON 数组', async () => {
-    const raw = '好的，审阅结果如下：\n```json\n' + JSON.stringify(GOOD_FINDINGS) + '\n```\n以上，请查收。';
-    const s = await startTestServer({
-      modelForTier: () => stepModel([textResult([raw])]),
-      tools: ledgerSliceTools('slice'),
-    });
-    try {
-      const res = await postReview(s.baseUrl, s.token, GOOD_BODY);
-      expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ findings: GOOD_FINDINGS });
-    } finally {
-      await s.close();
-    }
-  });
+  // 「带 ```json 围栏与前后废话也能提取」用例已删除：批三-2 起 Output.array 由 SDK 按 responseFormat
+  // 约束模型输出 { elements: [...] } 并解析，不再需要手剥围栏容错（旧 parseFindings 已移除）。
 
   it('空 findings 合法返回 []', async () => {
     const s = await startTestServer({
-      modelForTier: () => stepModel([textResult(['[]'])]),
+      modelForTier: () => generateModel([JSON.stringify({ elements: [] })]),
       tools: ledgerSliceTools('slice'),
     });
     try {
@@ -104,7 +95,7 @@ describe('POST /v1/review 贵档审阅', () => {
 
   it('模型输出非法 JSON → 502，中文错误不泄露内部细节', async () => {
     const s = await startTestServer({
-      modelForTier: () => stepModel([textResult(['这不是 JSON'])]),
+      modelForTier: () => generateModel(['这不是 JSON']),
       tools: ledgerSliceTools('slice'),
     });
     try {
@@ -119,7 +110,7 @@ describe('POST /v1/review 贵档审阅', () => {
 
   it('模型输出 JSON 但 schema 不合法（severity 取值错）→ 502', async () => {
     const s = await startTestServer({
-      modelForTier: () => stepModel([textResult(['[{"severity":"FATAL","quote":"q","why":"w"}]'])]),
+      modelForTier: () => generateModel([JSON.stringify({ elements: [{ severity: 'FATAL', quote: 'q', why: 'w' }] })]),
       tools: ledgerSliceTools('slice'),
     });
     try {
@@ -134,7 +125,7 @@ describe('POST /v1/review 贵档审阅', () => {
 
   it('MCP 重连中（toolsAvailable=false）→ 503', async () => {
     const s = await startTestServer({
-      modelForTier: () => stepModel([textResult(['[]'])]),
+      modelForTier: () => generateModel([JSON.stringify({ elements: [] })]),
       tools: ledgerSliceTools('slice'),
       toolsAvailable: () => false,
     });
@@ -150,7 +141,7 @@ describe('POST /v1/review 贵档审阅', () => {
 
   it('ledger_slice 工具缺失 → 503', async () => {
     const s = await startTestServer({
-      modelForTier: () => stepModel([textResult(['[]'])]),
+      modelForTier: () => generateModel([JSON.stringify({ elements: [] })]),
       tools: {},
     });
     try {
@@ -182,7 +173,7 @@ describe('POST /v1/review 贵档审阅', () => {
       path: 'editorial_notes/issues.md',
     }));
     const s = await startTestServer({
-      modelForTier: () => stepModel([textResult([JSON.stringify(CATEGORIZED_FINDINGS)])]),
+      modelForTier: () => generateModel([JSON.stringify({ elements: CATEGORIZED_FINDINGS })]),
       tools: ledgerSliceTools('slice', undefined, issueAppendExecute),
     });
     try {
@@ -209,7 +200,7 @@ describe('POST /v1/review 贵档审阅', () => {
       throw new Error('mock 落盘失败');
     });
     const s = await startTestServer({
-      modelForTier: () => stepModel([textResult([JSON.stringify(GOOD_FINDINGS)])]),
+      modelForTier: () => generateModel([JSON.stringify({ elements: GOOD_FINDINGS })]),
       tools: ledgerSliceTools('slice', undefined, issueAppendExecute),
     });
     try {
@@ -225,7 +216,7 @@ describe('POST /v1/review 贵档审阅', () => {
 
   it('tools 无 issue_append（无 MCP 连接）时降级：findings 正常返回，不带 persisted', async () => {
     const s = await startTestServer({
-      modelForTier: () => stepModel([textResult([JSON.stringify(GOOD_FINDINGS)])]),
+      modelForTier: () => generateModel([JSON.stringify({ elements: GOOD_FINDINGS })]),
       tools: ledgerSliceTools('slice'), // 只含 ledger_slice，无 issue_append
     });
     try {

@@ -36,5 +36,5 @@ applies_to: cold_read
 ## 输出要求
 - 只依据本章正文 + 账本状态判断，不臆造；
 - 严禁读取/注入本书其他章节全文；
-- 输出必须是严格 JSON：一个数组，每项为 { severity: "BLOCKER"|"MAJOR"|"MODERATE"|"MINOR", quote: string, why: string, suggestion?: string, category?: string }；severity 只能取 BLOCKER/MAJOR/MODERATE/MINOR；quote 是该章正文里的原文短引；category 可选，只取 CONT/CANON/VOICE/CRAFT/STRUCT/PACE/REPEAT/META 之一，判断不了就省略；只输出 JSON 数组本身，不要 Markdown 代码块、不要解释、不要任何前后缀；没有发现时输出 []。
+- 输出必须是严格 JSON 对象，形如 {"elements": [...]}，每个元素为 { severity: "BLOCKER"|"MAJOR"|"MODERATE"|"MINOR", quote: string, why: string, suggestion?: string, category?: string }；severity 只能取 BLOCKER/MAJOR/MODERATE/MINOR；quote 是该章正文里的原文短引；category 可选，只取 CONT/CANON/VOICE/CRAFT/STRUCT/PACE/REPEAT/META 之一，判断不了就省略；只输出该 JSON 对象本身，不要 Markdown 代码块、不要解释、不要任何前后缀；没有发现时输出 {"elements": []}。
 

@@ -1,9 +1,19 @@
 // 模块职责：POST /v1/review 的贵档冷读审阅管道——经 MCP 工具 ledger_slice 组装单章冷读提示词，
-// 一次性调用 main 档模型，要求严格输出 findings JSON 数组；解析 + zod 校验后返回 JSON（非 SSE）。
+// 一次性调用 main 档模型，用 generateText + Output.array 结构化输出（SDK 按 responseFormat 约束模型
+// 输出 { elements: [...] } 并解析 + zod 校验）返回 findings JSON（非 SSE）。
 // 纪律：core 不额外注入任何文件内容，单章正文只由 domain ledger_slice 注入（防全稿注入红线）。
 // 闭环：findings 非空时确定性经 MCP issue_append 追加进 issues.md（工具不可用/失败仅 warn 降级，不阻断返回）。
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { streamText, type LanguageModel, type ToolSet } from 'ai';
+import {
+  generateText,
+  JSONParseError,
+  NoObjectGeneratedError,
+  NoOutputGeneratedError,
+  Output,
+  TypeValidationError,
+  type LanguageModel,
+  type ToolSet,
+} from 'ai';
 import { z } from 'zod';
 import { getLlmTimeoutSeconds, type Tier } from './config.js';
 import { HttpError, writeJson } from './http.js';
@@ -31,8 +41,6 @@ export const reviewFindingSchema = z.object({
   suggestion: z.string().optional(),
 });
 export type ReviewFinding = z.infer<typeof reviewFindingSchema>;
-
-const reviewFindingsSchema = z.array(reviewFindingSchema);
 
 /**
  * 处理一次 /v1/review 请求。body 校验失败 400；ledger_slice 不可用 503；模型输出解析/校验失败 502；
@@ -64,30 +72,17 @@ export async function handleReviewRequest(
     // 第一步：调 domain 工具组装冷读提示词（只含单章正文 + 账本切片）。
     const slice = await callLedgerSlice(deps, workDir, chapterRelPath, abort.signal);
 
-    // 第二步：main 档模型一次性调用。用 streamText 收全量文本后统一解析（非 SSE）。
+    // 第二步：main 档模型一次性结构化输出。generateText + Output.array 由 SDK 按 responseFormat
+    // 约束模型输出 { elements: [...] } 并解析 + zod 校验，result.output 即 ReviewFinding[]（无围栏容错）。
     // system 每次请求现取（mtime 感知热重载，改文件即生效）。
-    const result = streamText({
+    const result = await generateText({
       model: deps.modelForTier('review'),
       system: loadPrompt('review'),
       prompt: slice,
+      output: Output.array({ element: reviewFindingSchema }),
       abortSignal: AbortSignal.any([abort.signal, timeoutSignal]),
     });
-
-    let text = '';
-    for await (const part of result.stream) {
-      if (part.type === 'text-delta') {
-        text += part.text;
-      } else if (part.type === 'error') {
-        throw new Error(part.error instanceof Error ? part.error.message : String(part.error));
-      }
-    }
-
-    if (abort.signal.aborted) return;
-    if (timeoutSignal.aborted) {
-      throw new HttpError(504, `LLM 请求超时（超过 ${timeoutSeconds} 秒）`);
-    }
-
-    const findings = parseFindings(text);
+    const findings = await result.output;
 
     // 闭环：findings 非空时确定性经 domain issue_append 追加进 issues.md；失败降级，不影响 findings 返回。
     const payload: { findings: ReviewFinding[]; persisted?: { appended: number; ids: string[] } } = { findings };
@@ -100,6 +95,16 @@ export async function handleReviewRequest(
     if (abort.signal.aborted) return;
     if (timeoutSignal.aborted) {
       throw new HttpError(504, `LLM 请求超时（超过 ${timeoutSeconds} 秒）`);
+    }
+    // SDK 结构化输出失败统一 502：Output.array 解析/校验失败抛 NoObjectGeneratedError
+    // （cause 为 JSONParseError/TypeValidationError）；非 stop 结束导致无输出抛 NoOutputGeneratedError。
+    if (
+      NoObjectGeneratedError.isInstance(err) ||
+      NoOutputGeneratedError.isInstance(err) ||
+      JSONParseError.isInstance(err) ||
+      TypeValidationError.isInstance(err)
+    ) {
+      throw new HttpError(502, '模型输出不是合法 JSON 审阅结果（需为 findings 数组）');
     }
     throw err;
   } finally {
@@ -236,54 +241,4 @@ function extractPersisted(result: unknown): { appended: number; ids: string[] } 
     }
   }
   return undefined;
-}
-
-/** 解析模型输出：容忍 ```json 围栏与前后废话，提取首个 JSON 数组，再用 zod 校验。 */
-export function parseFindings(text: string): ReviewFinding[] {
-  const parsed = reviewFindingsSchema.safeParse(extractFirstJsonArray(text));
-  if (!parsed.success) {
-    throw new HttpError(502, '模型输出不是合法 JSON 审阅结果（需为 findings 数组）');
-  }
-  return parsed.data;
-}
-
-/** 从模型输出文本中提取首个 JSON 数组；无数组/未闭合/解析失败一律抛 502。 */
-function extractFirstJsonArray(text: string): unknown {
-  const trimmed = text.trim();
-  // 先剥掉第一个 ```json / ``` 围栏（有前后废话也能取到围栏内容）。
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(trimmed);
-  const candidate = fenced ? fenced[1]! : trimmed;
-
-  const start = candidate.indexOf('[');
-  if (start < 0) {
-    throw new HttpError(502, '模型输出未找到 JSON 数组');
-  }
-
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let i = start; i < candidate.length; i++) {
-    const ch = candidate[i]!;
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (ch === '\\') escaped = true;
-      else if (ch === '"') inString = false;
-      continue;
-    }
-    if (ch === '"') {
-      inString = true;
-    } else if (ch === '[') {
-      depth += 1;
-    } else if (ch === ']') {
-      depth -= 1;
-      if (depth === 0) {
-        try {
-          return JSON.parse(candidate.slice(start, i + 1));
-        } catch {
-          throw new HttpError(502, '模型输出 JSON 数组解析失败');
-        }
-      }
-    }
-  }
-  throw new HttpError(502, '模型输出 JSON 数组未闭合');
 }

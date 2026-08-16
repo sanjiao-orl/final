@@ -54,6 +54,9 @@ export function createModelForTier(config: LlmConfig, tier: Tier): LanguageModel
     name: 'novel-local',
     baseURL: config.baseUrl,
     apiKey: config.apiKey,
+    // 宣称支持结构化输出（response_format json_schema）：/v1/review 的 Output.array 依赖它约束线格式；
+    // 不宣称时 SDK 会剥掉 responseFormat 仅发提示词，模型产出不受约束 → 解析 502（批三-2 实证踩坑）。
+    supportsStructuredOutputs: true,
   });
   return provider.languageModel(tier === 'writing' ? config.model : config.modelCheap);
 }
@@ -131,6 +134,8 @@ function buildModel(baseUrl: string, apiKey: string, model: string): LanguageMod
     name: 'novel-local',
     baseURL: baseUrl,
     apiKey,
+    // 同 createModelForTier：宣称支持结构化输出（/v1/review 的 Output.array 依赖，批三-2 实证踩坑）。
+    supportsStructuredOutputs: true,
   });
   const languageModel = provider.languageModel(model);
   modelCache.set(key, languageModel);
