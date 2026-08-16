@@ -64,8 +64,8 @@ function sampleLedger(): Ledger {
     knowledge: [
       {
         character: '林渡',
-        knows: ['铜钱沉近一倍'],
-        doesNotKnow: ['铜钱来历'],
+        knows: [{ fact: '铜钱沉近一倍' }],
+        doesNotKnow: [{ fact: '铜钱来历' }],
         visibility: 'public',
       },
     ],
@@ -85,6 +85,121 @@ describe('序列化 / 解析 round-trip', () => {
     const ledger = sampleLedger();
     const content = serializeLedger(ledger);
     expect(parseLedger(content)).toEqual(ledger);
+  });
+
+  it('旧格式 knows/doesNotKnow 纯字符串数组 → parse 容错升级为 KnowledgeFact', () => {
+    const content = [
+      '---',
+      'clock: []',
+      'props: []',
+      'promises: []',
+      'knowledge:',
+      '  - character: 林渡',
+      '    knows:',
+      '      - 铜钱沉近一倍',
+      '      - 师父半句话未说完',
+      '    doesNotKnow:',
+      '      - 铜钱来历',
+      'doNotReexplain: []',
+      'protect: []',
+      'tripwires: []',
+      '---',
+      '',
+      '# Reader Ledger',
+    ].join('\n');
+    const ledger = parseLedger(content);
+    expect(ledger.knowledge[0]!.knows).toEqual([{ fact: '铜钱沉近一倍' }, { fact: '师父半句话未说完' }]);
+    expect(ledger.knowledge[0]!.doesNotKnow).toEqual([{ fact: '铜钱来历' }]);
+  });
+
+  it('normalize 容错：对象 fact 非空字符串才收，空 fact/非对象项丢弃（读路径不抛错）', () => {
+    const content = [
+      '---',
+      'clock: []',
+      'props: []',
+      'promises: []',
+      'knowledge:',
+      '  - character: 林渡',
+      '    knows:',
+      '      - fact: 有效事实',
+      '        since: manuscript/卷一/第1章.md',
+      '        refs:',
+      '          - F-001',
+      '      - fact: ""',
+      '      - 纯字符串',
+      '      - 42',
+      'doNotReexplain: []',
+      'protect: []',
+      'tripwires: []',
+      '---',
+      '',
+      '# Reader Ledger',
+    ].join('\n');
+    const ledger = parseLedger(content);
+    expect(ledger.knowledge[0]!.knows).toEqual([
+      { fact: '有效事实', since: 'manuscript/卷一/第1章.md', refs: ['F-001'] },
+      { fact: '纯字符串' },
+    ]);
+  });
+
+  it('只有 fact 的 knowledge 项 serialize 写回纯字符串（旧账本 round-trip 格式不变，文本级断言）', () => {
+    const ledger = emptyLedger();
+    ledger.knowledge = [
+      {
+        character: '林渡',
+        knows: [{ fact: '铜钱沉近一倍' }],
+        doesNotKnow: [{ fact: '铜钱来历' }],
+        visibility: 'secret',
+        knownBy: ['作者'],
+      },
+    ];
+    const content = serializeLedger(ledger);
+    // YAML 里 knows 项是纯字符串（`- 铜钱沉近一倍`）不是 `- fact: ...` 对象
+    expect(content).toContain('- 铜钱沉近一倍');
+    expect(content).not.toContain('- fact: 铜钱沉近一倍');
+    // round-trip 结构不变（parse 再升级回 KnowledgeFact）
+    expect(parseLedger(content).knowledge[0]!.knows).toEqual([{ fact: '铜钱沉近一倍' }]);
+  });
+
+  it('带 since/refs 的 knowledge 项 serialize 写对象（文本级断言）', () => {
+    const ledger = emptyLedger();
+    ledger.knowledge = [
+      { character: '林渡', knows: [{ fact: '闻铃知鬼', since: 'manuscript/卷一/第1章.md', refs: ['F-001'] }] },
+    ];
+    const content = serializeLedger(ledger);
+    expect(content).toContain('since: manuscript/卷一/第1章.md');
+    expect(content).toContain('F-001');
+    expect(parseLedger(content).knowledge[0]!.knows).toEqual([
+      { fact: '闻铃知鬼', since: 'manuscript/卷一/第1章.md', refs: ['F-001'] },
+    ]);
+  });
+
+  it('promise 新字段 expectedVolume/links 与 knowledge 的 since/refs 往返不丢', () => {
+    const ledger = emptyLedger();
+    ledger.promises = [
+      {
+        id: 'P1',
+        name: '青铜铃',
+        arc: 'planted',
+        heat: 'HOT',
+        setups: [{ chapter: 'manuscript/卷一/第1章.md', line: 10 }],
+        payoffs: [],
+        expectedVolume: '卷二',
+        links: { props: ['铜钱', '木剑'], characters: ['林渡'] },
+      },
+    ];
+    ledger.knowledge = [
+      { character: '林渡', knows: [{ fact: '闻铃知鬼', since: 'manuscript/卷一/第1章.md', refs: ['P1'] }] },
+    ];
+    const content = serializeLedger(ledger);
+    const back = parseLedger(content);
+    expect(back.promises[0]!.expectedVolume).toBe('卷二');
+    expect(back.promises[0]!.links).toEqual({ props: ['铜钱', '木剑'], characters: ['林渡'] });
+    expect(back.knowledge[0]!.knows).toEqual([
+      { fact: '闻铃知鬼', since: 'manuscript/卷一/第1章.md', refs: ['P1'] },
+    ]);
+    // 二次序列化仍保持对象（有 since/refs 不降级为纯字符串）
+    expect(serializeLedger(back)).toContain('since: manuscript/卷一/第1章.md');
   });
 
   it('未知 frontmatter 字段 round-trip 原样保留（不解析不校验，仅透传）', () => {
@@ -141,6 +256,148 @@ describe('序列化 / 解析 round-trip', () => {
   });
 });
 
+describe('渲染视图（批三-2 结构深化）', () => {
+  it('伏笔分层聚合：未回收按卷分组 + HOT 前置，resolved/failed 沉底；悬空/links 内联', () => {
+    const ledger: Ledger = {
+      ...emptyLedger(),
+      promises: [
+        { id: 'P1', name: '甲', arc: 'planted', heat: 'WARM', setups: [{ chapter: 'manuscript/卷一/第1章.md' }], payoffs: [], links: { props: ['铜钱'], characters: ['林渡', '阿九'] } },
+        { id: 'P2', name: '乙', arc: 'planted', heat: 'HOT', setups: [{ chapter: 'manuscript/卷一/第2章.md' }], payoffs: [] },
+        { id: 'P3', name: '丙', arc: 'resolved', setups: [{ chapter: 'manuscript/卷一/第1章.md' }], payoffs: [{ chapter: 'manuscript/卷一/第3章.md' }] },
+        { id: 'P4', name: '丁', arc: 'failed', setups: [{ chapter: 'manuscript/卷一/第2章.md' }], payoffs: [] },
+      ],
+    };
+    const md = renderLedgerMarkdown(ledger);
+    expect(md).toContain('### 卷一 · 未回收');
+    expect(md).toContain('### 已回收 / 断线');
+    // HOT 在 WARM 前（未回收组内）
+    const openBlock = md.slice(md.indexOf('### 卷一 · 未回收'), md.indexOf('### 已回收 / 断线'));
+    expect(openBlock.indexOf('**P2**')).toBeLessThan(openBlock.indexOf('**P1**'));
+    // 悬空 + links 内联
+    expect(md).toContain('〔悬空〕');
+    expect(md).toContain('（道具: 铜钱 · 角色: 林渡、阿九）');
+    // resolved/failed 沉底到「已回收 / 断线」小节
+    const closedBlock = md.slice(md.indexOf('### 已回收 / 断线'));
+    expect(closedBlock).toContain('**P3**');
+    expect(closedBlock).toContain('**P4**');
+  });
+
+  it('未分卷伏笔归「未分卷 · 未回收」', () => {
+    const ledger: Ledger = {
+      ...emptyLedger(),
+      promises: [
+        { id: 'P1', name: '甲', arc: 'planted', setups: [{ chapter: 'manuscript/第1章.md' }], payoffs: [] },
+      ],
+    };
+    const md = renderLedgerMarkdown(ledger);
+    expect(md).toContain('### 未分卷 · 未回收');
+  });
+
+  it('逾期/预计卷已过标记需 chapterOrder；无 chapterOrder 时降级不报错', () => {
+    const ledger: Ledger = {
+      ...emptyLedger(),
+      promises: [
+        {
+          id: 'P1', name: '甲', arc: 'planted', heat: 'HOT', due: 1,
+          setups: [{ chapter: 'manuscript/卷一/第1章.md' }], payoffs: [],
+          expectedVolume: '卷二',
+        },
+      ],
+    };
+    const order = [
+      { relPath: 'manuscript/卷一/第1章.md', title: '一' },
+      { relPath: 'manuscript/卷一/第2章.md', title: '二' },
+      { relPath: 'manuscript/卷一/第3章.md', title: '三' },
+    ];
+    const md = renderLedgerMarkdown(ledger, { chapterOrder: order });
+    // 末章在卷一 ≠ 预计卷卷二 → 已过标记；已过 ≥1 章未回收 → 逾期标记
+    expect(md).toContain('〔预计回收卷 卷二 已过〕');
+    expect(md).toContain('〔逾期·已过');
+    // 无 chapterOrder 降级：不报错、无逾期/预计卷标记（其余照常，悬空仍在）
+    const plain = renderLedgerMarkdown(ledger);
+    expect(plain).not.toContain('〔逾期');
+    expect(plain).not.toContain('〔预计回收卷');
+    expect(plain).toContain('〔悬空〕');
+  });
+
+  it('知情时间轴：since 按章序排（无 since 排最后）+（自 章）后缀 + 伏笔回指', () => {
+    const ledger: Ledger = {
+      ...emptyLedger(),
+      knowledge: [
+        {
+          character: '林渡',
+          knows: [
+            { fact: '闻铃知鬼', since: 'manuscript/卷一/第2章.md', refs: ['P1'] },
+            { fact: '先闻灯再闻铃', since: 'manuscript/卷一/第1章.md' },
+            { fact: '无锚事实' },
+          ],
+        },
+      ],
+    };
+    const order = [
+      { relPath: 'manuscript/卷一/第1章.md', title: '第一章' },
+      { relPath: 'manuscript/卷一/第2章.md', title: '第二章' },
+    ];
+    const md = renderLedgerMarkdown(ledger, { chapterOrder: order });
+    expect(md).toContain('（自 第一章）');
+    expect(md).toContain('（自 第二章）');
+    expect(md).toContain('（伏笔: P1）');
+    // 时间轴排序：第1章 since 在 第2章 since 前，无 since 的排最后
+    const kBlock = md.slice(md.indexOf('- **林渡**'));
+    const i1 = kBlock.indexOf('（自 第一章）');
+    const i2 = kBlock.indexOf('（自 第二章）');
+    const iNone = kBlock.indexOf('无锚事实');
+    expect(i1).toBeGreaterThan(-1);
+    expect(i1).toBeLessThan(i2);
+    expect(i2).toBeLessThan(iNone);
+  });
+
+  it('clock 表按行内首个可定位章序排序，查不到的保持原相对序在后', () => {
+    const ledger: Ledger = {
+      ...emptyLedger(),
+      clock: [
+        { chapters: ['manuscript/卷一/第2章.md'], storyDay: '第2日' },
+        { chapters: ['manuscript/卷一/第1章.md'], storyDay: '第1日' },
+        { chapters: ['manuscript/卷外/未知.md'], storyDay: '第9日' },
+      ],
+    };
+    const order = [
+      { relPath: 'manuscript/卷一/第1章.md', title: '一' },
+      { relPath: 'manuscript/卷一/第2章.md', title: '二' },
+    ];
+    const md = renderLedgerMarkdown(ledger, { chapterOrder: order });
+    const table = md.slice(md.indexOf('| Chapters |'));
+    expect(table.indexOf('第1章.md')).toBeLessThan(table.indexOf('第2章.md'));
+    expect(table.indexOf('卷外/未知.md')).toBeGreaterThan(table.indexOf('第2章.md'));
+  });
+
+  it('道具托管链步骤在 chapterOrder 提供时按章序排', () => {
+    const ledger: Ledger = {
+      ...emptyLedger(),
+      props: [
+        {
+          name: '铜钱',
+          holder: '林渡',
+          custody: [
+            { chapter: 'manuscript/卷一/第2章.md', holder: '阿九' },
+            { chapter: 'manuscript/卷一/第1章.md', holder: '师父' },
+            { chapter: 'manuscript/卷外/未知.md', holder: '路人' },
+          ],
+        },
+      ],
+    };
+    const order = [
+      { relPath: 'manuscript/卷一/第1章.md', title: '一' },
+      { relPath: 'manuscript/卷一/第2章.md', title: '二' },
+    ];
+    const md = renderLedgerMarkdown(ledger, { chapterOrder: order });
+    const row = md.slice(md.indexOf('- **铜钱**'));
+    expect(row.indexOf('师父')).toBeLessThan(row.indexOf('阿九'));
+    // 查不到的步骤保持原相对序排最后
+    expect(row.indexOf('路人')).toBeGreaterThan(row.indexOf('阿九'));
+  });
+});
+
 describe('applyOps', () => {
   it('clock 按 chapters 键 upsert', () => {
     const op: LedgerOp = { op: 'clock', entry: { chapters: ['第一章'], thread: '主', storyDay: '第1日' } };
@@ -164,7 +421,7 @@ describe('applyOps', () => {
     const ops: LedgerOp[] = [
       { op: 'prop', entry: { name: '铜钱', custody: [] } },
       { op: 'promise', entry: { id: 'P1', name: '铜钱来历', arc: 'planted', setups: [], payoffs: [] } },
-      { op: 'knowledge', entry: { character: '林渡', knows: ['a'] } },
+      { op: 'knowledge', entry: { character: '林渡', knows: [{ fact: 'a' }] } },
     ];
     const l = applyOps(emptyLedger(), ops);
     expect(l.props).toHaveLength(1);
@@ -173,12 +430,12 @@ describe('applyOps', () => {
     const l2 = applyOps(l, [
       { op: 'prop', entry: { name: '铜钱', custody: [{ chapter: '第一章', holder: '林渡' }] } },
       { op: 'promise', entry: { id: 'P1', name: '铜钱来历', arc: 'resolved', setups: [], payoffs: [{ chapter: '第二章' }] } },
-      { op: 'knowledge', entry: { character: '林渡', knows: ['a', 'b'] } },
+      { op: 'knowledge', entry: { character: '林渡', knows: [{ fact: 'a' }, { fact: 'b' }] } },
     ]);
     expect(l2.props).toHaveLength(1);
     expect(l2.props[0]!.custody).toHaveLength(1);
     expect(l2.promises[0]!.arc).toBe('resolved');
-    expect(l2.knowledge[0]!.knows).toEqual(['a', 'b']);
+    expect(l2.knowledge[0]!.knows).toEqual([{ fact: 'a' }, { fact: 'b' }]);
   });
 
   it('登记表去重追加', () => {
@@ -219,6 +476,32 @@ describe('applyOps', () => {
     expect(() =>
       applyOps(emptyLedger(), [{ op: 'clock', entry: { chapters: ['第一章', 2 as unknown as string] } } as unknown as LedgerOp]),
     ).toThrow(/chapters 必须是字符串数组/);
+  });
+
+  it('assertKnowledge：字符串元素原地升级为 {fact}，对象带 since/refs 保留', () => {
+    const l = applyOps(emptyLedger(), [
+      {
+        op: 'knowledge',
+        entry: {
+          character: '林渡',
+          knows: ['纯字符串事实', { fact: '对象事实', since: 'ch1', refs: ['F-1'] }],
+        },
+      } as unknown as LedgerOp,
+    ]);
+    expect(l.knowledge[0]!.knows).toEqual([{ fact: '纯字符串事实' }, { fact: '对象事实', since: 'ch1', refs: ['F-1'] }]);
+  });
+
+  it('assertKnowledge：对象缺 fact / fact 空抛中文错（与 normalize 读路径同口径）', () => {
+    expect(() =>
+      applyOps(emptyLedger(), [
+        { op: 'knowledge', entry: { character: '林渡', knows: [{ fact: '  ' }] } } as unknown as LedgerOp,
+      ]),
+    ).toThrow(/knowledge 元素必须是非空字符串或带非空 fact 的对象/);
+    expect(() =>
+      applyOps(emptyLedger(), [
+        { op: 'knowledge', entry: { character: '林渡', knows: [{ since: 'ch1' }] } } as unknown as LedgerOp,
+      ]),
+    ).toThrow(/knowledge 元素必须是非空字符串或带非空 fact 的对象/);
   });
 
   it('remove：clock 按 chapters 集合删除（顺序无关）', () => {
@@ -350,6 +633,148 @@ describe('账本级确定性诊断', () => {
     };
     const f = ledgerDiagnostics(ledger);
     expect(f.some((x) => x.code === 'custody-conflict' && x.severity === 'MAJOR')).toBe(true);
+  });
+
+  it('clock-regression：同 thread 中文数字「第三日」→「第一日」倒退命中 MAJOR', () => {
+    const ledger: Ledger = {
+      ...emptyLedger(),
+      clock: [
+        { chapters: ['ch1'], thread: '主', storyDay: '第三日' },
+        { chapters: ['ch2'], thread: '主', storyDay: '第一日' },
+      ],
+    };
+    const order = [
+      { relPath: 'ch1', title: '一' },
+      { relPath: 'ch2', title: '二' },
+    ];
+    const f = ledgerDiagnostics(ledger, order);
+    expect(f.some((x) => x.code === 'clock-regression' && x.severity === 'MAJOR')).toBe(true);
+  });
+
+  it('clock-regression：阿拉伯数字「第5日」→「第3日」倒退命中', () => {
+    const ledger: Ledger = {
+      ...emptyLedger(),
+      clock: [
+        { chapters: ['ch1'], thread: '主', storyDay: '第5日' },
+        { chapters: ['ch2'], thread: '主', storyDay: '第3日' },
+      ],
+    };
+    const order = [
+      { relPath: 'ch1', title: '一' },
+      { relPath: 'ch2', title: '二' },
+    ];
+    const f = ledgerDiagnostics(ledger, order);
+    expect(f.some((x) => x.code === 'clock-regression')).toBe(true);
+  });
+
+  it('clock-regression：跨 thread 不报', () => {
+    const ledger: Ledger = {
+      ...emptyLedger(),
+      clock: [
+        { chapters: ['ch1'], thread: '主', storyDay: '第五日' },
+        { chapters: ['ch2'], thread: '支', storyDay: '第一日' },
+      ],
+    };
+    const order = [
+      { relPath: 'ch1', title: '一' },
+      { relPath: 'ch2', title: '二' },
+    ];
+    expect(ledgerDiagnostics(ledger, order).some((x) => x.code === 'clock-regression')).toBe(false);
+  });
+
+  it('clock-regression：解析不出 N 跳过比较不报（宁缺毋滥）', () => {
+    const ledger: Ledger = {
+      ...emptyLedger(),
+      clock: [
+        { chapters: ['ch1'], thread: '主', storyDay: '深秋未锚定' },
+        { chapters: ['ch2'], thread: '主', storyDay: '第1日' },
+      ],
+    };
+    const order = [
+      { relPath: 'ch1', title: '一' },
+      { relPath: 'ch2', title: '二' },
+    ];
+    expect(ledgerDiagnostics(ledger, order).some((x) => x.code === 'clock-regression')).toBe(false);
+  });
+
+  it('custody-chain-break(a)：托管链末端持有者与当前持有者矛盾 MAJOR', () => {
+    const ledger: Ledger = {
+      ...emptyLedger(),
+      props: [
+        {
+          name: '铜钱',
+          holder: '林渡',
+          custody: [
+            { chapter: 'ch1', holder: '师父' },
+            { chapter: 'ch2', holder: '阿九' },
+          ],
+        },
+      ],
+    };
+    const order = [
+      { relPath: 'ch1', title: '一' },
+      { relPath: 'ch2', title: '二' },
+    ];
+    const f = ledgerDiagnostics(ledger, order);
+    expect(f.some((x) => x.code === 'custody-chain-break' && x.severity === 'MAJOR' && x.message.includes('矛盾'))).toBe(true);
+  });
+
+  it('custody-chain-break(a)：末端持有者与当前 holder 一致不报', () => {
+    const ledger: Ledger = {
+      ...emptyLedger(),
+      props: [
+        {
+          name: '铜钱',
+          holder: '林渡',
+          custody: [
+            { chapter: 'ch1', holder: '师父' },
+            { chapter: 'ch2', holder: '林渡' },
+          ],
+        },
+      ],
+    };
+    const order = [
+      { relPath: 'ch1', title: '一' },
+      { relPath: 'ch2', title: '二' },
+    ];
+    expect(
+      ledgerDiagnostics(ledger, order).some((x) => x.code === 'custody-chain-break' && x.severity === 'MAJOR'),
+    ).toBe(false);
+  });
+
+  it('custody-chain-break(b)：chapterOrder 非空时引用不存在的章 MODERATE', () => {
+    const ledger: Ledger = {
+      ...emptyLedger(),
+      props: [
+        {
+          name: '铜钱',
+          custody: [
+            { chapter: 'ch1', holder: '林渡' },
+            { chapter: '不存在的章.md', holder: '阿九' },
+          ],
+        },
+      ],
+    };
+    const order = [{ relPath: 'ch1', title: '一' }];
+    const f = ledgerDiagnostics(ledger, order);
+    expect(
+      f.some((x) => x.code === 'custody-chain-break' && x.severity === 'MODERATE' && x.message.includes('不存在的章')),
+    ).toBe(true);
+  });
+
+  it('knowledge-no-knower：secret/selective 而无 knownBy → MODERATE/CANON；有知情人则不报', () => {
+    const ledger: Ledger = {
+      ...emptyLedger(),
+      knowledge: [
+        { character: '林渡', knows: [], visibility: 'secret' },
+        { character: '阿九', knows: [], visibility: 'selective', knownBy: ['林渡'] },
+        { character: '张三', knows: [], visibility: 'public' },
+      ],
+    };
+    const f = ledgerDiagnostics(ledger);
+    expect(f.some((x) => x.code === 'knowledge-no-knower' && x.severity === 'MODERATE' && x.category === 'CANON' && x.message.includes('林渡'))).toBe(true);
+    expect(f.some((x) => x.message.includes('阿九'))).toBe(false);
+    expect(f.some((x) => x.message.includes('张三'))).toBe(false);
   });
 });
 

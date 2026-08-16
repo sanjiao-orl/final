@@ -307,7 +307,7 @@ server.registerTool(
   {
     title: '更新四维账本',
     description:
-      '把一组操作应用到账本并原子写回（覆盖前旧账本自动快照进 .novel/history/；账本损坏时拒绝写入；写前复核账本未被其他进程改动，被改动则抛错不覆盖）。ops 元素按 op 区分：clock/prop/promise/knowledge（传 entry，按 chapters/name/id/character 键 upsert）、doNotReexplain/tripwire（传 item 去重追加）、protect（传 item 去重追加，可带 reason）、remove（按各维自然键删除：dimension 传 clock/prop/promise/knowledge/doNotReexplain/protect/tripwire，clock 再传 chapters 数组、prop 传 name、promise 传 id、knowledge 传 character、三张登记表传 item 文本精确匹配；找不到目标静默 no-op，幂等）。entry 结构：clock 需 chapters 非空字符串数组（可带 thread/storyDay/season/absoluteDate/notes）；prop 需 name + custody 数组（元素 {chapter, holder?}）；knowledge 需 character + knows 数组（可带 doesNotKnow/visibility/knownBy）；promise 需 id + name + setups 数组 + payoffs 数组（元素 {chapter, line?, quote?}），可带 due/note/heat，arc 枚举 planted 埋设（缺省可不传）/pending 待回收/resolved 已回收/failed 断线。章引用（clock.chapters / prop.custody[].chapter / promise.setups[].chapter / promise.payoffs[].chapter）必须用 canonical `manuscript/卷/第N章.md` relPath（正斜杠），否则 overdue-promise 的章序匹配会失效。ledgerPath 必须是 .novel/ 根目录正下的 .md（不含子目录）。返回更新后账本与写结果。',
+      '把一组操作应用到账本并原子写回（覆盖前旧账本自动快照进 .novel/history/；账本损坏时拒绝写入；写前复核账本未被其他进程改动，被改动则抛错不覆盖）。ops 元素按 op 区分：clock/prop/promise/knowledge（传 entry，按 chapters/name/id/character 键 upsert）、doNotReexplain/tripwire（传 item 去重追加）、protect（传 item 去重追加，可带 reason）、remove（按各维自然键删除：dimension 传 clock/prop/promise/knowledge/doNotReexplain/protect/tripwire，clock 再传 chapters 数组、prop 传 name、promise 传 id、knowledge 传 character、三张登记表传 item 文本精确匹配；找不到目标静默 no-op，幂等）。entry 结构：clock 需 chapters 非空字符串数组（可带 thread/storyDay/season/absoluteDate/notes）；prop 需 name + custody 数组（元素 {chapter, holder?}）；knowledge 需 character + knows 数组（元素可为字符串（纯事实）或 {fact, since?, refs?}，since=得知章 relPath 时间轴，refs=回指伏笔 id；可带 doesNotKnow/visibility/knownBy）；promise 需 id + name + setups 数组 + payoffs 数组（元素 {chapter, line?, quote?}），可带 due/note/heat/expectedVolume（预计回收卷）/links（{props?, characters?} 关联道具角色），arc 枚举 planted 埋设（缺省可不传）/pending 待回收/resolved 已回收/failed 断线。章引用（clock.chapters / prop.custody[].chapter / promise.setups[].chapter / promise.payoffs[].chapter）必须用 canonical `manuscript/卷/第N章.md` relPath（正斜杠），否则 overdue-promise 的章序匹配会失效。ledgerPath 必须是 .novel/ 根目录正下的 .md（不含子目录）。返回更新后账本与写结果。',
     inputSchema: {
       workDir: z.string().describe('作品文件夹的绝对路径'),
       ops: z.array(z.record(z.string(), z.unknown())).describe('账本操作数组，每项须含字符串 op 字段'),
@@ -322,7 +322,7 @@ server.registerTool(
   {
     title: '账本确定性诊断',
     description:
-      '对 workDir 跑全量确定性诊断（零 LLM 成本，宁缺毋滥）：账本级 = 悬空伏笔 / 逾期伏笔 / 道具双位冲突；章级 = 章首时间跳变 / 季节冲突。返回 findings（code/chapter/severity/category/message）、hasBlockers（是否存在 BLOCKER）与 blockerCount（问题日志 CR 行 severity 列为 BLOCKER 的条数）——BLOCKER 计数已接进 hasBlockers，供暂存区入口标红，不做硬拦截。',
+      '对 workDir 跑全量确定性诊断（零 LLM 成本，宁缺毋滥）：账本级 = 悬空伏笔 / 逾期伏笔 / 道具双位冲突 + 批三-2 三条新规则（clock-regression 时钟跨章倒退 / custody-chain-break 托管链断裂 / knowledge-no-knower 保密无知情人登记）；章级 = 章首时间跳变 / 季节冲突。返回 findings（code/chapter/severity/category/message）、hasBlockers（是否存在 BLOCKER）与 blockerCount（问题日志 CR 行 severity 列为 BLOCKER 的条数）——BLOCKER 计数已接进 hasBlockers，供暂存区入口标红，不做硬拦截。',
     inputSchema: {
       workDir: z.string().describe('作品文件夹的绝对路径'),
       ledgerPath: z.string().optional().describe('可选：账本文件相对 workDir 路径，必须是 .novel/ 根目录正下的 .md（不含子目录），默认 .novel/ledger.md'),

@@ -95,15 +95,28 @@ export interface PromiseEntry {
   /** 逾期维度（T2 新增）：埋设后 N 章内未回收 → 诊断提示。缺省不设（不强制）。 */
   due?: number;
   note?: string;
+  /** 预计回收卷（卷级作用域，批三-2）：如「卷一」；自由字符串，缺省不设。 */
+  expectedVolume?: string;
+  /** 跨维引用（批三-2）：关联道具名/角色名；缺省不设。 */
+  links?: { props?: string[]; characters?: string[] };
+}
+
+/** 知情事实（批三-2 时间轴化）：fact=事实描述；since=得知章的 manuscript relPath（正斜杠）；refs=回指的伏笔 id 列表。 */
+export interface KnowledgeFact {
+  fact: string;
+  /** 得知章（manuscript relPath），供时间轴排序与「自 <章>」后缀；缺省表示无时间锚。 */
+  since?: string;
+  /** 回指的伏笔 id 列表（如 F-001）。 */
+  refs?: string[];
 }
 
 /** 知情地图：一个角色的知情范围（T2 knowledge 轴 public/selective/secret）。 */
 export interface KnowledgeEntry {
   character: string;
-  /** 已知事实（事实描述）。 */
-  knows: string[];
-  /** 明确未知（作者登记，用于戏剧反讽判定）。 */
-  doesNotKnow?: string[];
+  /** 已知事实（事实描述；parse/assert 双路径统一升级为 KnowledgeFact，元素兼容纯字符串旧格式）。 */
+  knows: KnowledgeFact[];
+  /** 明确未知（作者登记，用于戏剧反讽判定；与 knows 同构）。 */
+  doesNotKnow?: KnowledgeFact[];
   /** 可见性：public（默认）/ selective / secret（保密铁律）。 */
   visibility?: 'public' | 'selective' | 'secret';
   /** selective/secret 时必填的知情人。 */
@@ -128,6 +141,9 @@ export interface Ledger {
   /** 未知 frontmatter 字段（人工增补/未来新字段）：parse 时原样透传保留，serialize 时写回；不解析不校验。 */
   extra?: Record<string, unknown>;
 }
+
+/** 章节顺序（用于「逾期」章距计算与渲染时间轴化排序；顺序即结构树阅读顺序）。 */
+export type ChapterRef = { relPath: string; title: string };
 
 /** 空账本。 */
 export function emptyLedger(): Ledger {
@@ -335,6 +351,30 @@ function assertKnowledge(entry: unknown): asserts entry is KnowledgeEntry {
   const e = entry as KnowledgeEntry;
   if (!e || typeof e.character !== 'string' || e.character.trim() === '') throw new Error('knowledge 需要非空 character');
   if (!Array.isArray(e.knows)) throw new Error('knowledge.knows 必须是数组');
+  // 批三-2 放宽：元素允许字符串（原地升级为 {fact}）或对象（需 fact 非空字符串）——与 normalizeLedger 读路径口径一致
+  const upgrade = (item: unknown): KnowledgeFact => {
+    if (typeof item === 'string') {
+      const t = item.trim();
+      if (t === '') throw new Error('knowledge 元素不能为空字符串');
+      return { fact: t };
+    }
+    const o = item as Partial<KnowledgeFact>;
+    if (!o || typeof o.fact !== 'string' || o.fact.trim() === '') {
+      throw new Error('knowledge 元素必须是非空字符串或带非空 fact 的对象');
+    }
+    const kf: KnowledgeFact = { fact: o.fact.trim() };
+    if (typeof o.since === 'string' && o.since.trim() !== '') kf.since = o.since.trim();
+    if (Array.isArray(o.refs)) {
+      const refs = o.refs.filter((r): r is string => typeof r === 'string' && r.trim() !== '').map((r) => r.trim());
+      if (refs.length > 0) kf.refs = refs;
+    }
+    return kf;
+  };
+  e.knows = (e.knows as unknown as Array<string | KnowledgeFact>).map((k) => upgrade(k));
+  if (e.doesNotKnow !== undefined) {
+    if (!Array.isArray(e.doesNotKnow)) throw new Error('knowledge.doesNotKnow 必须是数组');
+    e.doesNotKnow = (e.doesNotKnow as unknown as Array<string | KnowledgeFact>).map((k) => upgrade(k));
+  }
 }
 
 // ---------- 序列化：YAML frontmatter（机器态）+ Markdown 渲染（人读） ----------
@@ -342,57 +382,207 @@ function assertKnowledge(entry: unknown): asserts entry is KnowledgeEntry {
 /** 账本默认文件路径（相对 workDir）。 */
 export const DEFAULT_LEDGER_PATH = '.novel/ledger.md';
 
-/** 渲染时钟表为 Markdown 表格。 */
-function renderClock(clock: ClockRow[]): string {
+/** 卷提取：章 relPath `manuscript/<卷>/<章>.md` 段数 ≥3 时卷 = 第二段，否则 null（未分卷）。 */
+function chapterVolume(rel: string): string | null {
+  const parts = rel.split('/');
+  return parts.length >= 3 ? parts[1] ?? null : null;
+}
+
+/** 渲染时钟表为 Markdown 表格（chapterOrder 提供时按「行内首个可定位章」的章序排序，查不到的保持原相对序在后）。 */
+function renderClock(clock: ClockRow[], chapterOrder?: ChapterRef[]): string {
   if (clock.length === 0) return '_（空）_';
   const head = ['| Chapters | Thread | Story-day | Season | Absolute date | Notes |', '| --- | --- | --- | --- | --- | --- |'];
+  const esc = (s: string | undefined): string => (s ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
+  const orderIndex = chapterOrder ? new Map(chapterOrder.map((c, i) => [c.relPath, i])) : undefined;
   const rows = clock.map((r) => {
-    const esc = (s: string | undefined): string => (s ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
-    return `| ${r.chapters.map(esc).join(', ') || '-'} | ${esc(r.thread)} | ${esc(r.storyDay)} | ${esc(r.season)} | ${esc(r.absoluteDate)} | ${esc(r.notes)} |`;
+    let idx: number | undefined;
+    if (orderIndex) {
+      for (const c of r.chapters) {
+        const i = orderIndex.get(c);
+        if (i !== undefined) {
+          idx = i;
+          break;
+        }
+      }
+    }
+    return { r, idx };
   });
-  return [head[0], head[1], ...rows].join('\n');
+  if (orderIndex && orderIndex.size > 0) {
+    rows.sort((a, b) => {
+      if (a.idx !== undefined && b.idx !== undefined) return a.idx - b.idx;
+      if (a.idx !== undefined) return -1; // 可定位在前
+      if (b.idx !== undefined) return 1;
+      return 0; // 都不可定位：保持原相对序（稳定排序）
+    });
+  }
+  const body = rows.map(
+    ({ r }) =>
+      `| ${r.chapters.map(esc).join(', ') || '-'} | ${esc(r.thread)} | ${esc(r.storyDay)} | ${esc(r.season)} | ${esc(r.absoluteDate)} | ${esc(r.notes)} |`,
+  );
+  return [head[0], head[1], ...body].join('\n');
 }
 
-/** 渲染承诺登记。 */
-function renderPromises(promises: PromiseEntry[]): string {
+/**
+ * 渲染承诺登记（批三-2 分层聚合）：
+ * - 未回收（planted/pending）按「最后一个 setup 章的卷」分组，小节 `### <卷名> · 未回收`；无卷归 `### 未分卷 · 未回收`；
+ * - resolved/failed 全部沉底进 `### 已回收 / 断线` 一个小节（不分卷）；
+ * - 未回收组内排序：HOT 最前，其次 WARM/COLD/无热度；同热度保持原顺序；
+ * - 行内标记（在原有基础上扩充）：〔悬空〕=setups>0 且 payoffs=0；〔逾期·已过 N 章〕=chapterOrder 提供且
+ *   与 ledgerDiagnostics overdue-promise 口径一致（planted/pending + 无回收 + 已过 ≥ due 章）；〔预计回收卷 X 已过〕=
+ *   设了 expectedVolume 且未回收且 chapterOrder 末章的卷 ≠ expectedVolume；links 内联 `（道具: A、B · 角色: C）`（缺省不出）。
+ */
+function renderPromises(promises: PromiseEntry[], chapterOrder?: ChapterRef[]): string {
   if (promises.length === 0) return '_（空）_';
-  return promises
-    .map((p) => {
-      const heat = p.heat ? ` [${p.heat}]` : '';
-      const setups = p.setups.length > 0 ? p.setups.map((s) => `${s.chapter}${s.line ? `:${s.line}` : ''}`).join(', ') : '无';
-      const payoffs = p.payoffs.length > 0 ? p.payoffs.map((x) => `${x.chapter}${x.line ? `:${x.line}` : ''}`).join(', ') : '无';
-      const due = p.due !== undefined ? `，逾期：${p.due} 章` : '';
-      return `- **${p.id}** [${p.arc}${heat}] ${p.name} — 埋设：${setups}；回收：${payoffs}${due}${p.note ? `（${p.note}）` : ''}`;
-    })
-    .join('\n');
+  const orderIndex = chapterOrder ? new Map(chapterOrder.map((c, i) => [c.relPath, i])) : undefined;
+  const total = chapterOrder?.length ?? 0;
+  const lastVol = chapterOrder && chapterOrder.length > 0 ? chapterVolume(chapterOrder[chapterOrder.length - 1]!.relPath) : null;
+  const volumeOf = (p: PromiseEntry): string | null => {
+    const lastSetup = p.setups.length > 0 ? p.setups[p.setups.length - 1]!.chapter : null;
+    return lastSetup !== null ? chapterVolume(lastSetup) : null;
+  };
+
+  const renderLinks = (p: PromiseEntry): string => {
+    const l = p.links;
+    if (!l) return '';
+    const props = l.props && l.props.length > 0 ? `道具: ${l.props.join('、')}` : '';
+    const chars = l.characters && l.characters.length > 0 ? `角色: ${l.characters.join('、')}` : '';
+    const inner = [props, chars].filter(Boolean).join(' · ');
+    return inner !== '' ? `（${inner}）` : '';
+  };
+
+  const renderOne = (p: PromiseEntry): string => {
+    const heat = p.heat ? `·${p.heat}` : '';
+    const setups = p.setups.length > 0 ? p.setups.map((s) => `${s.chapter}${s.line ? `:${s.line}` : ''}`).join(', ') : '无';
+    const payoffs = p.payoffs.length > 0 ? p.payoffs.map((x) => `${x.chapter}${x.line ? `:${x.line}` : ''}`).join(', ') : '无';
+    const due = p.due !== undefined ? `，逾期：${p.due} 章` : '';
+    let markers = '';
+    // 悬空：未回收弧（planted/pending）埋设了但无回收（与 dangling-promise 诊断同口径；纯派生标记，不依赖 chapterOrder）
+    if ((p.arc === 'planted' || p.arc === 'pending') && p.setups.length > 0 && p.payoffs.length === 0) markers += '〔悬空〕';
+    // 逾期：仅当 chapterOrder 提供；判定口径与 ledgerDiagnostics overdue-promise 一致
+    if (
+      chapterOrder !== undefined &&
+      p.due !== undefined &&
+      p.due >= 0 &&
+      (p.arc === 'planted' || p.arc === 'pending') &&
+      p.payoffs.length === 0 &&
+      p.setups.length > 0
+    ) {
+      const lastSetup = p.setups[p.setups.length - 1]!.chapter;
+      const lastIdx = orderIndex?.get(lastSetup);
+      if (lastIdx !== undefined && total - 1 - lastIdx >= p.due) {
+        markers += `〔逾期·已过 ${total - 1 - lastIdx} 章〕`;
+      }
+    }
+    // 预计回收卷已过：设了 expectedVolume 且未回收且 chapterOrder 末章的卷 ≠ expectedVolume（末章无卷则不算已过）
+    if (
+      chapterOrder !== undefined &&
+      p.expectedVolume !== undefined &&
+      (p.arc === 'planted' || p.arc === 'pending') &&
+      lastVol !== null &&
+      lastVol !== p.expectedVolume
+    ) {
+      markers += `〔预计回收卷 ${p.expectedVolume} 已过〕`;
+    }
+    return `- **${p.id}** [${p.arc}${heat}] ${p.name} — 埋设：${setups}；回收：${payoffs}${due}${markers}${renderLinks(p)}${p.note ? `（${p.note}）` : ''}`;
+  };
+
+  const heatRank = (p: PromiseEntry): number => (p.heat === 'HOT' ? 0 : p.heat === 'WARM' ? 1 : p.heat === 'COLD' ? 2 : 3);
+  const open = promises.filter((p) => p.arc === 'planted' || p.arc === 'pending');
+  const closed = promises.filter((p) => p.arc === 'resolved' || p.arc === 'failed');
+  // 未回收按卷分组（保持卷首见顺序）；无卷归 null（渲染为「未分卷」）
+  const byVolume = new Map<string | null, PromiseEntry[]>();
+  for (const p of open) {
+    const v = volumeOf(p);
+    const list = byVolume.get(v) ?? [];
+    list.push(p);
+    byVolume.set(v, list);
+  }
+  const blocks: string[] = [];
+  for (const [v, list] of byVolume) {
+    const sorted = [...list].sort((a, b) => {
+      const ra = heatRank(a);
+      const rb = heatRank(b);
+      if (ra !== rb) return ra - rb;
+      return 0; // 同热度保持原顺序（稳定排序）
+    });
+    blocks.push([`### ${v ?? '未分卷'} · 未回收`, ...sorted.map(renderOne)].join('\n'));
+  }
+  if (closed.length > 0) {
+    blocks.push(['### 已回收 / 断线', ...closed.map(renderOne)].join('\n'));
+  }
+  return blocks.join('\n\n');
 }
 
-/** 渲染道具托管。 */
-function renderProps(props: PropEntry[]): string {
+/** 渲染道具托管（chapterOrder 提供时托管链步骤按章序排，查不到的保持原相对序在后；行格式其余不变）。 */
+function renderProps(props: PropEntry[], chapterOrder?: ChapterRef[]): string {
   if (props.length === 0) return '_（空）_';
+  const orderIndex = chapterOrder ? new Map(chapterOrder.map((c, i) => [c.relPath, i])) : undefined;
   return props
     .map((p) => {
-      const chain = p.custody.length > 0 ? p.custody.map((c) => `${c.holder ?? '?'}(${c.chapter}${c.line ? `:${c.line}` : ''})`).join(' → ') : '（无托管链）';
+      let steps = p.custody;
+      if (orderIndex && orderIndex.size > 0) {
+        steps = [...p.custody].sort((a, b) => {
+          const ia = orderIndex.get(a.chapter);
+          const ib = orderIndex.get(b.chapter);
+          if (ia !== undefined && ib !== undefined) return ia - ib;
+          if (ia !== undefined) return -1;
+          if (ib !== undefined) return 1;
+          return 0;
+        });
+      }
+      const chain = steps.length > 0 ? steps.map((c) => `${c.holder ?? '?'}(${c.chapter}${c.line ? `:${c.line}` : ''})`).join(' → ') : '（无托管链）';
       return `- **${p.name}**${p.type ? ` [${p.type}]` : ''} — 当前：${p.holder ?? '?'}${p.status ? `（${p.status}）` : ''}；托管链：${chain}${p.tripwire ? `；硬规则：${p.tripwire}` : ''}`;
     })
     .join('\n');
 }
 
-/** 渲染知情地图。 */
-function renderKnowledge(knowledge: KnowledgeEntry[]): string {
+/**
+ * 渲染知情地图（批三-2 时间轴化）：
+ * - since 提供时事实渲染为 `fact（自 <章标题>）`（章标题经 chapterOrder 查，查不到直接用 relPath 文本）；refs 渲染为 `（伏笔: F-001、F-002）`；
+ * - chapterOrder 提供时 knows/doesNotKnow 内的 facts 按 since 章序排（无 since 的排最后，保持原相对序）；
+ * - 行首 visibility/knownBy 标注保持现状口径。
+ */
+function renderKnowledge(knowledge: KnowledgeEntry[], chapterOrder?: ChapterRef[]): string {
   if (knowledge.length === 0) return '_（空）_';
+  const orderIndex = chapterOrder ? new Map(chapterOrder.map((c, i) => [c.relPath, i])) : undefined;
+  const titleOf = (rel: string): string =>
+    chapterOrder?.find((c) => c.relPath === rel)?.title ?? rel.split('/').pop()?.replace(/\.md$/i, '') ?? rel;
+  const sortFacts = (facts: KnowledgeFact[]): KnowledgeFact[] => {
+    if (!orderIndex || orderIndex.size === 0) return facts;
+    return [...facts].sort((a, b) => {
+      const ia = a.since !== undefined ? orderIndex.get(a.since) : undefined;
+      const ib = b.since !== undefined ? orderIndex.get(b.since) : undefined;
+      if (ia !== undefined && ib !== undefined) return ia - ib;
+      if (ia !== undefined) return -1; // 有 since 且可定位在前
+      if (ib !== undefined) return 1;
+      return 0; // 无 since 或不可定位：保持原相对序（稳定排序）
+    });
+  };
+  const renderFacts = (facts: KnowledgeFact[]): string =>
+    facts
+      .map((f) => {
+        let t = f.fact;
+        if (f.since !== undefined) t += `（自 ${titleOf(f.since)}）`;
+        if (f.refs && f.refs.length > 0) t += `（伏笔: ${f.refs.join('、')}）`;
+        return t;
+      })
+      .join('；');
   return knowledge
     .map((k) => {
       const vis = k.visibility && k.visibility !== 'public' ? ` [${k.visibility}${k.knownBy ? `: ${k.knownBy.join(',')}` : ''}]` : '';
-      const knows = k.knows.length > 0 ? k.knows.join('；') : '（无）';
-      const dnk = k.doesNotKnow && k.doesNotKnow.length > 0 ? `；不知道：${k.doesNotKnow.join('；')}` : '';
+      const knows = k.knows.length > 0 ? renderFacts(sortFacts(k.knows)) : '（无）';
+      const dnk = k.doesNotKnow && k.doesNotKnow.length > 0 ? `；不知道：${renderFacts(sortFacts(k.doesNotKnow))}` : '';
       return `- **${k.character}**${vis} 知道：${knows}${dnk}`;
     })
     .join('\n');
 }
 
-/** 渲染整个账本为人类可读 Markdown（正文部分；frontmatter 由 writeLedger 单独写）。 */
-export function renderLedgerMarkdown(ledger: Ledger): string {
+/**
+ * 渲染整个账本为人类可读 Markdown（正文部分；frontmatter 由 writeLedger 单独写）。
+ * opts.chapterOrder 缺省时所有「章序排序/逾期标记」降级为不排序不标记，其余照常。
+ */
+export function renderLedgerMarkdown(ledger: Ledger, opts?: { chapterOrder?: ChapterRef[] }): string {
+  const chapterOrder = opts?.chapterOrder;
   return [
     '# Reader Ledger',
     '',
@@ -402,19 +592,19 @@ export function renderLedgerMarkdown(ledger: Ledger): string {
     '',
     '## Position / Clock table',
     '',
-    renderClock(ledger.clock),
+    renderClock(ledger.clock, chapterOrder),
     '',
     '## Promise register',
     '',
-    renderPromises(ledger.promises),
+    renderPromises(ledger.promises, chapterOrder),
     '',
     '## Prop custody',
     '',
-    renderProps(ledger.props),
+    renderProps(ledger.props, chapterOrder),
     '',
     '## Character knowledge-map',
     '',
-    renderKnowledge(ledger.knowledge),
+    renderKnowledge(ledger.knowledge, chapterOrder),
     '',
     '## Do-not-re-explain register',
     '',
@@ -433,6 +623,38 @@ export function renderLedgerMarkdown(ledger: Ledger): string {
 
 /** 账本 frontmatter 的已知键；其余键视为未知字段（人工增补/未来新字段）透传保留。 */
 const LEDGER_KNOWN_KEYS = ['clock', 'props', 'promises', 'knowledge', 'doNotReexplain', 'protect', 'tripwires'];
+
+/**
+ * 解析 knowledge 的 knows/doesNotKnow 数组（批三-2 向后兼容）：
+ * - 纯字符串项（旧格式）容错升级为 { fact: <字符串> }；
+ * - 对象项按新结构解析：fact 非空字符串才收（否则丢弃该项），since/refs 容错；
+ * - 其他类型（数字/布尔/null）丢弃。
+ */
+function knowledgeFacts(v: unknown): KnowledgeFact[] {
+  if (!Array.isArray(v)) return [];
+  const out: KnowledgeFact[] = [];
+  for (const item of v) {
+    if (typeof item === 'string') {
+      const t = item.trim();
+      if (t !== '') out.push({ fact: t });
+      continue;
+    }
+    if (item !== null && typeof item === 'object' && !Array.isArray(item)) {
+      const o = item as Record<string, unknown>;
+      const fact = typeof o.fact === 'string' && o.fact.trim() !== '' ? o.fact.trim() : undefined;
+      if (fact === undefined) continue; // fact 非空字符串才收
+      const kf: KnowledgeFact = { fact };
+      const since = typeof o.since === 'string' && o.since.trim() !== '' ? o.since.trim() : undefined;
+      if (since !== undefined) kf.since = since;
+      const refs = Array.isArray(o.refs)
+        ? o.refs.filter((r): r is string => typeof r === 'string' && r.trim() !== '').map((r) => r.trim())
+        : undefined;
+      if (refs !== undefined && refs.length > 0) kf.refs = refs;
+      out.push(kf);
+    }
+  }
+  return out;
+}
 
 /** 把解析出的 YAML 原始对象规范化为 Ledger（容错：缺失字段补默认值）。 */
 function normalizeLedger(raw: unknown): Ledger {
@@ -522,12 +744,27 @@ function normalizeLedger(raw: unknown): Ledger {
     if (due !== undefined) promise.due = due;
     const note = str(o.note);
     if (note !== undefined) promise.note = note;
+    // 批三-2 新字段（容错）：expectedVolume 自由字符串；links 需 { props?/characters? } 字符串数组（容错过滤）
+    const expectedVolume = str(o.expectedVolume);
+    if (expectedVolume !== undefined) promise.expectedVolume = expectedVolume;
+    const linksRaw = o.links;
+    if (linksRaw !== null && typeof linksRaw === 'object' && !Array.isArray(linksRaw)) {
+      const lo = linksRaw as Record<string, unknown>;
+      const lProps = strArr(lo.props);
+      const lChars = strArr(lo.characters);
+      if (lProps.length > 0 || lChars.length > 0) {
+        const links: { props?: string[]; characters?: string[] } = {};
+        if (lProps.length > 0) links.props = lProps;
+        if (lChars.length > 0) links.characters = lChars;
+        promise.links = links;
+      }
+    }
     return promise;
   });
   base.knowledge = arr(r.knowledge).map((k): KnowledgeEntry => {
     const o = (k ?? {}) as Record<string, unknown>;
-    const entry: KnowledgeEntry = { character: str(o.character) ?? '', knows: strArr(o.knows) };
-    const doesNotKnow = strArr(o.doesNotKnow);
+    const entry: KnowledgeEntry = { character: str(o.character) ?? '', knows: knowledgeFacts(o.knows) };
+    const doesNotKnow = knowledgeFacts(o.doesNotKnow);
     if (doesNotKnow.length > 0) entry.doesNotKnow = doesNotKnow;
     const vis = str(o.visibility);
     if (vis === 'public' || vis === 'selective' || vis === 'secret') entry.visibility = vis;
@@ -548,22 +785,42 @@ function normalizeLedger(raw: unknown): Ledger {
   return base;
 }
 
+/**
+ * 组装 YAML 前的 knowledge 事实：只有 fact、无 since/refs 的项写回**纯字符串**（旧账本 round-trip 格式不变）；
+ * 带 since/refs 的项写对象。serializeLedger 调用前做一次转换，保证最小 diff。
+ */
+function knowledgeForYaml(list: KnowledgeFact[]): Array<string | Record<string, unknown>> {
+  return list.map((f) => {
+    if (f.since === undefined && (f.refs === undefined || f.refs.length === 0)) return f.fact;
+    const o: Record<string, unknown> = { fact: f.fact };
+    if (f.since !== undefined) o.since = f.since;
+    if (f.refs !== undefined && f.refs.length > 0) o.refs = f.refs;
+    return o;
+  });
+}
+
 /** 账本序列化为完整文件内容（YAML frontmatter + 渲染正文）；未知字段（extra）原样写回，与已知字段冲突时已知字段优先。 */
-export function serializeLedger(ledger: Ledger): string {
+export function serializeLedger(ledger: Ledger, opts?: { chapterOrder?: ChapterRef[] }): string {
   const yaml = stringifyYaml(
     {
       ...(ledger.extra ?? {}), // 未知字段先展开，已知字段后覆盖 → 冲突时已知字段优先
       clock: ledger.clock,
       props: ledger.props,
       promises: ledger.promises,
-      knowledge: ledger.knowledge,
+      knowledge: ledger.knowledge.map((k) => ({
+        character: k.character,
+        knows: knowledgeForYaml(k.knows),
+        ...(k.doesNotKnow !== undefined && k.doesNotKnow.length > 0 ? { doesNotKnow: knowledgeForYaml(k.doesNotKnow) } : {}),
+        ...(k.visibility !== undefined ? { visibility: k.visibility } : {}),
+        ...(k.knownBy !== undefined && k.knownBy.length > 0 ? { knownBy: k.knownBy } : {}),
+      })),
       doNotReexplain: ledger.doNotReexplain,
       protect: ledger.protect,
       tripwires: ledger.tripwires,
     },
     { lineWidth: 0 },
   );
-  return `---\n${yaml}---\n\n${renderLedgerMarkdown(ledger)}`;
+  return `---\n${yaml}---\n\n${renderLedgerMarkdown(ledger, opts)}`;
 }
 
 // ---------- 读写（文件系统） ----------
@@ -692,12 +949,20 @@ export function readLedger(workDir: string, ledgerPath?: string): { ledger: Ledg
   }
 }
 
-/** 写账本（原子写，覆盖前对旧账本快照进 .novel/history/）；返回 { ok, path, bytes }。 */
+/** 全书章序（title 直接用文件名去 .md，不读章正文——读 frontmatter 取 title 在写/冷读路径太贵）；渲染时间轴化与逾期标记用。 */
+function chapterOrderForWork(wd: string): ChapterRef[] {
+  return collectMdFiles(path.join(wd, 'manuscript')).map((f) => ({
+    relPath: toPosix(path.join('manuscript', f.rel)),
+    title: path.basename(f.abs, '.md'),
+  }));
+}
+
+/** 写账本（原子写，覆盖前对旧账本快照进 .novel/history/）；渲染视图带全书章序（时间轴化/逾期标记），返回 { ok, path, bytes }。 */
 export function writeLedger(workDir: string, ledger: Ledger, ledgerPath?: string): { ok: true; path: string; bytes: number } {
   const wd = assertWorkDir(workDir);
   const rel = ledgerPath || DEFAULT_LEDGER_PATH;
   const abs = ledgerAbs(wd, rel);
-  const content = serializeLedger(ledger);
+  const content = serializeLedger(ledger, { chapterOrder: chapterOrderForWork(wd) });
   snapshotLedgerBeforeWrite(wd, rel, abs, content);
   const { bytes } = atomicWrite(abs, content);
   return { ok: true, path: rel, bytes };
@@ -760,17 +1025,108 @@ export interface LedgerFinding {
   message: string;
 }
 
-/** 章节顺序（用于「逾期」章距计算；顺序即结构树阅读顺序）。 */
-export type ChapterRef = { relPath: string; title: string };
+/**
+ * 中文数字转阿拉伯数字（支持 一~九/十/百/千/万 组合，如「十二」「二十五」「一百零三」）。
+ * 解析不了返回 undefined（宁缺毋滥：解析不出跳过比较，不误报）。
+ */
+function cnNum(s: string): number | undefined {
+  const digits: Record<string, number> = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  const units: Record<string, number> = { 十: 10, 百: 100, 千: 1000, 万: 10000 };
+  if (/^[零一二两三四五六七八九]$/.test(s)) return digits[s];
+  let total = 0;
+  let section = 0;
+  let num = 0;
+  for (const ch of s) {
+    if (ch in digits) {
+      num = digits[ch]!;
+    } else if (ch in units) {
+      const u = units[ch]!;
+      if (ch === '十' && num === 0) num = 1; // 「十二」「十五」开头的十 = 1 十；「一十二」同样 = 12
+      section += num * u;
+      num = 0;
+      if (ch === '万') {
+        total += section;
+        section = 0;
+      }
+    } else {
+      return undefined; // 非法字符
+    }
+  }
+  return total + section + num;
+}
+
+/** 解析「第 N 日/天」的 N（先阿拉伯数字，再中文数字）；解析不出返回 undefined。 */
+function parseDayNumber(storyDay: string | undefined): number | undefined {
+  if (!storyDay) return undefined;
+  const m = /第(\d+)[日天]/.exec(storyDay);
+  if (m) return Number(m[1]);
+  const m2 = /第([零一二两三四五六七八九十百千万]+)[日天]/.exec(storyDay);
+  if (m2) return cnNum(m2[1]!);
+  return undefined;
+}
 
 /**
- * 账本级诊断（纯函数，不读文件）：悬空伏笔、逾期伏笔、道具双位冲突。
- * chapterOrder 为全书章顺序（用于逾期章距）。
+ * 账本级诊断（纯函数，不读文件）：悬空伏笔、逾期伏笔、道具双位冲突 + 批三-2 三条新规则
+ * （clock-regression 时钟跨章倒退 / custody-chain-break 托管链断裂 / knowledge-no-knower 知情维首条规则）。
+ * chapterOrder 为全书章顺序（用于逾期章距与时间轴化判定）；新规则一律按 orderIndex/titleOf 口径，
+ * 找不到序号的条目跳过而非误报。
+ *
+ * BLOCKER 复核结论（决策 0009 批三-2 第 3 条）：新规则全部维持 MAJOR/MODERATE，确定性诊断不产 BLOCKER
+ * 的纪律不变——倒叙叙事（clock-regression）、同章正常转手（custody-chain-break）都有误报面，宁缺毋滥，不升 BLOCKER。
  */
 export function ledgerDiagnostics(ledger: Ledger, chapterOrder: ChapterRef[] = []): LedgerFinding[] {
   const findings: LedgerFinding[] = [];
   const orderIndex = new Map(chapterOrder.map((c, i) => [c.relPath, i]));
   const titleOf = (rel: string): string => chapterOrder.find((c) => c.relPath === rel)?.title ?? rel;
+
+  // clock-regression：同 thread 内（thread 缺失视为同一默认线）相邻 clock 行的「第 N 日/天」N 值倒退 → 报跨章连续性。
+  // 行序 = 按「行内首个可定位章」的章序排，查不到的保持原相对序在后；任一相邻行解析不出 N 就跳过该比较。
+  // 已知误报面：倒叙叙事会误报（故不升 BLOCKER）。
+  {
+    const rows = ledger.clock.map((r) => {
+      let idx: number | undefined;
+      for (const c of r.chapters) {
+        const i = orderIndex.get(c);
+        if (i !== undefined) {
+          idx = i;
+          break;
+        }
+      }
+      return { row: r, idx };
+    });
+    if (orderIndex.size > 0) {
+      rows.sort((a, b) => {
+        if (a.idx !== undefined && b.idx !== undefined) return a.idx - b.idx;
+        if (a.idx !== undefined) return -1;
+        if (b.idx !== undefined) return 1;
+        return 0;
+      });
+    }
+    const groups = new Map<string, typeof rows>();
+    for (const r of rows) {
+      const key = r.row.thread ?? ''; // thread 缺失视为同一默认线
+      const list = groups.get(key) ?? [];
+      list.push(r);
+      groups.set(key, list);
+    }
+    for (const [thread, list] of groups) {
+      for (let i = 1; i < list.length; i++) {
+        const prev = parseDayNumber(list[i - 1]!.row.storyDay);
+        const cur = parseDayNumber(list[i]!.row.storyDay);
+        if (prev === undefined || cur === undefined) continue; // 解析不出就跳过该比较（宁缺毋滥）
+        if (cur < prev) {
+          const anchor = list[i]!.row.chapters[0];
+          findings.push({
+            code: 'clock-regression',
+            ...(anchor !== undefined ? { chapter: anchor } : {}),
+            severity: 'MAJOR',
+            category: 'CONT',
+            message: `时钟跨章倒退：${thread === '' ? '默认线' : thread} 线「${list[i - 1]!.row.storyDay}」→「${list[i]!.row.storyDay}」（故事日数字倒退）`,
+          });
+        }
+      }
+    }
+  }
 
   for (const p of ledger.promises) {
     if ((p.arc === 'planted' || p.arc === 'pending') && p.setups.length > 0 && p.payoffs.length === 0) {
@@ -816,6 +1172,57 @@ export function ledgerDiagnostics(ledger: Ledger, chapterOrder: ChapterRef[] = [
           message: `道具「${prop.name}」在 ${titleOf(chapter)} 内同时登记持有者 ${holders.join(' / ')}（双位/双位同时在场矛盾）`,
         });
       }
+    }
+    // custody-chain-break(a)：托管链末端（按章序排，查不到序号的步骤保持数组序在后）持有者与当前持有者都存在且不一致
+    if (prop.custody.length > 0 && prop.holder !== undefined && prop.holder !== '') {
+      const sortedSteps = prop.custody.map((c) => {
+        const i = orderIndex.get(c.chapter);
+        return { step: c, idx: i };
+      });
+      if (orderIndex.size > 0) {
+        sortedSteps.sort((a, b) => {
+          if (a.idx !== undefined && b.idx !== undefined) return a.idx - b.idx;
+          if (a.idx !== undefined) return -1;
+          if (b.idx !== undefined) return 1;
+          return 0;
+        });
+      }
+      const lastHolder = sortedSteps[sortedSteps.length - 1]!.step.holder;
+      if (lastHolder !== undefined && lastHolder !== '' && lastHolder !== prop.holder) {
+        findings.push({
+          code: 'custody-chain-break',
+          chapter: sortedSteps[sortedSteps.length - 1]!.step.chapter,
+          severity: 'MAJOR',
+          category: 'CONT',
+          message: `道具「${prop.name}」托管链末端持有者 ${lastHolder} 与当前持有者 ${prop.holder} 矛盾`,
+        });
+      }
+    }
+    // custody-chain-break(b)：chapterOrder 非空时，托管链步骤引用的章不在 chapterOrder 中
+    if (chapterOrder.length > 0) {
+      for (const c of prop.custody) {
+        if (!orderIndex.has(c.chapter)) {
+          findings.push({
+            code: 'custody-chain-break',
+            chapter: c.chapter,
+            severity: 'MODERATE',
+            category: 'CONT',
+            message: `道具「${prop.name}」托管链引用不存在的章: ${c.chapter}`,
+          });
+        }
+      }
+    }
+  }
+
+  // knowledge-no-knower（知情维首条规则）：visibility 为 selective/secret 且 knownBy 为空/缺失 → 保密/选择可见但无知情人登记
+  for (const k of ledger.knowledge) {
+    if ((k.visibility === 'selective' || k.visibility === 'secret') && (!k.knownBy || k.knownBy.length === 0)) {
+      findings.push({
+        code: 'knowledge-no-knower',
+        severity: 'MODERATE',
+        category: 'CANON',
+        message: `角色「${k.character}」保密/选择可见但无知情人登记（knownBy 为空）`,
+      });
     }
   }
   return findings;
@@ -900,7 +1307,7 @@ const COLD_READ_SLICE_TEMPLATE = [
   '## 输出要求',
   '- 只依据本章正文 + 账本状态判断，不臆造；',
   '- 严禁读取/注入本书其他章节全文；',
-  '- 输出必须是严格 JSON：一个数组，每项为 { severity: "BLOCKER"|"MAJOR"|"MODERATE"|"MINOR", quote: string, why: string, suggestion?: string, category?: string }；severity 只能取 BLOCKER/MAJOR/MODERATE/MINOR；quote 是该章正文里的原文短引；category 可选，只取 CONT/CANON/VOICE/CRAFT/STRUCT/PACE/REPEAT/META 之一，判断不了就省略；只输出 JSON 数组本身，不要 Markdown 代码块、不要解释、不要任何前后缀；没有发现时输出 []。',
+  '- 输出必须是严格 JSON 对象，形如 {"elements": [...]}，每个元素为 { severity: "BLOCKER"|"MAJOR"|"MODERATE"|"MINOR", quote: string, why: string, suggestion?: string, category?: string }；severity 只能取 BLOCKER/MAJOR/MODERATE/MINOR；quote 是该章正文里的原文短引；category 可选，只取 CONT/CANON/VOICE/CRAFT/STRUCT/PACE/REPEAT/META 之一，判断不了就省略；只输出该 JSON 对象本身，不要 Markdown 代码块、不要解释、不要任何前后缀；没有发现时输出 {"elements": []}。',
   '',
 ].join('\n') + '\n';
 
@@ -943,6 +1350,9 @@ export function ledgerSlice(
   const wd = assertWorkDir(workDir);
   const { ledger } = readLedger(wd, ledgerPath);
 
+  // 全书章序供账本切片渲染做时间轴化排序/逾期标记（批三-2，决策 0009；与 writeLedger 同口径）。
+  const chapterOrder: ChapterRef[] = chapterOrderForWork(wd);
+
   // 读单章正文（守卫：只允许 manuscript/ 内的 .md，防止把全稿 txt 或 .novel 内文件当章注入）
   const abs = resolveInside(wd, chapterRelPath); // 越界在此抛错
   const chapterPosix = toPosix(path.relative(wd, abs));
@@ -979,7 +1389,7 @@ export function ledgerSlice(
     (token) => {
       switch (token) {
         case '{{账本切片}}':
-          return renderLedgerMarkdown(ledger);
+          return renderLedgerMarkdown(ledger, { chapterOrder });
         case '{{章节标题}}':
           return title;
         case '{{章节内容}}':
