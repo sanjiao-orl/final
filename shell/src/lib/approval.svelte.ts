@@ -10,6 +10,8 @@
  * 模式语义：ask=逐项询问；auto=本会话内同工具同目标放行一次后不再询问；yolo=全部自动放行
  * （写入仍强制事前快照，不受模式影响）。
  */
+import { WRITE_KEY_PREFIX, DELETE_KEY_PREFIX, EXPORT_KEY } from './paths.js';
+
 /** AI 直调即视为危险、需审批的工具。 */
 export const DANGEROUS_TOOLS = new Set(['write_chapter', 'delete_chapter', 'export_txt']);
 
@@ -32,11 +34,11 @@ export function describeDangerous(name: string, args: Record<string, unknown>): 
   const rel = typeof args.relPath === 'string' ? args.relPath : '';
   switch (name) {
     case 'write_chapter':
-      return { target: rel || '（未指定章）', targetKey: `write:${rel}` };
+      return { target: rel || '（未指定章）', targetKey: `${WRITE_KEY_PREFIX}${rel}` };
     case 'delete_chapter':
-      return { target: rel || '（未指定章）', targetKey: `delete:${rel}` };
+      return { target: rel || '（未指定章）', targetKey: `${DELETE_KEY_PREFIX}${rel}` };
     default:
-      return { target: '全稿导出 txt', targetKey: 'export' };
+      return { target: '全稿导出 txt', targetKey: EXPORT_KEY };
   }
 }
 

@@ -39,6 +39,47 @@ export interface ReviewFinding {
   suggestion?: string;
 }
 
+/** 裸联调参数记忆用 localStorage key（Tauri 路径不受影响）。 */
+export const LS_CORE_TOKEN_KEY = 'novel-core-token';
+export const LS_CORE_WORKDIR_KEY = 'novel-core-workdir';
+
+/** 裸联调参数解析源（可注入便于单测；缺省走真实浏览器环境）。 */
+export interface BareParamSource {
+  query?: URLSearchParams;
+  lsGet?: (key: string) => string | null;
+  lsSet?: (key: string, value: string) => void;
+  prompt?: (text: string) => string | null;
+}
+
+/**
+ * 解析裸联调连接参数（token/workDir）：query 优先（向后兼容）→ localStorage 记忆 →
+ * 用户输入（window.prompt 并写入 localStorage）。Tauri 环境不走此函数。
+ */
+export function resolveBareParam(
+  name: string,
+  lsKey: string,
+  promptText: string,
+  src: BareParamSource = {},
+): string | undefined {
+  const query = src.query ?? (typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : new URLSearchParams());
+  const lsGet = src.lsGet ?? ((k: string) => (typeof localStorage !== 'undefined' ? localStorage.getItem(k) : null));
+  const lsSet = src.lsSet ?? ((k: string, v: string) => {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(k, v);
+  });
+  const prompt = src.prompt ?? ((t: string) => (typeof window !== 'undefined' ? window.prompt(t) : null));
+
+  const fromQuery = query.get(name);
+  if (fromQuery) return fromQuery;
+  const fromLs = lsGet(lsKey);
+  if (fromLs) return fromLs;
+  const fromUser = prompt(promptText);
+  if (fromUser) {
+    lsSet(lsKey, fromUser);
+    return fromUser;
+  }
+  return undefined;
+}
+
 export class CoreClient {
   constructor(
     private readonly baseUrl: string,
@@ -73,8 +114,11 @@ export class CoreClient {
     });
   }
 
-  /** 贵档冷读审阅当前章（一次性 JSON，非 SSE）。 */
-  review(workDir: string, chapterRelPath: string): Promise<{ findings: ReviewFinding[] }> {
+  /** 贵档冷读审阅当前章（一次性 JSON，非 SSE）；persisted.ids 与 findings 同序（落盘后的 CR id）。 */
+  review(
+    workDir: string,
+    chapterRelPath: string,
+  ): Promise<{ findings: ReviewFinding[]; persisted?: { appended: number; ids: string[] } }> {
     return this.request(`${API_PREFIX}/review`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -239,7 +283,8 @@ export function tauriInvoke(): TauriInternals['invoke'] | undefined {
 
 /**
  * 连接 core：Tauri 环境走 core_info 命令（壳进程已拉起 sidecar），
- * 浏览器裸联调走 ?corePort=&coreToken=&workDir=（与 /dev 页同级的调试通道）。
+ * 浏览器裸联调走 ?corePort=&coreToken=&workDir=（与 /dev 页同级的调试通道）；
+ * token/workDir 缺省时回落到 localStorage 记忆，再缺则 prompt 用户输入并记忆。
  */
 export async function connectCore(): Promise<{ client: CoreClient; workDir: string }> {
   const invoke = tauriInvoke();
@@ -252,8 +297,8 @@ export async function connectCore(): Promise<{ client: CoreClient; workDir: stri
   }
   const q = new URLSearchParams(window.location.search);
   const port = q.get('corePort');
-  const token = q.get('coreToken');
-  const workDir = q.get('workDir');
+  const token = resolveBareParam('coreToken', LS_CORE_TOKEN_KEY, '请粘贴 core 的访问令牌（将保存在本地，下次自动读取）：', { query: q });
+  const workDir = resolveBareParam('workDir', LS_CORE_WORKDIR_KEY, '请填写作品目录绝对路径（将保存在本地，下次自动读取）：', { query: q });
   if (port && token && workDir) {
     return { client: new CoreClient(`http://127.0.0.1:${port}`, token), workDir };
   }

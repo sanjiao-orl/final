@@ -6,6 +6,7 @@
   import { iconSvg } from '../../lib/icons.js';
   import { approval } from '../../lib/approval.svelte.js';
   import { chat } from '../../lib/chat.svelte.js';
+  import { WRITE_KEY_PREFIX, DELETE_KEY_PREFIX, EXPORT_KEY } from '../../lib/paths.js';
   import type { ToolLine } from '../../lib/chat.svelte.js';
 
   interface Props {
@@ -119,9 +120,9 @@
 
   function targetKeyOf(name: string, args: Record<string, unknown>): string {
     const rel = typeof args.relPath === 'string' ? args.relPath : '';
-    if (name === 'write_chapter') return `write:${rel}`;
-    if (name === 'delete_chapter') return `delete:${rel}`;
-    return 'export';
+    if (name === 'write_chapter') return `${WRITE_KEY_PREFIX}${rel}`;
+    if (name === 'delete_chapter') return `${DELETE_KEY_PREFIX}${rel}`;
+    return EXPORT_KEY;
   }
 
   function openApproval(): void {

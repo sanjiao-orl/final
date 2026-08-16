@@ -7,12 +7,12 @@ import {
   emptyReviewReport,
   isExceeded,
   ReviewStore,
-  ISSUE_LOG_PATH,
   type PremiumFinding,
   type WorkDiagnostics,
   type WorkScanResult,
 } from './review.svelte.js';
 import { work } from './work.svelte.js';
+import { ISSUE_LOG_DEFAULT } from './paths.js';
 
 beforeEach(() => {
   work.error = null;
@@ -181,7 +181,7 @@ describe('ReviewStore', () => {
     expect(callTool).toHaveBeenCalledWith('scan_quality', { workDir: 'C:/works/demo' });
     expect(callTool).toHaveBeenCalledWith('ledger_diagnostics', {
       workDir: 'C:/works/demo',
-      issueLogPath: ISSUE_LOG_PATH,
+      issueLogPath: ISSUE_LOG_DEFAULT,
     });
     expect(s.report).not.toBeNull();
     expect(s.blockerTotal).toBe(2);
@@ -325,5 +325,129 @@ describe('ReviewStore', () => {
     expect(s.mode).toBe('scan');
     await s.runPremium('manuscript/第1章.md');
     expect(s.mode).toBe('premium');
+  });
+});
+
+describe('ReviewStore 处置闭环', () => {
+  /** 构造一个带 persisted.ids 的贵档 client：issue_set_status 成功回显。 */
+  function disposeClient(findings: PremiumFinding[], ids: string[]) {
+    const callTool = vi.fn((name: string, args: Record<string, unknown>) => {
+      if (name === 'issue_set_status') return Promise.resolve({ ok: true, id: args.id, status: args.status });
+      return Promise.resolve(name === 'scan_quality' ? scanFixture() : diagFixture());
+    });
+    const reviewFn = vi.fn().mockResolvedValue({ findings, persisted: { appended: findings.length, ids } });
+    return { callTool, reviewFn };
+  }
+
+  it('runPremium：persisted.ids 与 findings 同序存进 store；无 persisted 时为 undefined', async () => {
+    const premium: PremiumFinding[] = [
+      { severity: 'BLOCKER', quote: '他死了。', why: '与账本冲突' },
+      { severity: 'MAJOR', quote: '少年握拳。', why: '动作可更具体' },
+    ];
+    const { reviewFn } = disposeClient(premium, ['cr-1', 'cr-2']);
+    const s = new ReviewStore();
+    s.init(mockClient(vi.fn(), reviewFn), 'C:/works/demo');
+    await s.runPremium('manuscript/卷一/第1章.md');
+    expect(s.findingId('manuscript/卷一/第1章.md', 0)).toBe('cr-1');
+    expect(s.findingId('manuscript/卷一/第1章.md', 1)).toBe('cr-2');
+    expect(s.disposalOf('manuscript/卷一/第1章.md', 0)).toBeUndefined();
+
+    // 未落盘（无 persisted）：id 为 undefined，无法处置
+    const s2 = new ReviewStore();
+    s2.init(mockClient(vi.fn(), vi.fn().mockResolvedValue({ findings: premium })), 'd');
+    await s2.runPremium('manuscript/卷一/第1章.md');
+    expect(s2.findingId('manuscript/卷一/第1章.md', 0)).toBeUndefined();
+  });
+
+  it('dispose：按钮参数直达 callTool(issue_set_status)，成功后本地标灰、BLOCKER 计数减一', async () => {
+    const { callTool, reviewFn } = disposeClient(
+      [{ severity: 'BLOCKER', quote: '他死了。', why: '与账本冲突' }],
+      ['cr-1'],
+    );
+    const s = new ReviewStore();
+    s.init(mockClient(callTool, reviewFn), 'C:/works/demo');
+    await s.runPremium('manuscript/卷一/第1章.md');
+    expect(s.blockerTotal).toBe(1);
+
+    const ok = await s.dispose('manuscript/卷一/第1章.md', 0, 'done');
+    expect(ok).toBe(true);
+    expect(callTool).toHaveBeenCalledWith('issue_set_status', {
+      workDir: 'C:/works/demo',
+      issueLogPath: ISSUE_LOG_DEFAULT,
+      id: 'cr-1',
+      status: 'done',
+    });
+    expect(s.disposalOf('manuscript/卷一/第1章.md', 0)).toBe('done');
+    expect(s.blockerTotal).toBe(0); // 本地 BLOCKER 计数减一
+    expect(s.running).toBe(false);
+  });
+
+  it('dispose：known 同样生效；非 BLOCKER 不减计数', async () => {
+    const { callTool, reviewFn } = disposeClient(
+      [{ severity: 'MAJOR', quote: '少年握拳。', why: '动作可更具体' }],
+      ['cr-k'],
+    );
+    const s = new ReviewStore();
+    s.init(mockClient(callTool, reviewFn), 'd');
+    await s.runPremium('manuscript/第1章.md');
+    expect(s.blockerTotal).toBe(0);
+
+    const ok = await s.dispose('manuscript/第1章.md', 0, 'known');
+    expect(ok).toBe(true);
+    expect(callTool).toHaveBeenCalledWith('issue_set_status', expect.objectContaining({ id: 'cr-k', status: 'known' }));
+    expect(s.disposalOf('manuscript/第1章.md', 0)).toBe('known');
+    expect(s.blockerTotal).toBe(0); // MAJOR 处置不减 BLOCKER 计数
+  });
+
+  it('dispose：重复处置幂等，不重发 callTool，状态保持首次', async () => {
+    const { callTool, reviewFn } = disposeClient(
+      [{ severity: 'BLOCKER', quote: 'q', why: 'w' }],
+      ['cr-1'],
+    );
+    const s = new ReviewStore();
+    s.init(mockClient(callTool, reviewFn), 'd');
+    await s.runPremium('manuscript/第1章.md');
+
+    expect(await s.dispose('manuscript/第1章.md', 0, 'done')).toBe(true);
+    expect(callTool).toHaveBeenCalledTimes(1);
+    expect(await s.dispose('manuscript/第1章.md', 0, 'known')).toBe(true);
+    expect(callTool).toHaveBeenCalledTimes(1); // 已处置不再发请求
+    expect(s.disposalOf('manuscript/第1章.md', 0)).toBe('done');
+  });
+
+  it('dispose：无 CR id（未落盘/MCP 降级）不发请求，BLOCKER 计数不减', async () => {
+    const callTool = vi.fn();
+    const s = new ReviewStore();
+    s.init(mockClient(callTool, vi.fn().mockResolvedValue({ findings: [{ severity: 'BLOCKER', quote: 'q', why: 'w' }] })), 'd');
+    await s.runPremium('manuscript/第1章.md');
+    expect(s.findingId('manuscript/第1章.md', 0)).toBeUndefined();
+
+    const ok = await s.dispose('manuscript/第1章.md', 0, 'done');
+    expect(ok).toBe(false);
+    expect(callTool).not.toHaveBeenCalled();
+    expect(s.disposalOf('manuscript/第1章.md', 0)).toBeUndefined();
+    expect(s.blockerTotal).toBe(1); // 未处置，BLOCKER 计数保留
+  });
+
+  it('dispose：callTool 失败时 work.error 红条、状态与计数不变', async () => {
+    const callTool = vi.fn((name: string) => {
+      if (name === 'issue_set_status') return Promise.reject(new Error('domain MCP 未连接'));
+      return Promise.resolve(name === 'scan_quality' ? scanFixture() : diagFixture());
+    });
+    const reviewFn = vi.fn().mockResolvedValue({
+      findings: [{ severity: 'BLOCKER', quote: 'q', why: 'w' }],
+      persisted: { appended: 1, ids: ['cr-9'] },
+    });
+    const s = new ReviewStore();
+    s.init(mockClient(callTool, reviewFn), 'd');
+    await s.runPremium('manuscript/第1章.md');
+    expect(s.blockerTotal).toBe(1);
+
+    const ok = await s.dispose('manuscript/第1章.md', 0, 'done');
+    expect(ok).toBe(false);
+    expect(work.error).toContain('处置失败');
+    expect(work.error).toContain('domain MCP 未连接');
+    expect(s.disposalOf('manuscript/第1章.md', 0)).toBeUndefined();
+    expect(s.blockerTotal).toBe(1); // 失败不扣减
   });
 });

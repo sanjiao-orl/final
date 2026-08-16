@@ -8,6 +8,7 @@
   import { statusVar } from '../../theme.js';
   import { work } from '../../lib/work.svelte.js';
   import { dialog } from '../../lib/dialog.svelte.js';
+  import { MANUSCRIPT_DIR, TRASH_DIR } from '../../lib/paths.js';
   import type { ChapterNode, VolumeNode } from '../../lib/types.js';
 
   let query = $state('');
@@ -110,7 +111,7 @@
   }
   /** 卷 title → 目录 relPath（manuscript/卷名）。 */
   function volDir(title: string): string {
-    return `manuscript/${title}`;
+    return `${MANUSCRIPT_DIR}${title}`;
   }
 
   // ---------- 拖拽重排（A3，pointer 实现） ----------
@@ -283,7 +284,7 @@
   // ---------- 软删 ----------
   async function confirmDelete(ch: ChapterNode): Promise<void> {
     const ok = await dialog.confirm({
-      message: `删除「${ch.title}」？文件移入 .novel/trash/（软删，可找回）。`,
+      message: `删除「${ch.title}」？文件移入 ${TRASH_DIR}（软删，可找回）。`,
       okLabel: '删除',
       danger: true,
     });
@@ -437,7 +438,7 @@
                     <span class="name" role="button" tabindex="0" ondblclick={(e) => { e.stopPropagation(); startRenameCh(ch); }} onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), startRenameCh(ch))} title="双击重命名(A2)">{ch.title}</span>
                   {/if}
                   <span class="wc">{goalRatio(ch) !== null ? `${fmtWcFull(ch.wordCount)}/${fmtWcFull(ch.goal!)}` : fmtWcFull(ch.wordCount)}</span>
-                  <button class="del" title="软删进 .novel/trash/" onclick={(e) => { e.stopPropagation(); void confirmDelete(ch); }} aria-label="软删章节">×</button>
+                  <button class="del" title={`软删进 ${TRASH_DIR}`} onclick={(e) => { e.stopPropagation(); void confirmDelete(ch); }} aria-label="软删章节">×</button>
                   {#if goalRatio(ch) !== null}
                     <span class="goal" class:done={goalRatio(ch) === 1} title={`目标 ${fmtWcFull(ch.goal!)} 字`}>
                       <i style:width={`${(goalRatio(ch)! * 100).toFixed(1)}%`}></i>
@@ -494,10 +495,10 @@
       class:open={trashOpen}
       onclick={() => (trashOpen = !trashOpen)}
       aria-expanded={trashOpen}
-      title="软删章在这里（.novel/trash/），可一键找回"
+      title={`软删章在这里（${TRASH_DIR}），可一键找回`}
     >
       {@html iconSvg('trash', 13)}
-      <span>回收站 · 软删章（.novel/trash/）</span>
+      <span>回收站 · 软删章（{TRASH_DIR}）</span>
       {#if trashEntries.length > 0}<i class="n">{trashEntries.length}</i>{/if}
     </button>
     {#if trashOpen}

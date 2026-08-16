@@ -171,11 +171,32 @@
               {#if c.premium.length > 0}
                 <div class="premium-head">贵档审阅</div>
                 {#each c.premium as f, i (`${f.severity}-${f.quote}-${i}`)}
-                  <div class="finding premium">
+                  {@const fid = review.findingId(c.relPath, i)}
+                  {@const disposal = review.disposalOf(c.relPath, i)}
+                  <div class="finding premium" class:disposed={disposal !== undefined}>
                     <span class="pill sev-{f.severity}">{SEV_LABEL[f.severity]}</span>
                     <span class="fmsg">
                       <span class="quote">「{f.quote}」</span> {f.why}
                       {#if f.suggestion}<span class="sug">建议：{f.suggestion}</span>{/if}
+                    </span>
+                    <span class="ops">
+                      {#if disposal}
+                        <span class="disposed-tag" title={disposal === 'done' ? '已处理' : '已知'}>{disposal === 'done' ? '已处理' : '已知'}</span>
+                      {:else}
+                        <button
+                          class="btn min"
+                          disabled={!fid || review.running}
+                          onclick={() => void review.dispose(c.relPath, i, 'done')}
+                          title={fid ? '标记为已处理' : '未落盘,无法处置'}
+                        >已处理</button>
+                        <button
+                          class="btn min"
+                          disabled={!fid || review.running}
+                          onclick={() => void review.dispose(c.relPath, i, 'known')}
+                          title={fid ? '标记为已知' : '未落盘,无法处置'}
+                        >已知</button>
+                        {#if !fid}<span class="unpersisted">未落盘,无法处置</span>{/if}
+                      {/if}
                     </span>
                   </div>
                 {/each}
@@ -449,6 +470,38 @@
     margin-left: 26px;
     color: var(--muted);
     font-size: 11px;
+  }
+  /* 处置闭环：右侧按钮列（已处理/已知），未落盘禁用并提示；处置成功整卡标灰。 */
+  .finding.premium .ops {
+    margin-left: auto;
+    flex: none;
+    display: flex;
+    align-items: center;
+    align-self: center;
+    gap: 6px;
+  }
+  .finding.premium.disposed {
+    opacity: 0.55;
+  }
+  .finding.premium .btn.min {
+    height: 22px;
+    padding: 0 8px;
+    font-size: 11px;
+  }
+  .finding.premium .disposed-tag {
+    font-size: 11px;
+    color: var(--ok);
+    border: 1px solid var(--ok);
+    border-radius: 9px;
+    height: 18px;
+    line-height: 16px;
+    padding: 0 7px;
+    white-space: nowrap;
+  }
+  .finding.premium .unpersisted {
+    font-size: 11px;
+    color: var(--muted);
+    white-space: nowrap;
   }
   .card {
     border: 1px solid var(--line);

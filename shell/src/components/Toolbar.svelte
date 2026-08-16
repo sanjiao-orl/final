@@ -3,6 +3,7 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import { tauriInvoke } from '../lib/core.js';
   import { iconSvg } from '../lib/icons.js';
+  import { TRASH_DIR } from '../lib/paths.js';
   import { candidates } from '../lib/candidates.svelte.js';
   import { settings } from '../lib/settings.svelte.js';
   import { dialog } from '../lib/dialog.svelte.js';
@@ -102,7 +103,7 @@
     const cur = work.current;
     if (!cur) return;
     const ok = await dialog.confirm({
-      message: `删除「${cur.title}」？文件移入 .novel/trash/（软删，可找回）。`,
+      message: `删除「${cur.title}」？文件移入 ${TRASH_DIR}（软删，可找回）。`,
       okLabel: '删除',
       danger: true,
     });
@@ -155,7 +156,7 @@
     {@html iconSvg('snapshot', 15)}
     快照
   </button>
-  <button class="tb-btn danger" onclick={confirmDelete} disabled={!work.current} title="软删当前章进 .novel/trash/">
+  <button class="tb-btn danger" onclick={confirmDelete} disabled={!work.current} title={`软删当前章进 ${TRASH_DIR}`}>
     删除
   </button>
 

@@ -3,10 +3,13 @@
  * 一键跑全书 scan_quality（LAY 去AI味扫描）+ ledger_diagnostics（四维账本确定性诊断，
  * 含问题日志 BLOCKER 计数），解析成逐章报告；BLOCKER 总数供顶栏入口红点徽标（清零出口：
  * 作者处理完重跑，徽标消失）。贵档 ledger_slice 不在此出口（后续单独做）。
+ * 处置闭环：贵档发现落盘后带 CR id，卡片上可标记「已处理/已知」（issue_set_status），
+ * 成功后本地标灰并把该发现的 BLOCKER 从徽标计数中扣减。
  * 壳不 import domain：返回形状以 JSON 契约为准，这里镜像类型。
  */
 import type { CoreClient, ReviewFinding } from './core.js';
 import { work } from './work.svelte.js';
+import { ISSUE_LOG_DEFAULT } from './paths.js';
 
 // ---------- domain 返回形状镜像（契约以 JSON 为准） ----------
 
@@ -230,8 +233,8 @@ export function applyPremiumFindings(
 
 // ---------- store ----------
 
-/** 问题日志约定路径（CR 格式 BLOCKER 计数；缺失时 domain 计 0，不报错）。 */
-export const ISSUE_LOG_PATH = 'editorial_notes/issues.md';
+/** 贵档发现的处置状态（issue_set_status 的 done/known，成功即本地标灰）。 */
+export type FindingDisposal = 'done' | 'known';
 
 export class ReviewStore {
   /** 审阅视图（全览覆盖层）开合。 */
@@ -242,14 +245,32 @@ export class ReviewStore {
   error = $state<string | null>(null);
   /** 当前在跑的档位（反馈#4 进度文案区分）：scan=全书扫描，premium=贵档冷读。 */
   mode = $state<'scan' | 'premium'>('scan');
-  /** 红点徽标数：关掉视图后仍保留（清零出口：处理完重跑即消失）。 */
-  blockerTotal = $derived(this.report?.blockerTotal ?? 0);
+  /** 已处置的贵档发现（key=CR id → done/known）：处置成功后本地标灰，重跑保留。 */
+  disposed = $state(new Map<string, FindingDisposal>());
+  /** 本地已处置的 premium BLOCKER 条数（扣减 blockerTotal 用）。 */
+  private disposedBlockerCount = $derived.by(() => {
+    let n = 0;
+    for (const [relPath, findings] of this.premium) {
+      const ids = this.premiumIds.get(relPath);
+      if (!ids) continue;
+      findings.forEach((f, i) => {
+        if (f.severity === 'BLOCKER' && ids[i] && this.disposed.has(ids[i]!)) n += 1;
+      });
+    }
+    return n;
+  });
+  /** 红点徽标数：关掉视图后仍保留（清零出口：处理完重跑即消失）；本地已处置的 BLOCKER 扣减。 */
+  blockerTotal = $derived((this.report?.blockerTotal ?? 0) - this.disposedBlockerCount);
   hasBlockers = $derived(this.report?.hasBlockers ?? false);
 
   private client!: CoreClient;
   private workDir = '';
   /** 贵档发现按章缓存：重跑便宜档后仍合并保留。 */
   private premium = new Map<string, PremiumFinding[]>();
+  /** 各章贵档发现的 CR id（与 findings 同序；undefined=未落盘/MCP 降级）。 */
+  private premiumIds = new Map<string, Array<string | undefined>>();
+  /** 处置请求进行中的 CR id（防同一卡并发双击重发）。 */
+  private disposingIds = new Set<string>();
 
   init(client: CoreClient, workDir: string): void {
     this.client = client;
@@ -281,7 +302,7 @@ export class ReviewStore {
         this.client.callTool<WorkScanResult>('scan_quality', { workDir: this.workDir }),
         this.client.callTool<WorkDiagnostics>('ledger_diagnostics', {
           workDir: this.workDir,
-          issueLogPath: ISSUE_LOG_PATH,
+          issueLogPath: ISSUE_LOG_DEFAULT,
         }),
       ]);
       this.report = applyPremiumFindings(buildReviewReport(scan, diag), this.premium);
@@ -308,8 +329,10 @@ export class ReviewStore {
     this.error = null;
     this.mode = 'premium';
     try {
-      const { findings } = await this.client.review(this.workDir, chapterRelPath);
-      this.premium.set(chapterRelPath, findings);
+      const res = await this.client.review(this.workDir, chapterRelPath);
+      this.premium.set(chapterRelPath, res.findings);
+      const ids = res.persisted?.ids ?? [];
+      this.premiumIds.set(chapterRelPath, res.findings.map((_, i) => ids[i]));
       this.report = applyPremiumFindings(this.report ?? emptyReviewReport(), this.premium);
     } catch (err) {
       const msg = `贵档审阅失败：${err instanceof Error ? err.message : String(err)}`;
@@ -317,6 +340,47 @@ export class ReviewStore {
       work.error = msg;
     } finally {
       this.running = false;
+    }
+  }
+
+  /** 贵档发现的 CR id（未落盘/MCP 降级时为 undefined）。 */
+  findingId(chapterRelPath: string, index: number): string | undefined {
+    return this.premiumIds.get(chapterRelPath)?.[index];
+  }
+
+  /** 贵档发现的当前处置状态（无 CR id 或未处置为 undefined）。 */
+  disposalOf(chapterRelPath: string, index: number): FindingDisposal | undefined {
+    const id = this.findingId(chapterRelPath, index);
+    return id ? this.disposed.get(id) : undefined;
+  }
+
+  /**
+   * 处置贵档发现（闭环）：调 issue_set_status 标记 done/known，成功后本地标灰（状态进 disposed），
+   * 该发现为 BLOCKER 时 blockerTotal 本地减一。无 CR id（未落盘/MCP 降级）不发请求直接返回 false。
+   */
+  async dispose(chapterRelPath: string, index: number, status: FindingDisposal): Promise<boolean> {
+    const id = this.findingId(chapterRelPath, index);
+    if (!id) return false;
+    if (this.disposed.has(id) || this.disposingIds.has(id)) return true;
+    this.disposingIds.add(id);
+    try {
+      const res = await this.client.callTool<{ ok: boolean; id: string; status: string }>('issue_set_status', {
+        workDir: this.workDir,
+        issueLogPath: ISSUE_LOG_DEFAULT,
+        id,
+        status,
+      });
+      if (res?.ok === false) {
+        work.error = `处置失败：${res.status || '未返回原因'}`;
+        return false;
+      }
+      this.disposed = new Map(this.disposed).set(id, status);
+      return true;
+    } catch (err) {
+      work.error = `处置失败：${err instanceof Error ? err.message : String(err)}`;
+      return false;
+    } finally {
+      this.disposingIds.delete(id);
     }
   }
 

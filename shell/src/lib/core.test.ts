@@ -1,6 +1,6 @@
-// core.ts 单测：health() 与 SSE POST 中 AbortSignal 行为。
+// core.ts 单测：health() 与 SSE POST 中 AbortSignal 行为 + 裸联调参数记忆（resolveBareParam）。
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CoreClient } from './core.js';
+import { CoreClient, resolveBareParam, LS_CORE_TOKEN_KEY, LS_CORE_WORKDIR_KEY } from './core.js';
 
 const origFetch = globalThis.fetch;
 
@@ -82,5 +82,55 @@ describe('CoreClient.chatStream abort', () => {
     // 不传 signal 时 init 不带 signal
     const callArgs = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as RequestInit | undefined;
     expect(callArgs?.signal).toBeUndefined();
+  });
+});
+
+describe('resolveBareParam（裸联调 token/workDir 记忆）', () => {
+  it('query 优先（向后兼容）：不回落到 localStorage，也不写回', () => {
+    const lsSet = vi.fn();
+    const prompt = vi.fn();
+    const v = resolveBareParam('coreToken', LS_CORE_TOKEN_KEY, 'p', {
+      query: new URLSearchParams('?coreToken=from-query'),
+      lsGet: () => 'from-ls',
+      lsSet,
+      prompt,
+    });
+    expect(v).toBe('from-query');
+    expect(prompt).not.toHaveBeenCalled();
+    expect(lsSet).not.toHaveBeenCalled();
+  });
+
+  it('query 缺省时回落 localStorage 记忆', () => {
+    const v = resolveBareParam('coreToken', LS_CORE_TOKEN_KEY, 'p', {
+      query: new URLSearchParams(),
+      lsGet: () => 'from-ls',
+      lsSet: vi.fn(),
+      prompt: vi.fn(),
+    });
+    expect(v).toBe('from-ls');
+  });
+
+  it('query 与 localStorage 都缺省时 prompt 用户，并写入 localStorage', () => {
+    const lsSet = vi.fn();
+    const v = resolveBareParam('workDir', LS_CORE_WORKDIR_KEY, '请填目录', {
+      query: new URLSearchParams(),
+      lsGet: () => null,
+      lsSet,
+      prompt: () => 'C:/works/demo',
+    });
+    expect(v).toBe('C:/works/demo');
+    expect(lsSet).toHaveBeenCalledWith(LS_CORE_WORKDIR_KEY, 'C:/works/demo');
+  });
+
+  it('用户取消 prompt → undefined，不写 localStorage', () => {
+    const lsSet = vi.fn();
+    const v = resolveBareParam('coreToken', LS_CORE_TOKEN_KEY, 'p', {
+      query: new URLSearchParams(),
+      lsGet: () => null,
+      lsSet,
+      prompt: () => null,
+    });
+    expect(v).toBeUndefined();
+    expect(lsSet).not.toHaveBeenCalled();
   });
 });
