@@ -737,7 +737,8 @@ fn restart_core(
 }
 
 /// Tauri updater 启动后台检查：真实端点（GitHub Releases latest.json）；
-/// 发现新版本后下载校验并交给 passive 安装器，随后由安装器接管/重启。
+/// 发现新版本后下载校验；**安装前先杀 core sidecar 并等其退出**——Windows 不允许覆盖运行中的 exe，
+/// 否则 NSIS 写 sidecar\node.exe 会弹「文件被占用」;随后由安装器接管/重启。安装失败则重启 core 恢复。
 fn check_updates(app: &tauri::AppHandle) {
   let handle = app.clone();
   tauri::async_runtime::spawn(async move {
@@ -769,8 +770,8 @@ fn check_updates(app: &tauri::AppHandle) {
 
     let downloaded = Arc::new(AtomicU64::new(0));
     let downloaded_for_log = Arc::clone(&downloaded);
-    match update
-      .download_and_install(
+    let bytes = match update
+      .download(
         move |chunk, total| {
           let n = downloaded_for_log.fetch_add(chunk as u64, Ordering::SeqCst) + chunk as u64;
           // 每跨过约 8 MiB 记一次进度，避免刷屏
@@ -786,12 +787,42 @@ fn check_updates(app: &tauri::AppHandle) {
             }
           }
         },
-        || log::info!("[updater] 下载完成，开始安装（passive）"),
+        || log::info!("[updater] 下载完成"),
       )
       .await
     {
+      Ok(bytes) => bytes,
+      Err(e) => {
+        log::error!("[updater] 下载失败: {e}");
+        return;
+      }
+    };
+
+    // 杀 sidecar 并等其退出(口径同 restart_core),再换代作废旧 stdout watcher 防 EOF 误报。
+    let core = handle.state::<Arc<CoreProcess>>().inner().clone();
+    {
+      if let Ok(mut child_guard) = core.child.lock() {
+        if let Some(mut child) = child_guard.take() {
+          let _ = child.kill();
+          let _ = child.wait();
+        }
+      }
+      core.generation.fetch_add(1, Ordering::SeqCst);
+    }
+    log::info!("[updater] core sidecar 已停止，启动安装器（passive）");
+
+    match update.install(&bytes) {
       Ok(()) => log::info!("[updater] 安装器已启动，等待安装完成并重启"),
-      Err(e) => log::error!("[updater] 下载或安装失败: {e}"),
+      Err(e) => {
+        log::error!("[updater] 安装失败: {e}；重启 core 恢复运行");
+        let shared = handle.state::<Shared>().inner().clone();
+        if let Ok(mut guard) = shared.lock() {
+          *guard = CoreState::Starting;
+        }
+        if let Err(e2) = spawn_and_watch(&handle, &core, &shared) {
+          log::error!("[updater] 安装失败后重启 core 失败: {e2}");
+        }
+      }
     }
   });
 }

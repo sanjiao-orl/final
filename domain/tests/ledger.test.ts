@@ -201,6 +201,20 @@ describe('applyOps', () => {
     expect(() => applyOps(emptyLedger(), [{ op: 'promise', entry: { id: 'P1', name: 'x', arc: 'bad', setups: [], payoffs: [] } } as unknown as LedgerOp])).toThrow(/非法 arc/);
   });
 
+  it('promise：arc 缺省落 planted（与 normalizeLedger 读路径同口径）', () => {
+    const l = applyOps(emptyLedger(), [{ op: 'promise', entry: { id: 'P1', name: '青铜铃', setups: [], payoffs: [] } } as unknown as LedgerOp]);
+    expect(l.promises[0]?.arc).toBe('planted');
+  });
+
+  it('promise：非法 arc 报错带条目 id 与允许枚举；缺 name 报错可定位', () => {
+    expect(() =>
+      applyOps(emptyLedger(), [{ op: 'promise', entry: { id: 'P9', name: 'x', arc: '埋设', setups: [], payoffs: [] } } as unknown as LedgerOp]),
+    ).toThrow(/promise「P9」非法 arc: 埋设\(允许: planted/);
+    expect(() =>
+      applyOps(emptyLedger(), [{ op: 'promise', entry: { id: 'P2', setups: [], payoffs: [] } } as unknown as LedgerOp]),
+    ).toThrow(/promise「P2」需要非空 name/);
+  });
+
   it('clock.chapters 含非字符串元素抛守卫错误而非 TypeError', () => {
     expect(() =>
       applyOps(emptyLedger(), [{ op: 'clock', entry: { chapters: ['第一章', 2 as unknown as string] } } as unknown as LedgerOp]),

@@ -321,9 +321,14 @@ function assertProp(entry: unknown): asserts entry is PropEntry {
 function assertPromise(entry: unknown): asserts entry is PromiseEntry {
   const e = entry as PromiseEntry;
   if (!e || typeof e.id !== 'string' || e.id.trim() === '') throw new Error('promise 需要非空 id');
-  if (!['planted', 'pending', 'resolved', 'failed'].includes(e.arc)) throw new Error(`非法 arc: ${e.arc}`);
-  if (!Array.isArray(e.setups)) throw new Error('promise.setups 必须是数组');
-  if (!Array.isArray(e.payoffs)) throw new Error('promise.payoffs 必须是数组');
+  if (typeof e.name !== 'string' || e.name.trim() === '') throw new Error(`promise「${e.id}」需要非空 name(伏笔名)`);
+  // arc 缺省(缺字段/空串)按新埋设 planted——与 normalizeLedger 读路径口径一致;非空非法值报允许枚举,便于定位
+  if (e.arc === undefined || e.arc === null || (e.arc as unknown) === '') e.arc = 'planted';
+  if (!['planted', 'pending', 'resolved', 'failed'].includes(e.arc)) {
+    throw new Error(`promise「${e.id}」非法 arc: ${String(e.arc)}(允许: planted 埋设/pending 待回收/resolved 已回收/failed 断线)`);
+  }
+  if (!Array.isArray(e.setups)) throw new Error(`promise「${e.id}」setups 必须是数组(可空)`);
+  if (!Array.isArray(e.payoffs)) throw new Error(`promise「${e.id}」payoffs 必须是数组(可空)`);
 }
 function assertKnowledge(entry: unknown): asserts entry is KnowledgeEntry {
   const e = entry as KnowledgeEntry;
