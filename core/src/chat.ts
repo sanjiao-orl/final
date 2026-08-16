@@ -1,4 +1,6 @@
 // 模块职责：POST /v1/chat 的 SSE 聊天管道——落库用户消息 → streamText 多轮工具流 → 逐条转发 SSE → done 前落库完整 assistant 消息；客户端断连中止 LLM 请求。
+import fs from 'node:fs';
+import path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   stepCountIs,
@@ -13,15 +15,23 @@ import { z } from 'zod';
 import type { MessageRow, SessionRow, SessionStore } from './session-store.js';
 import { getLlmTimeoutSeconds, type Tier } from './config.js';
 import { EventPump } from './event-pump.js';
-import { toPublicErrorMessage, writeJson } from './http.js';
+import { HttpError, toPublicErrorMessage, writeJson } from './http.js';
 import { listSkills, loadPrompt } from './prompts.js';
 
 export const chatBodySchema = z.object({
   sessionId: z.string().uuid().optional(),
   text: z.string().min(1).max(20_000),
   tier: z.enum(['writing', 'background']).optional(),
-  /** 壳当前打开的作品文件夹绝对路径：拼进系统提示，让模型调工具时直接用。 */
-  workDir: z.string().min(1).optional(),
+  /**
+   * 壳当前打开的作品文件夹绝对路径：拼进系统提示，让模型调工具时直接用。
+   * 上限 500 字符并拒绝控制字符（换行/制表符等）——目录名会原样拼进系统提示，控制字符可破出提示行（注入面）。
+   */
+  workDir: z
+    .string()
+    .min(1)
+    .max(500)
+    .refine((s) => !/[\x00-\x1f\x7f]/.test(s), '不能包含控制字符')
+    .optional(),
   /** 新建会话的讨论归属：'' = 无归属；章 relPath = 章节内讨论。已存在的会话忽略此字段。 */
   scope: z.string().max(500).optional(),
 });
@@ -37,11 +47,28 @@ export interface ChatDeps {
   toolsAvailable?: () => boolean;
 }
 
-const SYSTEM_PROMPT = loadPrompt('chat');
+/**
+ * workDir 清洗：path.resolve 归一并校验存在且为目录；不合法抛 HttpError(400)。
+ * 控制字符已在 schema 层拒绝（注入面），这里兜底路径合法性——非法目录名要么拼进系统提示、要么让模型工具拿无效路径。
+ */
+function normalizeWorkDir(raw: string): string {
+  const resolved = path.resolve(raw);
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(resolved);
+  } catch {
+    throw new HttpError(400, `workDir 路径不存在: ${raw}`);
+  }
+  if (!stat.isDirectory()) {
+    throw new HttpError(400, `workDir 不是目录: ${raw}`);
+  }
+  return resolved;
+}
 
 /** 壳传入当前作品文件夹时，拼进系统提示：调领域工具一律用这个 workDir；此时才注入可用 skill 清单（skill_read 的 workDir 必填，无 workDir 时模型无合法取值）。 */
 function systemPrompt(workDir: string | undefined): string {
-  let prompt = SYSTEM_PROMPT;
+  // 每次请求现取 prompt（mtime 感知热重载，改文件即生效），不再用模块级常量缓存。
+  let prompt = loadPrompt('chat');
   if (workDir) {
     prompt += `\n当前打开的作品文件夹：${workDir}。调用领域工具时 workDir 参数一律使用这个路径。`;
     const skills = listSkills(workDir);
@@ -62,15 +89,13 @@ const MAX_REPLAY_MESSAGES = 20;
 /** 跨对话记忆：回放历史的总字符预算（正文+工具结果），超限从最旧处截断。 */
 const MAX_REPLAY_CHARS = 25_000;
 
-/** 工具结果落库截断：单条结果最多存 500 字符，仍放在 tool_calls JSON blob 元素的 result 字段。 */
-const STORED_TOOL_RESULT_MAX_CHARS = 500;
-
 /**
- * 工具结果回放截断：与落库同值 500——存什么回放什么，不做二次截断。
+ * 工具结果截断单值：落库与回放同用一个上限 500——存什么回放什么，不做二次截断。
+ * 落库：单条结果最多存 500 字符，仍放在 tool_calls JSON blob 元素的 result 字段。
  * 取舍实录(v5 验收实测):300 时 read_chapter 整章正文在开篇处被截，模型公开抱怨"只读到开头",
  * 对最高频内容工具偏紧;500 仍受 MAX_REPLAY_CHARS 总预算兜底(整组裁,不留孤儿),语义更直白。
  */
-const REPLAY_TOOL_RESULT_MAX_CHARS = 500;
+const TOOL_RESULT_MAX_CHARS = 500;
 
 /**
  * 跨对话记忆：把会话历史回放成 AI SDK v7 ModelMessage[]。
@@ -161,7 +186,7 @@ function buildReplayRow(row: MessageRow): { messages: ModelMessage[]; chars: num
       type: 'tool-result',
       toolCallId: c.id,
       toolName: c.name,
-      output: { type: 'text', value: truncateText(c.result, REPLAY_TOOL_RESULT_MAX_CHARS) },
+      output: { type: 'text', value: truncateText(c.result, TOOL_RESULT_MAX_CHARS) },
     }));
     const assistantMessage: ModelMessage =
       row.content.trim() === ''
@@ -241,6 +266,8 @@ export async function handleChatRequest(
   }
   const { text } = parsed.data;
   const tier = parsed.data.tier ?? 'writing';
+  // workDir 清洗：归一并校验存在且为目录（不合法抛 400，见 normalizeWorkDir）。放在任何会话副作用之前。
+  const workDir = parsed.data.workDir ? normalizeWorkDir(parsed.data.workDir) : undefined;
 
   // 会话解析：缺省新建，title 取首条用户消息前 20 字，scope 记讨论归属（已有会话沿用原归属）。
   let session: SessionRow | undefined;
@@ -286,7 +313,7 @@ export async function handleChatRequest(
     const model = deps.modelForTier(tier);
     const options: Parameters<typeof streamText>[0] = {
       model,
-      system: systemPrompt(parsed.data.workDir),
+      system: systemPrompt(workDir),
       messages: buildReplayMessages(deps.store.listMessages(sessionId)),
       stopWhen: stepCountIs(MAX_STEPS),
       abortSignal: AbortSignal.any([abort.signal, timeoutSignal]),
@@ -307,7 +334,7 @@ export async function handleChatRequest(
           break;
         }
         case 'tool-result': {
-          const resultText = truncateText(toolResultToText(part.output ?? null), STORED_TOOL_RESULT_MAX_CHARS);
+          const resultText = truncateText(toolResultToText(part.output ?? null), TOOL_RESULT_MAX_CHARS);
           const call = toolCalls.find((c) => c.id === part.toolCallId);
           if (call) call.result = resultText;
           pump.emit('tool-result', { id: part.toolCallId, name: part.toolName, result: part.output ?? null });

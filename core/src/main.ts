@@ -17,6 +17,9 @@ import { CandidateStore } from './candidate-store.js';
 import { SessionStore } from './session-store.js';
 import { PROTOCOL_VERSION, readyLine, writeRuntimeFile, type RuntimeInfo } from './runtime.js';
 
+/** esbuild 构建时注入的 git 短 commit（与 server.ts 同款判定模式）：tsx dev 未定义 → /v1/dev 联调页开；prod bundle 注入 → 关。 */
+declare const __CORE_COMMIT__: string | undefined;
+
 interface CliArgs {
   port: number | undefined;
   parentPid: number | undefined;
@@ -59,11 +62,15 @@ async function main(): Promise<void> {
   await mcp.start();
 
   const token = randomUUID();
+  // /v1/dev 联调页开关：tsx dev 运行时开、prod bundle 关（与 server.ts 的 devEnabledDefault 同款缺省判定），
+  // 显式传入让门禁与 ready 行日志保持一致。
+  const devEnabled = typeof __CORE_COMMIT__ === 'undefined';
   const server = createAppServer({
     token,
     store,
     candidates,
     version: VERSION,
+    devEnabled,
     chat: {
       store,
       modelForTier: (tier: Tier) => modelForPurpose(process.env, tier),
@@ -91,7 +98,12 @@ async function main(): Promise<void> {
   };
   writeRuntimeFile(getRuntimeFilePath(), info);
   console.log(readyLine(info));
-  console.log(`[core] 已就绪：http://127.0.0.1:${port}（/v1/dev 联调页免鉴权，其余端点需 Bearer token，协议 v${PROTOCOL_VERSION}）`);
+  // ready 行日志如实：dev 下联调页开着才声称免鉴权；prod bundle 下该页已关闭，不再提它。
+  console.log(
+    devEnabled
+      ? `[core] 已就绪：http://127.0.0.1:${port}（/v1/dev 联调页免鉴权，其余端点需 Bearer token，协议 v${PROTOCOL_VERSION}）`
+      : `[core] 已就绪：http://127.0.0.1:${port}（其余端点需 Bearer token，协议 v${PROTOCOL_VERSION}）`
+  );
 
   // 孤儿守护：每 5s 探测父进程，不在则退出。
   let orphanTimer: NodeJS.Timeout | undefined;

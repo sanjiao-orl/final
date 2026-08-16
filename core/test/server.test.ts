@@ -80,6 +80,21 @@ describe('core HTTP 服务', () => {
     }
   });
 
+  it('devEnabled=false 时 GET /v1/dev 回 404（与其他 404 同形），/v1/health 仍免鉴权 200', async () => {
+    const s = await startTestServer({ devEnabled: false });
+    try {
+      const dev = await fetch(`${s.baseUrl}/v1/dev`);
+      expect(dev.status).toBe(404);
+      const body = (await dev.json()) as { error: string };
+      expect(body.error).toContain('未找到: GET /v1/dev');
+      // /v1/health 不受门禁影响
+      const health = await fetch(`${s.baseUrl}/v1/health`);
+      expect(health.status).toBe(200);
+    } finally {
+      await s.close();
+    }
+  });
+
   it('CORS 预检 OPTIONS → 204 且带放开头', async () => {
     const s = await startTestServer();
     try {

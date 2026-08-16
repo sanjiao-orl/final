@@ -1,6 +1,6 @@
 // 模块职责：提示词与 skill 的统一文件机制（docs/decisions/0008）——解析 prompt 根目录、
 // 首次运行把随包缺省文件释放进 app 数据目录（缺才拷、永不覆盖）、按 kind 加载提示词正文、扫描 skill 清单。
-// 单一事实源是 md 文件；文件缺失/损坏回退一行兜底提示，不崩。
+// 单一事实源是 md 文件；文件缺失/损坏回退一行兜底提示，不崩。prompt 按 mtime 热重载（改文件即生效），skill 每次现扫。
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -95,16 +95,28 @@ export function releasePrompts(targetDir: string, sourceDir: string = bundledPro
   }
 }
 
-const promptCache = new Map<string, string>();
+/** mtime 感知的 prompt 缓存：改文件即生效（决策 0008「单一事实源是 md 文件」），不要求重启。 */
+const promptCache = new Map<string, { mtimeMs: number; value: string }>();
 
-/** 读指定 kind 的提示词正文（去 frontmatter）；文件缺失/损坏回退一行兜底提示并 warn，不抛错。 */
+/**
+ * 读指定 kind 的提示词正文（去 frontmatter）；文件缺失/损坏回退一行兜底提示并 warn，不抛错。
+ * mtime 感知热重载：每次调用先 stat，文件 mtimeMs 变化（改内容/替换）、或文件出现/消失（stat 失败按 0 记）
+ * 都触发重读并刷新缓存；mtimeMs 相同则直接命中缓存。fallback 逻辑不变。
+ */
 export function loadPrompt(kind: PromptKind, rootDir: string = activePromptRoot): string {
   const root = path.resolve(rootDir);
   const key = `${root}\n${kind}`;
+  const file = path.join(root, PROMPT_FILENAMES[kind]);
+  let mtimeMs = 0;
+  try {
+    mtimeMs = fs.statSync(file).mtimeMs;
+  } catch {
+    // 文件缺失/不可读：按 0 记，缓存里的真实 mtime 一旦存在即视为变化 → 重读（走兜底）。
+  }
   const cached = promptCache.get(key);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined && cached.mtimeMs === mtimeMs) return cached.value;
   const value = readPromptUncached(kind, root);
-  promptCache.set(key, value);
+  promptCache.set(key, { mtimeMs, value });
   return value;
 }
 
@@ -183,16 +195,12 @@ export function collectSkills(appDir: string, workDir?: string): SkillInfo[] {
   return [...byName.entries()].map(([name, description]) => ({ name, description }));
 }
 
-const skillListCache = new Map<string, SkillInfo[]>();
-
-/** 当前进程的 skill 清单：app 目录 + 可选 workDir 书级目录（同名遮蔽），按 workDir 缓存。 */
+/**
+ * 当前进程的 skill 清单：app 目录 + 可选 workDir 书级目录（同名遮蔽）。
+ * 每次调用现扫（目录小，聊天请求非热路径），不缓存——与 prompt 热重载一致：skill 文件增删即时生效。
+ */
 export function listSkills(workDir?: string): SkillInfo[] {
-  const key = `${activePromptRoot}\n${workDir ?? ''}`;
-  const cached = skillListCache.get(key);
-  if (cached) return cached;
-  const skills = collectSkills(activePromptRoot, workDir);
-  skillListCache.set(key, skills);
-  return skills;
+  return collectSkills(activePromptRoot, workDir);
 }
 
 /** 进程启动即解析根目录并做首次释放（有 NOVEL_PROMPT_DIR 时），后续 loadPrompt/listSkills 都从这里取。 */
@@ -203,6 +211,3 @@ const activePromptRoot: string = (() => {
   }
   return root;
 })();
-
-// 预热 app 级 skill 清单（prompt 正文在 chat/review/rewrite 模块导入时按需加载并缓存）。
-listSkills();

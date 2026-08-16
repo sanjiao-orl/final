@@ -22,6 +22,7 @@ export async function startTestServer(overrides: {
   modelForTier?: ChatDeps['modelForTier'];
   tools?: ChatDeps['tools'];
   toolsAvailable?: ChatDeps['toolsAvailable'];
+  devEnabled?: boolean;
 } = {}): Promise<TestServer> {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'novel-core-test-'));
   const dbPath = path.join(dir, 'sessions.sqlite');
@@ -45,6 +46,7 @@ export async function startTestServer(overrides: {
     candidates,
     rewrite: { modelForTier: chat.modelForTier },
     version: 'test',
+    ...(overrides.devEnabled !== undefined ? { devEnabled: overrides.devEnabled } : {}),
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
   const address = server.address();

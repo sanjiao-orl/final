@@ -65,6 +65,30 @@ describe('core prompt 加载器', () => {
     expect(parsed.hasFrontmatter).toBe(false);
     expect(parsed.body).toBe('就是正文');
   });
+
+  it('热重载：改文件后 loadPrompt 拿到新内容（决策 0008「改文件即生效」）', () => {
+    const dir = makeTmpDir();
+    const file = path.join(dir, 'chat.md');
+    writeTree(dir, { 'chat.md': VALID_CHAT });
+    expect(loadPrompt('chat', dir)).toBe('你是测试聊天助手。');
+
+    // 改内容并显式拨动 mtime（防文件系统时间精度抖动：同 ms 内写入可能 mtimeMs 不变）
+    fs.writeFileSync(file, '---\nkind: prompt\napplies_to: chat\n---\n你是改版后的聊天助手。', 'utf8');
+    const bumped = new Date(Date.now() + 5_000);
+    fs.utimesSync(file, bumped, bumped);
+    expect(loadPrompt('chat', dir)).toBe('你是改版后的聊天助手。');
+  });
+
+  it('热重载：文件被删后 loadPrompt 回退兜底（文件消失即失效，不用陈旧缓存）', () => {
+    const dir = makeTmpDir();
+    const file = path.join(dir, 'chat.md');
+    writeTree(dir, { 'chat.md': VALID_CHAT });
+    expect(loadPrompt('chat', dir)).toBe('你是测试聊天助手。');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    fs.rmSync(file);
+    expect(loadPrompt('chat', dir)).toBe('你是中文小说写作助手。');
+    expect(warn).toHaveBeenCalled();
+  });
 });
 
 describe('首次运行释放', () => {

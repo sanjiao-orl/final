@@ -1,4 +1,7 @@
 // 测试：/v1/chat SSE 管道——mock 模型（ai/test 的 MockLanguageModelV3）驱动的事件序列、落库、工具多轮、断连中止。
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { tool, type ToolSet } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import type { LanguageModelV3StreamPart } from '@ai-sdk/provider';
@@ -135,16 +138,44 @@ describe('/v1/chat SSE 管道', () => {
     }
   });
 
-  it('带 workDir：系统提示拼入作品路径，模型调工具可直接使用', async () => {
+  it('带 workDir：系统提示拼入作品路径（归一化），模型调工具可直接使用', async () => {
     const model = stepModel([textResult(['好'])]);
     const s = await startTestServer({ modelForTier: () => model });
     try {
-      const res = await postChat(s.baseUrl, s.token, { text: '查字数', workDir: 'C:\\works\\demo' });
+      // 真实存在的目录（workDir 现在要过存在性/目录校验）
+      const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'core-chat-workdir-'));
+      const res = await postChat(s.baseUrl, s.token, { text: '查字数', workDir });
       expect(res.status).toBe(200);
       await readSse(res);
       const first = model.doStreamCalls[0] as { prompt: Array<{ role: string; content: unknown }> };
       const sys = first.prompt.find((m) => m.role === 'system');
-      expect(JSON.stringify(sys?.content)).toContain('C:\\\\works\\\\demo');
+      // 归一化：相对路径会 resolve 成绝对路径后拼进系统提示
+      expect(promptText(sys!)).toContain(path.resolve(workDir));
+      fs.rmSync(workDir, { recursive: true, force: true });
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('workDir 含控制字符（换行）→ 400（注入面：目录名不得带换行等破出提示行）', async () => {
+    const s = await startTestServer();
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: 'hi', workDir: 'C:/works/demo\n恶意注入' });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain('控制字符');
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('workDir 路径不存在 → 400（不拼进系统提示）', async () => {
+    const s = await startTestServer();
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: 'hi', workDir: path.join(os.tmpdir(), 'core-no-such-dir-xyz') });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain('workDir');
     } finally {
       await s.close();
     }

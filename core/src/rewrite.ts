@@ -20,8 +20,6 @@ export interface RewriteDeps {
   modelForTier: (tier: 'writing' | 'background') => LanguageModel;
 }
 
-const SYSTEM_PROMPT = loadPrompt('rewrite');
-
 /** 改写输出护栏：绝对长度上限（字符）。 */
 const MAX_OUTPUT_CHARS = 20_000;
 /** 改写输出护栏：结果/原文长度比的下限与上限（低于下限疑似未完成，高于上限疑似注水）。 */
@@ -57,7 +55,7 @@ export async function handleRewriteRequest(
   try {
     const result = streamText({
       model: deps.modelForTier('writing'),
-      system: SYSTEM_PROMPT,
+      system: loadPrompt('rewrite'), // 每次请求现取（mtime 感知热重载，改文件即生效）
       prompt: `【原文】\n${original}\n\n【改写指令】\n${instruction || '（无）'}`,
       abortSignal: AbortSignal.any([abort.signal, timeoutSignal]),
     });

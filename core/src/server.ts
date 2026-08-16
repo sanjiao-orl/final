@@ -1,5 +1,5 @@
 // 模块职责：本地 HTTP 服务——路由（协议版本化：全部业务路由在 /v1/ 前缀下，契约见 docs/decisions/0007）、
-// Bearer 鉴权（/v1/health、/v1/dev 豁免）、CORS；业务委托给 chat 管道与 session-store。
+// Bearer 鉴权（/v1/health 豁免；/v1/dev 免鉴权但受 devEnabled 门禁——prod bundle 下关闭回 404）、CORS；业务委托给 chat 管道与 session-store。
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { asSchema, type FlexibleSchema } from 'ai';
 import { z } from 'zod';
@@ -17,6 +17,11 @@ import type { SessionStore } from './session-store.js';
 declare const __CORE_COMMIT__: string | undefined;
 const CORE_COMMIT = typeof __CORE_COMMIT__ !== 'undefined' ? __CORE_COMMIT__ : getGitCommit();
 
+/** /v1/dev 联调页开关缺省：tsx 开发运行时（__CORE_COMMIT__ 未定义）为 true，esbuild prod bundle 注入后为 false。 */
+function devEnabledDefault(): boolean {
+  return typeof __CORE_COMMIT__ === 'undefined';
+}
+
 export interface ServerDeps {
   token: string;
   store: SessionStore;
@@ -24,6 +29,8 @@ export interface ServerDeps {
   candidates: CandidateStore;
   rewrite: RewriteDeps;
   version: string;
+  /** /v1/dev 联调页开关：缺省 = tsx dev 运行时开、prod bundle 关（见 devEnabledDefault）。 */
+  devEnabled?: boolean;
 }
 
 const candidateCreateSchema = z.object({
@@ -73,6 +80,11 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
     return;
   }
   if (req.method === 'GET' && pathname === '/v1/dev') {
+    // 门禁：prod bundle（devEnabled 缺省为 false）下联调页关闭，按其他 404 同形回；dev 下照常免鉴权开放。
+    if ((deps.devEnabled ?? devEnabledDefault()) === false) {
+      writeJson(res, 404, { error: `未找到: ${req.method} ${pathname}` });
+      return;
+    }
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...CORS_HEADERS });
     res.end(devPage(deps.version));
     return;

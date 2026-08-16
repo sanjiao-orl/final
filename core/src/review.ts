@@ -32,8 +32,6 @@ export type ReviewFinding = z.infer<typeof reviewFindingSchema>;
 
 const reviewFindingsSchema = z.array(reviewFindingSchema);
 
-const SYSTEM_PROMPT = loadPrompt('review');
-
 /**
  * 处理一次 /v1/review 请求。body 校验失败 400；ledger_slice 不可用 503；模型输出解析/校验失败 502；
  * 其余内部错误由路由层统一脱敏为 500。
@@ -65,9 +63,10 @@ export async function handleReviewRequest(
     const slice = await callLedgerSlice(deps, workDir, chapterRelPath, abort.signal);
 
     // 第二步：main 档模型一次性调用。用 streamText 收全量文本后统一解析（非 SSE）。
+    // system 每次请求现取（mtime 感知热重载，改文件即生效）。
     const result = streamText({
       model: deps.modelForTier('review'),
-      system: SYSTEM_PROMPT,
+      system: loadPrompt('review'),
       prompt: slice,
       abortSignal: AbortSignal.any([abort.signal, timeoutSignal]),
     });
