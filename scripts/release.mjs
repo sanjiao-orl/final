@@ -1,9 +1,23 @@
 // release.mjs —— 真实发布脚本（零依赖 node）。
-// 职责：同步五处版本号（tauri.conf.json、shell/package.json、Cargo.toml、core/package.json、domain/package.json，写完后自检）→ 带签名私钥跑 tauri build → 收集 bundle/.sig → 生成 latest.json → gh release 上传。
+// 职责：工作树预检 → 同步五处版本号（tauri.conf.json、shell/package.json、Cargo.toml、core/package.json、domain/package.json，写完后自检）
+//       → 带签名私钥跑 tauri build → 收集 bundle/.sig → 生成 latest.json → 版本落账（自动 commit/tag/push）→ 发布 release。
+// 发布流程（对网络限速/断流友好，两阶段 + 逐文件重试）：
+//   1) 工作树预检：git status --porcelain 非空则列出脏文件并中止，防止带未提交改动发版；
+//   2) gh release create vX.Y.Z --draft（只带 notes 不带文件；已存在则复用，可幂等续传）；
+//   3) 逐个文件用 curl 直传 uploads.github.com（Bearer token 取 gh auth token，Content-Type application/octet-stream），
+//      每次尝试前先调 API 删除同名 starter 残留资产；失败按 代理(-x http://127.0.0.1:7897 --http1.1) / 直连 两种路由轮换重试
+//      （默认 3 次、间隔 15s），HTTP 201 才算上传成功；
+//   4) 全部资产传完才 gh release edit vX.Y.Z --draft=false 发布；任一文件重试耗尽则中止并保留草稿，
+//      打印续传指引——修复网络后重跑同一命令即可（幂等）。
+// 版本落账自动化：build 后自动 git add 六件（tauri.conf.json、shell/package.json、Cargo.toml、core/package.json、domain/package.json、Cargo.lock）
+//      并 commit -m "chore(release): bump vX.Y.Z"、git tag vX.Y.Z、git push origin HEAD 与 vX.Y.Z；
+//      先推 tag 再传资产，gh release create 复用远端已存在的 tag（指向含版本号的提交）。每步幂等：
+//      无 staged 差异跳过 commit、本地 tag 已存在跳过打标、push 已同步照常通过，重跑续传不炸。
 // 用法：
 //   npm run release -- 0.1.1            # 指定版本
 //   npm run release -- patch            # patch/minor/major 自增
 //   npm run release -- 0.1.1 --notes "..." --skip-build
+// 注意：发版要求工作树干净（有未提交改动会直接拦截）；版本号改动由脚本自动落账，无需手动 commit/tag/push。
 // 签名私钥：默认 <用户目录>/.tauri/novel-ws.key；可用 TAURI_SIGNING_PRIVATE_KEY_PATH 覆盖路径，
 // 或 TAURI_SIGNING_PRIVATE_KEY 直接给密钥内容；密码用 TAURI_SIGNING_PRIVATE_KEY_PASSWORD（本仓密钥为空密码）。
 import { spawnSync } from 'node:child_process';
@@ -156,6 +170,59 @@ function detectRepo() {
   return 'sanjiao-orl/final';
 }
 
+// 工作树预检：带未提交改动发版会把未完成代码带进版本提交/tag，先拦截。
+function assertCleanWorktree() {
+  const res = runCapture('git', ['status', '--porcelain'], { cwd: root });
+  if (res.status !== 0) fail('git status 执行失败，请确认处于 git 仓库内');
+  const dirty = res.stdout.trim();
+  if (dirty) {
+    for (const line of dirty.split(/\r?\n/)) console.error(`[release] 未提交改动: ${line}`);
+    fail('工作树有未提交改动，请先提交');
+  }
+}
+
+// 版本落账自动化：把版本号改动连同 Cargo.lock 提交、打 tag、推送到 origin。
+// 先推 tag 再走 uploadRelease，gh release create 复用远端已存在的 tag（指向含版本号的提交，而非默认分支旧 HEAD）。
+// 每步幂等：无 staged 差异跳过 commit、本地 tag 已存在跳过打标、push 已同步照常通过，重跑续传不炸。
+function commitAndPush(version) {
+  const tag = `v${version}`;
+  const files = [
+    'shell/src-tauri/tauri.conf.json',
+    'shell/package.json',
+    'shell/src-tauri/Cargo.toml',
+    'core/package.json',
+    'domain/package.json',
+    'shell/src-tauri/Cargo.lock',
+  ];
+  if (run('git', ['add', ...files], { cwd: root }) !== 0) fail('git add 失败');
+
+  // 有 staged 差异才提交；重跑续传时差异已被上一次提交带走，跳过。
+  if (runCapture('git', ['diff', '--cached', '--quiet'], { cwd: root }).status !== 0) {
+    if (run('git', ['commit', '-m', `chore(release): bump ${tag}`], { cwd: root }) !== 0) fail('git commit 失败');
+    console.log(`[release] 已提交版本号: chore(release): bump ${tag}`);
+  } else {
+    console.log('[release] 无 staged 差异，跳过 commit（幂等续传）');
+  }
+
+  // 本地已存在同名 tag 才跳过，避免重复打标。
+  if (runCapture('git', ['tag', '-l', tag], { cwd: root }).stdout.trim() === tag) {
+    console.log(`[release] tag ${tag} 已存在，跳过打标（幂等续传）`);
+  } else if (run('git', ['tag', tag], { cwd: root }) !== 0) {
+    fail('git tag 失败');
+  } else {
+    console.log(`[release] 已打本地 tag ${tag}`);
+  }
+
+  // 推送分支与 tag；失败时打印手动补救命令，修好后重跑同一命令续传。
+  if (run('git', ['push', 'origin', 'HEAD'], { cwd: root }) !== 0) {
+    fail(`git push origin HEAD 失败，请手动补救后重跑:\n  git push origin HEAD\n  git push origin ${tag}`);
+  }
+  if (run('git', ['push', 'origin', tag], { cwd: root }) !== 0) {
+    fail(`git push origin ${tag} 失败，请手动补救后重跑:\n  git push origin ${tag}`);
+  }
+  console.log(`[release] 已推送分支与 tag ${tag} 到 origin`);
+}
+
 function ensureGh(repo) {
   if (runCapture('gh', ['--version']).status !== 0) {
     fail('未找到 gh CLI。请先安装 GitHub CLI：https://cli.github.com/');
@@ -221,27 +288,119 @@ function releaseExists(repo, version) {
   return runCapture('gh', ['release', 'view', `v${version}`, '--repo', repo], { stdio: 'ignore' }).status === 0;
 }
 
+const UPLOAD_MAX_ATTEMPTS = 3;   // 每个文件最大尝试次数
+const UPLOAD_RETRY_SECONDS = 15; // 失败后重试间隔
+const UPLOAD_ROUTES = [          // 路由轮换：代理 HTTP/1.1 → 直连 HTTP/1.1
+  ['-x', 'http://127.0.0.1:7897', '--http1.1'],
+  ['--http1.1'],
+];
+
+function sleep(seconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, seconds * 1000);
+}
+
+function ghToken() {
+  const res = runCapture('gh', ['auth', 'token']);
+  if (res.status !== 0 || !res.stdout.trim()) fail('无法获取 GitHub token（gh auth token）');
+  return res.stdout.trim();
+}
+
+function ghReleaseId(repo, tag) {
+  const res = runCapture('gh', ['release', 'view', tag, '--repo', repo, '--json', 'id', '--jq', '.id']);
+  if (res.status !== 0 || !res.stdout.trim()) fail(`无法获取 release ${tag} 的 ID`);
+  return res.stdout.trim();
+}
+
+// 删除 release 下所有同名资产（清理 gh 失败/断传留下的 starter 半成品）
+function deleteAssetsByName(repo, releaseId, name) {
+  const list = runCapture('gh', ['api', `repos/${repo}/releases/${releaseId}/assets`, '--jq', `.[] | select(.name=="${name}") | .id`]);
+  if (list.status !== 0) return;
+  for (const id of list.stdout.trim().split(/\r?\n/).filter(Boolean)) {
+    const del = runCapture('gh', ['api', '-X', 'DELETE', `repos/${repo}/releases/assets/${id}`]);
+    if (del.status === 0) {
+      console.warn(`[release] 已清理同名 starter 残留资产 #${id}（${name}）`);
+    }
+  }
+}
+
+// 单次 curl 直传 uploads.github.com，返回 HTTP 状态码；连接失败返回 null
+function curlUpload(url, filePath, route, token) {
+  const dataArg = `@${path.resolve(filePath).replace(/\\/g, '/')}`;
+  const res = runCapture('curl', [
+    '-sS', '--max-time', '1200',
+    '-w', '\n%{http_code}',
+    ...route,
+    '-X', 'POST',
+    '-H', `Authorization: Bearer ${token}`,
+    '-H', 'Accept: application/vnd.github+json',
+    '-H', 'Content-Type: application/octet-stream',
+    '--data-binary', dataArg,
+    url,
+  ], { maxBuffer: 8 * 1024 * 1024 });
+  const lines = String(res.stdout || '').split(/\r?\n/).filter(Boolean);
+  const code = lines.length ? lines[lines.length - 1].trim() : '';
+  if (res.status !== 0) {
+    console.warn(`[release] curl 退出码 ${res.status}: ${String(res.stderr || '').trim()}`);
+  }
+  return /^\d{3}$/.test(code) ? code : null;
+}
+
+// 上传单个文件：每次尝试前先删同名残留资产，路由轮换重试，直到 201 或重试耗尽
+function uploadFile(repo, releaseId, file, token) {
+  const name = path.basename(file);
+  const url = `https://uploads.github.com/repos/${repo}/releases/${releaseId}/assets?name=${encodeURIComponent(name)}`;
+  for (let attempt = 1; attempt <= UPLOAD_MAX_ATTEMPTS; attempt += 1) {
+    deleteAssetsByName(repo, releaseId, name);
+    const route = UPLOAD_ROUTES[(attempt - 1) % UPLOAD_ROUTES.length];
+    const via = route.length > 1 ? '代理 http://127.0.0.1:7897' : '直连';
+    console.log(`[release] 上传 ${name}（第 ${attempt}/${UPLOAD_MAX_ATTEMPTS} 次，${via}）`);
+    const code = curlUpload(url, file, route, token);
+    if (code === '201') {
+      console.log(`[release] 上传成功 ${name}`);
+      return true;
+    }
+    console.warn(`[release] 上传失败 ${name}（HTTP ${code ?? '无响应'}），${UPLOAD_RETRY_SECONDS}s 后重试…`);
+    if (attempt < UPLOAD_MAX_ATTEMPTS) sleep(UPLOAD_RETRY_SECONDS);
+  }
+  return false;
+}
+
 function uploadRelease(repo, version, notes, files) {
   const tag = `v${version}`;
-  const fileArgs = files.map((f) => path.resolve(f));
-  if (releaseExists(repo, version)) {
-    console.log(`[release] release ${tag} 已存在，改为 upload --clobber`);
-    const status = run('gh', ['release', 'upload', tag, ...fileArgs, '--repo', repo, '--clobber']);
-    if (status !== 0) fail(`gh release upload 失败，退出码 ${status}`);
-  } else {
-    const status = run('gh', [
-      'release', 'create', tag,
-      ...fileArgs,
-      '--repo', repo,
-      '--title', tag,
-      '--notes', notes || `发布 v${version}`,
-    ]);
-    if (status !== 0) fail(`gh release create 失败，退出码 ${status}`);
+  if (runCapture('curl', ['--version']).status !== 0) {
+    fail('未找到 curl。请先安装（Windows Git Bash / Linux / macOS 通常自带）。');
   }
+  const token = ghToken();
+
+  // 阶段一：确保草稿 release 存在（只带 notes，不带文件；已存在则复用，幂等续传）
+  if (releaseExists(repo, version)) {
+    console.log(`[release] release ${tag} 已存在，复用（保持草稿，继续传资产）`);
+  } else {
+    const status = run('gh', ['release', 'create', tag, '--repo', repo, '--title', tag, '--notes', notes || `发布 v${version}`, '--draft']);
+    if (status !== 0) fail(`gh release create --draft 失败，退出码 ${status}`);
+    console.log(`[release] 已创建草稿 release ${tag}`);
+  }
+  const releaseId = ghReleaseId(repo, tag);
+
+  // 阶段二：逐个文件 curl 直传；任一文件重试耗尽即中止，保留草稿供续传
+  for (const file of files) {
+    if (!uploadFile(repo, releaseId, file, token)) {
+      console.error(`[release] 资产上传失败: ${path.basename(file)}`);
+      console.error(`[release] 草稿已保留: https://github.com/${repo}/releases/tag/${tag}`);
+      console.error(`[release] 请修复网络后重跑同一命令（幂等：已传文件会覆盖重传，未传的续传）。`);
+      process.exit(1);
+    }
+  }
+
+  // 阶段三：全部传完才发布
+  const edit = run('gh', ['release', 'edit', tag, '--repo', repo, '--draft=false']);
+  if (edit !== 0) fail(`gh release edit --draft=false 失败，退出码 ${edit}`);
+  console.log(`[release] release ${tag} 已发布（draft=false）。`);
 }
 
 function main() {
   const { target, notes, skipBuild, repo: repoArg } = parseArgv(process.argv.slice(2));
+  assertCleanWorktree();
   const before = currentVersion();
   const version = bumpVersion(before, target);
   const repo = repoArg || detectRepo();
@@ -263,6 +422,7 @@ function main() {
   files.push(latestPath);
 
   ensureGh(repo);
+  commitAndPush(version);
   uploadRelease(repo, version, notes, files);
 
   console.log('[release] 完成。');
