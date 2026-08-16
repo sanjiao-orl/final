@@ -1,7 +1,7 @@
 # 0001 · Agent harness 选型：Vercel AI SDK v7
 
 - 状态：已定稿（2026-08-08）
-- 背景：novel-rl 手写约 1,325 行 LLM HTTP 基建，流式/多会话/持久化/多模型管理四缺口全缺（见 `docs/00-诊断-novel-rl.md` 2.3）。第三次出发不再手写 agent 内核，直接引入成熟 harness。
+- 背景：novel-rl 手写约 1,325 行 LLM HTTP 基建，流式/多会话/持久化/多模型管理四缺口全缺（见 `docs/archive/00-诊断-novel-rl.md` 2.3）。第三次出发不再手写 agent 内核，直接引入成熟 harness。
 
 ## 决定
 
