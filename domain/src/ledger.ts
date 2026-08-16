@@ -3,6 +3,7 @@
  *
  * 四维：时钟表 / 道具托管 / 承诺登记（=伏笔）/ 知情地图，结构 =「实体 + 状态字段 + 章节引用」。
  * 另含三张登记表：do-not-re-explain（不得重解释）、PROTECT（作者刻意设计，不报缺陷）、tripwire（高危硬规则）。
+ * 另含问题日志（issues.md，CR 格式行文件）读写：issue_append 追加 / issue_set_status 改状态 / countBlockers 未处置 BLOCKER 计数（批三-1 闭环接通）。
  *
  * 存储形态：结构化 Markdown，账本机器态用 YAML frontmatter 承载（round-trip 安全），正文为人类可读渲染。
  * domain 工具读写该文件；默认路径 `.novel/ledger.md`（相对 workDir），可传 ledgerPath 覆盖。
@@ -397,6 +398,7 @@ export function renderLedgerMarkdown(ledger: Ledger): string {
     '',
     '> 四维账本（时钟表 / 道具托管 / 承诺登记 / 知情地图）+ 三张登记表。',
     '> 本文件由 domain 账本工具读写；机器态在顶部 YAML frontmatter，正文为渲染视图。',
+    '> ⚠ 正文为机器渲染视图，手工增补将在下次写入时被覆盖——要改请用 ledger_upsert 工具或直接改 YAML frontmatter。',
     '',
     '## Position / Clock table',
     '',
@@ -896,9 +898,9 @@ const COLD_READ_SLICE_TEMPLATE = [
   '{{问题日志尾部}}',
   '',
   '## 输出要求',
-  '- 逐条以 CR 格式追加进 issues.md，并更新账本全部区块；',
   '- 只依据本章正文 + 账本状态判断，不臆造；',
-  '- 严禁读取/注入本书其他章节全文。',
+  '- 严禁读取/注入本书其他章节全文；',
+  '- 输出必须是严格 JSON：一个数组，每项为 { severity: "BLOCKER"|"MAJOR"|"MODERATE"|"MINOR", quote: string, why: string, suggestion?: string, category?: string }；severity 只能取 BLOCKER/MAJOR/MODERATE/MINOR；quote 是该章正文里的原文短引；category 可选，只取 CONT/CANON/VOICE/CRAFT/STRUCT/PACE/REPEAT/META 之一，判断不了就省略；只输出 JSON 数组本身，不要 Markdown 代码块、不要解释、不要任何前后缀；没有发现时输出 []。',
   '',
 ].join('\n') + '\n';
 
@@ -998,14 +1000,14 @@ export interface WorkDiagnostics {
   findings: LedgerFinding[];
   /** 是否存在 BLOCKER 级发现（确定性诊断 BLOCKER + 问题日志 BLOCKER 计数），供暂存区入口标红提示；不做硬拦截。 */
   hasBlockers: boolean;
-  /** 问题日志（issues.md，CR 格式）里 severity 列为 BLOCKER 的条数；未提供 issueLogPath 或日志缺失时为 0。 */
+  /** 问题日志（issues.md，CR 格式）里 severity 列为 BLOCKER 且 status 列缺失/为空/open 的条数（已处置 done/known 不计）；未提供 issueLogPath 或日志缺失时为 0。 */
   blockerCount: number;
 }
 
 /**
  * 对 workDir 跑全量确定性诊断：账本级（悬空/逾期/双位）+ 章级（章首跳变/季节冲突），
- * 并把问题日志（issues.md，CR 格式）的 BLOCKER 计数（severity 列判定）折叠进 hasBlockers——
- * 冷读产出的 BLOCKER 条目由本函数统一汇总，接进「暂存区入口标红提示」出口。
+ * 并把问题日志（issues.md，CR 格式）的 BLOCKER 计数（severity 列 + 未处置 status 列判定）折叠进 hasBlockers——
+ * 冷读产出的未处置 BLOCKER 条目由本函数统一汇总，接进「暂存区入口标红提示」出口。
  */
 export function diagnosticsForWork(workDir: string, ledgerPath?: string, issueLogPath?: string): WorkDiagnostics {
   const wd = assertWorkDir(workDir);
@@ -1068,14 +1070,202 @@ export function diagnosticsForWork(workDir: string, ledgerPath?: string, issueLo
 // ---------- BLOCKER 清零提示出口 ----------
 
 /**
- * 解析 issue 日志（CR 格式：`|` 分隔列）里 BLOCKER 条数：只看第 3 个字段（severity 列）恰为 BLOCKER 的行。
+ * 解析 issue 日志（CR 格式：`|` 分隔列）里「未处置」BLOCKER 条数：第 3 个字段（severity 列）恰为 BLOCKER，
+ * 且第 9 个字段（status 列，批三-1 新增）缺失/为空/open 的行才计数——已处置（done/known）不计，
+ * 「清零」语义 = 处置后不计。
  * 不按行内任意位置的 "| BLOCKER |" 子串匹配——quote/why 字段含同样片段会多计。
  */
 export function countBlockers(issueLogContent: string): { blockers: number; hasBlockers: boolean } {
   let n = 0;
   for (const line of issueLogContent.split(/\r?\n/)) {
     const fields = line.split('|').map((f) => f.trim());
-    if (fields.length >= 3 && fields[2] === 'BLOCKER') n += 1;
+    if (fields.length >= 3 && fields[2] === 'BLOCKER') {
+      const status = fields[8] ?? '';
+      if (status === '' || status === 'open') n += 1;
+    }
   }
   return { blockers: n, hasBlockers: n > 0 };
+}
+
+// ---------- 问题日志（issues.md，CR 格式）读写（批三-1 闭环接通） ----------
+
+/** 问题日志默认文件路径（相对 workDir）。 */
+export const DEFAULT_ISSUE_LOG_PATH = 'editorial_notes/issues.md';
+
+/** issue_append 单条入参：一条待追加的问题（对齐 WS-9 CR 行字段）。 */
+export interface IssueFinding {
+  severity: FindingSeverity;
+  category?: FindingCategory;
+  /** 原文引用（可带引号包裹，追加前会去引号 trim 后用于定位行号）。 */
+  quote: string;
+  why: string;
+  /** 修复建议，缺省时 CR 行 fix 列填 `-`。 */
+  suggestion?: string;
+  /** 章节定位：manuscript/ 内 relPath（正斜杠），如 manuscript/卷一/第1章.md。 */
+  chapter: string;
+}
+
+/** issue_append 允许的 severity/category 枚举（守卫校验用；与 MCP zod schema 同口径）。 */
+const FINDING_SEVERITIES: FindingSeverity[] = ['BLOCKER', 'MAJOR', 'MODERATE', 'MINOR'];
+const FINDING_CATEGORIES: FindingCategory[] = ['CONT', 'CANON', 'VOICE', 'CRAFT', 'STRUCT', 'PACE', 'REPEAT', 'META'];
+
+/** CR 行任一字段内的 `|` 与换行统一替换为空格（行内禁止换行，防破坏 `|` 分隔格式）。 */
+function crField(text: string): string {
+  return text.replace(/[\r\n|]/g, ' ');
+}
+
+/** 去引号 + trim：quote 可能带 `"…"` / `“…”` 包裹，剥离后再参与定位与落列。 */
+function unquoteQuote(text: string): string {
+  let t = text.trim();
+  while (
+    t.length >= 2 &&
+    ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith('“') && t.endsWith('”')) || (t.startsWith("'") && t.endsWith("'")))
+  ) {
+    t = t.slice(1, -1).trim();
+  }
+  return t;
+}
+
+/**
+ * 在 chapter 文件里找 quote 首次出现的文件实际行号（1 起始，含 frontmatter 行，与 search_content 口径一致）。
+ * chapter 越界/非 manuscript 内 .md/不存在或 quote 找不到 → 返回 null（CR 行 line 段写 `?`）。
+ */
+function locateQuoteLine(workDir: string, chapterRelPath: string, quote: string): number | null {
+  let abs: string;
+  try {
+    abs = resolveInside(workDir, chapterRelPath);
+  } catch {
+    return null;
+  }
+  const posix = toPosix(path.relative(assertWorkDir(workDir), abs));
+  if (!posix.startsWith('manuscript/') || !posix.toLowerCase().endsWith('.md')) return null;
+  let content: string;
+  try {
+    content = fs.readFileSync(abs, 'utf8');
+  } catch {
+    return null; // chapter 不存在
+  }
+  const q = quote.trim();
+  if (q === '') return null;
+  const lowerQ = q.toLowerCase();
+  const lines = content.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    if ((lines[i] ?? '').toLowerCase().includes(lowerQ)) return i + 1;
+  }
+  return null;
+}
+
+/**
+ * issue_append：把 findings 追加进问题日志（CR 格式行文件），原子写回。
+ * - 编号：扫现有 `CR-(\d+)` 取最大 +1 续号（3 位零填充）；
+ * - 定位：quote 去引号 trim 后在 chapter 文件里找首次出现行号（文件实际行号含 frontmatter，与 search_content 同口径）；
+ *   chapter 不存在或 quote 找不到则 line 段写 `?`；
+ * - CR 行：scope 列固定 `-`、status 列固定 open（批三-1 新增状态列）；why/suggestion 分列 why 与 fix，
+ *   suggestion 缺则 fix 列填 `-`；行内禁止换行，`|` 统一替换为空格；
+ * - 文件不存在则创建（含父目录，带 `# 问题日志` 头行）；白名单（.novel/ 根下或 editorial_notes/ 下 .md）外抛错。
+ */
+export function issueAppend(
+  workDir: string,
+  findings: IssueFinding[],
+  issueLogPath?: string,
+): { appended: number; ids: string[]; path: string } {
+  const wd = assertWorkDir(workDir);
+  const rel = issueLogPath || DEFAULT_ISSUE_LOG_PATH;
+  const abs = assertLedgerMetaPath(wd, rel, 'issueLog'); // 越界/白名单外在此抛错（与 ledger_slice 同口径）
+  if (!Array.isArray(findings)) throw new Error('issue_append 的 findings 必须是数组');
+  if (findings.length === 0) return { appended: 0, ids: [], path: rel }; // 空追加幂等 no-op，不建文件
+
+  let existing = '';
+  try {
+    existing = fs.readFileSync(abs, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+
+  // 扫现有 `CR-(\d+)` 取最大编号 +1 续号
+  let nextNo = 0;
+  for (const m of existing.matchAll(/CR-(\d+)/g)) {
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n > nextNo) nextNo = n;
+  }
+
+  const rows: string[] = [];
+  const ids: string[] = [];
+  for (const f of findings) {
+    if (!FINDING_SEVERITIES.includes(f.severity)) {
+      throw new Error(`issue_append 的 severity 非法: ${String(f.severity)}（允许: ${FINDING_SEVERITIES.join('/')}）`);
+    }
+    if (f.category !== undefined && !FINDING_CATEGORIES.includes(f.category)) {
+      throw new Error(`issue_append 的 category 非法: ${String(f.category)}（允许: ${FINDING_CATEGORIES.join('/')}）`);
+    }
+    if (typeof f.quote !== 'string' || f.quote.trim() === '') throw new Error('issue_append 的 quote 需要非空字符串');
+    if (typeof f.why !== 'string' || f.why.trim() === '') throw new Error('issue_append 的 why 需要非空字符串');
+    if (typeof f.chapter !== 'string' || f.chapter.trim() === '') throw new Error('issue_append 的 chapter 需要非空字符串');
+
+    nextNo += 1;
+    const id = `CR-${String(nextNo).padStart(3, '0')}`;
+    ids.push(id);
+    const quote = unquoteQuote(f.quote);
+    const lineNo = locateQuoteLine(wd, f.chapter, quote);
+    const location = `${crField(f.chapter.trim())}:${lineNo ?? '?'}`;
+    const cat = f.category ?? 'META'; // category 缺省按 META（未归类）
+    const fix = f.suggestion !== undefined && f.suggestion.trim() !== '' ? crField(f.suggestion) : '-';
+    rows.push(`${id} | ${location} | ${f.severity} | ${cat} | "${crField(quote)}" | ${crField(f.why)} | ${fix} | - | open`);
+  }
+
+  // 拼接：文件不存在（或空内容）时带头行；已有内容保持原样追加（末尾补换行分隔）
+  const header = existing.trim() === '' ? '# 问题日志\n\n' : '';
+  const sep = existing === '' || existing.endsWith('\n') ? '' : '\n';
+  const next = existing + sep + header + rows.join('\n') + '\n';
+  atomicWrite(abs, next);
+  return { appended: rows.length, ids, path: rel };
+}
+
+/**
+ * issue_set_status：把 id（CR-NNN）所在行的 status 列改写为 open/done/known。
+ * - 有 status 列则替换、无则行尾追加（批三-1 新增状态列，旧行无此列视为 open）；
+ * - id 找不到抛中文错；同状态重复设置幂等成功（文件不变）；
+ * - 白名单（.novel/ 根下或 editorial_notes/ 下 .md）外抛错。
+ */
+export function issueSetStatus(
+  workDir: string,
+  id: string,
+  status: 'open' | 'done' | 'known',
+  issueLogPath?: string,
+): { ok: true; id: string; status: 'open' | 'done' | 'known' } {
+  const wd = assertWorkDir(workDir);
+  const rel = issueLogPath || DEFAULT_ISSUE_LOG_PATH;
+  const abs = assertLedgerMetaPath(wd, rel, 'issueLog'); // 越界/白名单外在此抛错
+  if (typeof id !== 'string' || !/^CR-\d+$/.test(id.trim())) {
+    throw new Error(`issue_set_status 的 id 格式非法（应为 CR-NNN）: ${String(id)}`);
+  }
+  const target = id.trim();
+  let existing: string;
+  try {
+    existing = fs.readFileSync(abs, 'utf8');
+  } catch {
+    throw new Error(`issue_set_status 找不到问题日志: ${rel}`);
+  }
+
+  const lines = existing.split(/\r?\n/);
+  let found = false;
+  let changed = false;
+  const nextLines = lines.map((line) => {
+    const fields = line.split('|');
+    // 只认 CR 行（首字段为 id）；其他行误含该 id 文本时不动
+    if ((fields[0] ?? '').trim() !== target) return line;
+    found = true;
+    const current = (fields[8] ?? '').trim();
+    if (current === status) return line; // 幂等：同状态不再改写
+    if (fields.length >= 9) {
+      fields[8] = ` ${status}`; // 替换：保持原行其他列与间隔不变
+      changed = true;
+      return fields.join('|');
+    }
+    changed = true;
+    return line.trimEnd() + ` | ${status}`; // 追加：旧行无 status 列，行尾补列
+  });
+  if (!found) throw new Error(`issue_set_status 找不到 id: ${target}`);
+  if (changed) atomicWrite(abs, nextLines.join('\n'));
+  return { ok: true, id: target, status };
 }

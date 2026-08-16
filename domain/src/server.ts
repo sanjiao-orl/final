@@ -1,6 +1,6 @@
 /**
- * server.ts —— MCP stdio server 装配：注册二十二个工具并连接 stdio transport。
- * 双侧合并口径：基础工具 8 个 + WS-9 scan_quality + A 组 8 工具 + WS-17 账本 4 工具 + 0008 skill_read 1 工具。
+ * server.ts —— MCP stdio server 装配：注册二十四个工具并连接 stdio transport。
+ * 双侧合并口径：基础工具 8 个 + WS-9 scan_quality + A 组 8 工具 + WS-17 账本 4 工具 + 0008 skill_read 1 工具 + 0009 问题日志 2 工具（issue_append/issue_set_status）。
  * 被 core 包经 MCP stdio spawn 调用；工具实现见 tools.ts。
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -30,9 +30,12 @@ import {
 import {
   diagnosticsForWork,
   ISSUE_LOG_TAIL_LINES,
+  issueAppend,
+  issueSetStatus,
   ledgerSlice,
   readLedger,
   upsertLedger,
+  type IssueFinding,
   type LedgerOp,
 } from './ledger.js';
 import { readSkillBody } from './prompts.js';
@@ -344,6 +347,53 @@ server.registerTool(
   },
   async ({ workDir, chapterRelPath, ledgerPath, issueLogPath }) =>
     jsonResult(ledgerSlice(workDir, chapterRelPath, ledgerPath, issueLogPath)),
+);
+
+server.registerTool(
+  'issue_append',
+  {
+    title: '追加问题日志条目',
+    description:
+      '把 findings 追加进问题日志（默认 editorial_notes/issues.md，可传 issueLogPath 覆盖；必须是 .novel/ 根下或 editorial_notes/ 下的 .md）。编号 CR-NNN 扫现有 CR-(\\d+) 最大 +1 续号（3 位零填充）；quote 去引号 trim 后在 chapter（manuscript/ 内 relPath）里找首次出现行号定位 ch:line（文件实际行号含 frontmatter，与 search_content 同口径；chapter 不存在或 quote 找不到则写 ?）。CR 行 scope 列固定 `-`、status 列固定 open（0009 新增状态列）；why/suggestion 分列 why 与 fix，suggestion 缺则 fix 填 `-`；行内禁止换行，`|` 统一替换为空格。返回 { appended, ids, path }。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      issueLogPath: z.string().optional().describe('可选：问题日志相对 workDir 路径，必须是 .novel/ 根下或 editorial_notes/ 下的 .md，默认 editorial_notes/issues.md'),
+      findings: z
+        .array(
+          z.object({
+            severity: z.enum(['BLOCKER', 'MAJOR', 'MODERATE', 'MINOR']).describe('严重度：BLOCKER/MAJOR/MODERATE/MINOR'),
+            category: z
+              .enum(['CONT', 'CANON', 'VOICE', 'CRAFT', 'STRUCT', 'PACE', 'REPEAT', 'META'])
+              .optional()
+              .describe('类别（缺省按 META）：CONT/CANON/VOICE/CRAFT/STRUCT/PACE/REPEAT/META'),
+            quote: z.string().describe('原文引用（可带引号包裹，追加前会去引号 trim 后用于定位行号）'),
+            why: z.string().describe('问题说明（why / reader-moment）'),
+            suggestion: z.string().optional().describe('修复建议（对应 CR 行 fix 列；缺省填 -）'),
+            chapter: z.string().describe('章节定位：manuscript/ 内 relPath（正斜杠），如 manuscript/卷一/第1章.md'),
+          }),
+        )
+        .describe('待追加的问题条目数组'),
+    },
+  },
+  async ({ workDir, issueLogPath, findings }) =>
+    jsonResult(issueAppend(workDir, findings as unknown as IssueFinding[], issueLogPath)),
+);
+
+server.registerTool(
+  'issue_set_status',
+  {
+    title: '改问题日志条目状态',
+    description:
+      '把 id（CR-NNN）所在行的 status 列改写为 open/done/known（0009 新增状态列）：有则替换、无则行尾追加；id 找不到抛错；同状态重复设置幂等成功。返回 { ok, id, status }。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      issueLogPath: z.string().optional().describe('可选：问题日志相对 workDir 路径，必须是 .novel/ 根下或 editorial_notes/ 下的 .md，默认 editorial_notes/issues.md'),
+      id: z.string().describe('问题条目 id，格式 CR-NNN（3 位数字零填充）'),
+      status: z.enum(['open', 'done', 'known']).describe('目标状态：open 待处理 / done 已处理 / known 已知'),
+    },
+  },
+  async ({ workDir, issueLogPath, id, status }) =>
+    jsonResult(issueSetStatus(workDir, id, status as 'open' | 'done' | 'known', issueLogPath)),
 );
 
 server.registerTool(
