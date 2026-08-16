@@ -1,12 +1,41 @@
 // 模块职责：HTTP 层小工具——JSON 响应、SSE 帧、请求体读取、带状态码的业务错误、CORS 头。
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
-/** 本地联调用，CORS 全放开。 */
-export const CORS_HEADERS: Record<string, string> = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PATCH, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-};
+/** CORS 白名单（精确匹配）：Tauri WebView（Windows WebView2）的 Origin。 */
+const CORS_ORIGIN_WHITELIST: ReadonlySet<string> = new Set([
+  'http://tauri.localhost',
+  'https://tauri.localhost',
+  'tauri://localhost',
+]);
+
+/**
+ * 按请求 Origin 反射 CORS 头（白名单收窄，docs/decisions/0009 批三-1）：
+ * - Origin 为 http://localhost 或 http://127.0.0.1 任意端口（hostname 判定，防 http://localhost.evil.com 前缀欺骗），
+ *   或精确等于 CORS_ORIGIN_WHITELIST 内 Tauri Origin → 反射该 Origin 并加 Vary: Origin；
+ * - Origin 不在白名单 → 不给 Access-Control-Allow-Origin（浏览器同源策略拦截；curl 等无 Origin 客户端不受影响）；
+ * - 无 Origin → 不给 Allow-Origin 头，响应照常。
+ * 其余头（Allow-Methods/Headers 等）固定随函数返回。
+ */
+export function corsHeadersFor(origin: string | undefined): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Access-Control-Allow-Methods': 'GET, POST, PATCH, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  };
+  if (!origin || !isAllowedCorsOrigin(origin)) return headers;
+  headers['Access-Control-Allow-Origin'] = origin;
+  headers['Vary'] = 'Origin';
+  return headers;
+}
+
+function isAllowedCorsOrigin(origin: string): boolean {
+  if (CORS_ORIGIN_WHITELIST.has(origin)) return true;
+  try {
+    const url = new URL(origin);
+    return url.protocol === 'http:' && (url.hostname === 'localhost' || url.hostname === '127.0.0.1');
+  } catch {
+    return false;
+  }
+}
 
 /** 带 HTTP 状态码的业务错误，路由层统一转成 JSON 响应。 */
 export class HttpError extends Error {
@@ -32,9 +61,9 @@ export function toPublicErrorMessage(err: unknown): string {
   return INTERNAL_ERROR_MESSAGE;
 }
 
-export function writeJson(res: ServerResponse, status: number, data: unknown): void {
+export function writeJson(res: ServerResponse, status: number, data: unknown, origin: string | undefined): void {
   if (res.writableEnded || res.destroyed) return;
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', ...CORS_HEADERS });
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', ...corsHeadersFor(origin) });
   res.end(JSON.stringify(data));
 }
 
@@ -42,13 +71,13 @@ export function writeJson(res: ServerResponse, status: number, data: unknown): v
  * 注意：SSE 帧的写入一律走 event_pump（src/event-pump.ts，D4 单一发射点），
  * 各 handler 不得直接 res.write 帧。 */
 
-export function startSse(res: ServerResponse): void {
+export function startSse(res: ServerResponse, origin: string | undefined): void {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
     'Cache-Control': 'no-cache, no-transform',
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
-    ...CORS_HEADERS,
+    ...corsHeadersFor(origin),
   });
   res.write(':ok\n\n');
 }

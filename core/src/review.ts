@@ -1,6 +1,7 @@
 // 模块职责：POST /v1/review 的贵档冷读审阅管道——经 MCP 工具 ledger_slice 组装单章冷读提示词，
 // 一次性调用 main 档模型，要求严格输出 findings JSON 数组；解析 + zod 校验后返回 JSON（非 SSE）。
 // 纪律：core 不额外注入任何文件内容，单章正文只由 domain ledger_slice 注入（防全稿注入红线）。
+// 闭环：findings 非空时确定性经 MCP issue_append 追加进 issues.md（工具不可用/失败仅 warn 降级，不阻断返回）。
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { streamText, type LanguageModel, type ToolSet } from 'ai';
 import { z } from 'zod';
@@ -23,7 +24,8 @@ export interface ReviewDeps {
 }
 
 export const reviewFindingSchema = z.object({
-  severity: z.enum(['BLOCKER', 'MAJOR', 'MODERATE']),
+  severity: z.enum(['BLOCKER', 'MAJOR', 'MODERATE', 'MINOR']),
+  category: z.enum(['CONT', 'CANON', 'VOICE', 'CRAFT', 'STRUCT', 'PACE', 'REPEAT', 'META']).optional(),
   quote: z.string(),
   why: z.string(),
   suggestion: z.string().optional(),
@@ -44,7 +46,7 @@ export async function handleReviewRequest(
 ): Promise<void> {
   const parsed = reviewBodySchema.safeParse(body);
   if (!parsed.success) {
-    writeJson(res, 400, { error: '请求体不合法: ' + parsed.error.issues.map((i) => i.message).join('; ') });
+    writeJson(res, 400, { error: '请求体不合法: ' + parsed.error.issues.map((i) => i.message).join('; ') }, req.headers.origin);
     return;
   }
   const { workDir, chapterRelPath } = parsed.data;
@@ -86,7 +88,14 @@ export async function handleReviewRequest(
     }
 
     const findings = parseFindings(text);
-    writeJson(res, 200, { findings });
+
+    // 闭环：findings 非空时确定性经 domain issue_append 追加进 issues.md；失败降级，不影响 findings 返回。
+    const payload: { findings: ReviewFinding[]; persisted?: { appended: number; ids: string[] } } = { findings };
+    if (findings.length > 0) {
+      const persisted = await persistFindings(deps, workDir, chapterRelPath, findings);
+      if (persisted) payload.persisted = persisted;
+    }
+    writeJson(res, 200, payload, req.headers.origin);
   } catch (err) {
     if (abort.signal.aborted) return;
     if (timeoutSignal.aborted) {
@@ -154,6 +163,79 @@ function extractSlice(result: unknown): string {
     if (typeof candidate === 'string' && candidate.trim()) return candidate;
   }
   throw new HttpError(502, 'ledger_slice 未返回有效切片');
+}
+
+/**
+ * 经 domain issue_append 工具把 findings 确定性追加进 issues.md（不靠模型自觉）。
+ * chapter 由 core 统一注入请求的章相对路径；issueLogPath 缺省走 domain 默认。
+ * 工具不可用（无 MCP 连接）或调用失败时 console.warn 降级返回 undefined，不影响 findings 返回。
+ */
+async function persistFindings(
+  deps: ReviewDeps,
+  workDir: string,
+  chapterRelPath: string,
+  findings: ReviewFinding[],
+): Promise<{ appended: number; ids: string[] } | undefined> {
+  if (deps.toolsAvailable && !deps.toolsAvailable()) {
+    console.warn('[review] issue_append 工具暂不可用（domain MCP 重连中），findings 未落盘');
+    return undefined;
+  }
+  const tool = deps.tools?.['issue_append'];
+  if (!tool?.execute) {
+    console.warn('[review] issue_append 工具不可用（domain MCP 未连接或工具不存在），findings 未落盘');
+    return undefined;
+  }
+  try {
+    const result: unknown = await tool.execute(
+      { workDir, findings: findings.map((f) => ({ ...f, chapter: chapterRelPath })) } as never,
+      {
+        toolCallId: 'review-issue-append',
+        messages: [],
+        context: undefined,
+      },
+    );
+    return extractPersisted(result);
+  } catch (err) {
+    console.warn('[review] issue_append 落盘失败，findings 未落盘：', err instanceof Error ? err.message : err);
+    return undefined;
+  }
+}
+
+/** 从 issue_append 工具结果中提取 { appended, ids }：兼容 structuredContent / 直接返回对象 / content text JSON；取不到返回 undefined（降级）。 */
+function extractPersisted(result: unknown): { appended: number; ids: string[] } | undefined {
+  if (!result || typeof result !== 'object') return undefined;
+  const r = result as {
+    isError?: unknown;
+    structuredContent?: unknown;
+    appended?: unknown;
+    ids?: unknown;
+    content?: Array<{ type?: string; text?: string }>;
+  };
+  if (r.isError) {
+    const text = r.content?.find((c) => c && c.type === 'text' && typeof c.text === 'string')?.text;
+    console.warn(`[review] issue_append 执行失败，findings 未落盘：${text ?? '未知错误'}`);
+    return undefined;
+  }
+
+  const candidates: unknown[] = [];
+  if (r.structuredContent !== undefined) candidates.push(r.structuredContent);
+  if (r.appended !== undefined || r.ids !== undefined) candidates.push(r);
+  const text = r.content?.find((c) => c && c.type === 'text' && typeof c.text === 'string')?.text;
+  if (text !== undefined) {
+    try {
+      candidates.push(JSON.parse(text));
+    } catch {
+      candidates.push(text);
+    }
+  }
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const c = candidate as { appended?: unknown; ids?: unknown };
+    if (typeof c.appended === 'number' && Array.isArray(c.ids) && c.ids.every((i) => typeof i === 'string')) {
+      return { appended: c.appended, ids: c.ids as string[] };
+    }
+  }
+  return undefined;
 }
 
 /** 解析模型输出：容忍 ```json 围栏与前后废话，提取首个 JSON 数组，再用 zod 校验。 */

@@ -35,7 +35,7 @@ export async function handleRewriteRequest(
 ): Promise<void> {
   const parsed = rewriteBodySchema.safeParse(body);
   if (!parsed.success) {
-    writeJson(res, 400, { error: '请求体不合法: ' + parsed.error.issues.map((i) => i.message).join('; ') });
+    writeJson(res, 400, { error: '请求体不合法: ' + parsed.error.issues.map((i) => i.message).join('; ') }, req.headers.origin);
     return;
   }
   const { original, instruction } = parsed.data;
@@ -50,7 +50,7 @@ export async function handleRewriteRequest(
   const timeoutSeconds = getLlmTimeoutSeconds();
   const timeoutSignal = AbortSignal.timeout(timeoutSeconds * 1000);
 
-  const pump = new EventPump(res);
+  const pump = new EventPump(res, undefined, req.headers.origin);
   pump.start();
   try {
     const result = streamText({

@@ -261,7 +261,7 @@ export async function handleChatRequest(
 ): Promise<void> {
   const parsed = chatBodySchema.safeParse(body);
   if (!parsed.success) {
-    writeJson(res, 400, { error: '请求体不合法: ' + parsed.error.issues.map((i) => i.message).join('; ') });
+    writeJson(res, 400, { error: '请求体不合法: ' + parsed.error.issues.map((i) => i.message).join('; ') }, req.headers.origin);
     return;
   }
   const { text } = parsed.data;
@@ -274,7 +274,7 @@ export async function handleChatRequest(
   if (parsed.data.sessionId) {
     session = deps.store.getSession(parsed.data.sessionId);
     if (!session) {
-      writeJson(res, 404, { error: '会话不存在: ' + parsed.data.sessionId });
+      writeJson(res, 404, { error: '会话不存在: ' + parsed.data.sessionId }, req.headers.origin);
       return;
     }
   } else {
@@ -296,7 +296,7 @@ export async function handleChatRequest(
   const timeoutSeconds = getLlmTimeoutSeconds();
   const timeoutSignal = AbortSignal.timeout(timeoutSeconds * 1000);
 
-  const pump = new EventPump(res, sessionId);
+  const pump = new EventPump(res, sessionId, req.headers.origin);
   pump.start();
   let assistantText = '';
   const toolCalls: { id: string; name: string; args: unknown; result?: string }[] = [];

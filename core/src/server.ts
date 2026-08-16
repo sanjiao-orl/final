@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { handleChatRequest, type ChatDeps } from './chat.js';
 import { getGitCommit } from './config.js';
 import { devPage } from './dev.js';
-import { CORS_HEADERS, HttpError, readJsonBody, toPublicErrorMessage, writeJson } from './http.js';
+import { corsHeadersFor, HttpError, readJsonBody, toPublicErrorMessage, writeJson } from './http.js';
 import { handleReviewRequest } from './review.js';
 import { handleRewriteRequest, type RewriteDeps } from './rewrite.js';
 import { PROTOCOL_VERSION } from './runtime.js';
@@ -57,7 +57,7 @@ export function createAppServer(deps: ServerDeps): Server {
       const status = err instanceof HttpError ? err.status : 500;
       // 错误脱敏：HttpError 透传业务消息；其余内部错误只回稳定占位，原始细节已写 stderr。
       const message = toPublicErrorMessage(err);
-      if (!res.headersSent) writeJson(res, status, { error: message });
+      if (!res.headersSent) writeJson(res, status, { error: message }, req.headers.origin);
       else res.end();
     });
   });
@@ -67,25 +67,25 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
   const url = new URL(req.url ?? '/', 'http://127.0.0.1');
   const pathname = url.pathname;
 
-  // CORS 预检
+  // CORS 预检（白名单口径与普通响应一致：白名单 Origin 反射，其余不给 Allow-Origin）
   if (req.method === 'OPTIONS') {
-    res.writeHead(204, CORS_HEADERS);
+    res.writeHead(204, corsHeadersFor(req.headers.origin));
     res.end();
     return;
   }
 
   // 公开端点（免鉴权）
   if (req.method === 'GET' && pathname === '/v1/health') {
-    writeJson(res, 200, { ok: true, version: deps.version, protocol: PROTOCOL_VERSION, commit: CORE_COMMIT });
+    writeJson(res, 200, { ok: true, version: deps.version, protocol: PROTOCOL_VERSION, commit: CORE_COMMIT }, req.headers.origin);
     return;
   }
   if (req.method === 'GET' && pathname === '/v1/dev') {
     // 门禁：prod bundle（devEnabled 缺省为 false）下联调页关闭，按其他 404 同形回；dev 下照常免鉴权开放。
     if ((deps.devEnabled ?? devEnabledDefault()) === false) {
-      writeJson(res, 404, { error: `未找到: ${req.method} ${pathname}` });
+      writeJson(res, 404, { error: `未找到: ${req.method} ${pathname}` }, req.headers.origin);
       return;
     }
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...CORS_HEADERS });
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...corsHeadersFor(req.headers.origin) });
     res.end(devPage(deps.version));
     return;
   }
@@ -94,13 +94,13 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
   if (!pathname.startsWith('/v1/')) {
     writeJson(res, 404, {
       error: `未找到: ${req.method} ${pathname}（协议已版本化：请使用 /v1/ 前缀，契约见 docs/decisions/0007）`,
-    });
+    }, req.headers.origin);
     return;
   }
 
   // 其余端点一律校验 Authorization: Bearer
   if (req.headers.authorization !== `Bearer ${deps.token}`) {
-    writeJson(res, 401, { error: '未授权：需要 Authorization: Bearer <token>' });
+    writeJson(res, 401, { error: '未授权：需要 Authorization: Bearer <token>' }, req.headers.origin);
     return;
   }
 
@@ -108,18 +108,18 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
     // ?scope= 精确过滤讨论归属：''=无归属，章 relPath=章节内；缺省返回全部。
     const scope = url.searchParams.get('scope');
     const sessions = deps.store.listSessions(scope ?? undefined);
-    writeJson(res, 200, { sessions });
+    writeJson(res, 200, { sessions }, req.headers.origin);
     return;
   }
 
   if (req.method === 'GET' && pathname.startsWith('/v1/sessions/')) {
     const id = pathname.slice('/v1/sessions/'.length);
     if (!id || !deps.store.getSession(id)) {
-      writeJson(res, 404, { error: '会话不存在: ' + id });
+      writeJson(res, 404, { error: '会话不存在: ' + id }, req.headers.origin);
       return;
     }
     const messages = deps.store.listMessages(id);
-    writeJson(res, 200, { sessionId: id, messages });
+    writeJson(res, 200, { sessionId: id, messages }, req.headers.origin);
     return;
   }
 
@@ -144,7 +144,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
       messages: [],
       context: undefined,
     });
-    writeJson(res, 200, unwrapToolResult(result));
+    writeJson(res, 200, unwrapToolResult(result), req.headers.origin);
     return;
   }
 
@@ -175,7 +175,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
     return;
   }
 
-  writeJson(res, 404, { error: `未找到: ${req.method} ${pathname}` });
+  writeJson(res, 404, { error: `未找到: ${req.method} ${pathname}` }, req.headers.origin);
 }
 
 type ToolInputValidation =
@@ -253,7 +253,7 @@ async function routeCandidates(
       status: (status as CandidateStatus | null) ?? undefined,
       chapter: chapter ?? undefined,
     });
-    writeJson(res, 200, { candidates });
+    writeJson(res, 200, { candidates }, req.headers.origin);
     return;
   }
 
@@ -263,7 +263,7 @@ async function routeCandidates(
       throw new HttpError(400, '请求体不合法: ' + parsed.error.issues.map((i) => i.message).join('; '));
     }
     const candidate = store.create(parsed.data);
-    writeJson(res, 200, { candidate });
+    writeJson(res, 200, { candidate }, req.headers.origin);
     return;
   }
 
@@ -276,7 +276,7 @@ async function routeCandidates(
     }
     const candidate = store.patch(id, parsed.data);
     if (!candidate) throw new HttpError(404, '候选不存在: ' + id);
-    writeJson(res, 200, { candidate });
+    writeJson(res, 200, { candidate }, req.headers.origin);
     return;
   }
 

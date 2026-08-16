@@ -14,6 +14,8 @@ export class EventPump {
     private readonly res: ServerResponse,
     /** 绑定的会话 id（/chat 有；/rewrite 等无状态流为 undefined）。 */
     readonly sessionId?: string,
+    /** 请求 Origin：转交 startSse 做 CORS 反射（undefined = 无 Origin/非浏览器客户端）。 */
+    private readonly origin?: string,
   ) {
     // 连接级 error 有监听即可避免进程崩溃；具体写失败由 writeFrame 的 Promise 捕获兜底。
     this.res.on('error', () => {});
@@ -21,7 +23,7 @@ export class EventPump {
 
   /** 进入 SSE 响应（响应头 + 保活注释帧）。 */
   start(): void {
-    startSse(this.res);
+    startSse(this.res, this.origin);
   }
 
   /** 发射一帧 SSE 事件。end 之后调用静默丢弃（结束帧之后不允许再有事件）。 */

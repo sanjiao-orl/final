@@ -95,16 +95,74 @@ describe('core HTTP 服务', () => {
     }
   });
 
-  it('CORS 预检 OPTIONS → 204 且带放开头', async () => {
+  it('CORS 预检 OPTIONS → 204：白名单 Origin 反射，其余不给 Allow-Origin', async () => {
     const s = await startTestServer();
     try {
-      const res = await fetch(`${s.baseUrl}/v1/chat`, {
+      // 白名单 Origin（dev 浏览器）→ 反射 + Vary
+      const ok = await fetch(`${s.baseUrl}/v1/chat`, {
         method: 'OPTIONS',
         headers: { Origin: 'http://localhost:1420', 'Access-Control-Request-Method': 'POST' },
       });
-      expect(res.status).toBe(204);
-      expect(res.headers.get('access-control-allow-origin')).toBe('*');
-      expect(res.headers.get('access-control-allow-headers')).toContain('Authorization');
+      expect(ok.status).toBe(204);
+      expect(ok.headers.get('access-control-allow-origin')).toBe('http://localhost:1420');
+      expect(ok.headers.get('vary')).toBe('Origin');
+      expect(ok.headers.get('access-control-allow-headers')).toContain('Authorization');
+
+      // 陌生 Origin → 不放行
+      const evil = await fetch(`${s.baseUrl}/v1/chat`, {
+        method: 'OPTIONS',
+        headers: { Origin: 'http://evil.example', 'Access-Control-Request-Method': 'POST' },
+      });
+      expect(evil.status).toBe(204);
+      expect(evil.headers.get('access-control-allow-origin')).toBeNull();
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('CORS 白名单：http://localhost / http://127.0.0.1 任意端口与 Tauri Origin 反射 + Vary: Origin', async () => {
+    const s = await startTestServer();
+    try {
+      const whitelisted = [
+        'http://localhost:1420',
+        'http://localhost',
+        'http://127.0.0.1:5173',
+        'http://tauri.localhost',
+        'https://tauri.localhost',
+        'tauri://localhost',
+      ];
+      for (const origin of whitelisted) {
+        const res = await fetch(`${s.baseUrl}/v1/health`, { headers: { Origin: origin } });
+        expect(res.status, origin).toBe(200);
+        expect(res.headers.get('access-control-allow-origin'), origin).toBe(origin);
+        expect(res.headers.get('vary'), origin).toBe('Origin');
+      }
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('CORS 白名单外：陌生/前缀欺骗 Origin 一律不给 Allow-Origin，响应照常 200', async () => {
+    const s = await startTestServer();
+    try {
+      for (const origin of ['http://evil.example', 'http://localhost.evil.com', 'tauri://localhost.evil.com']) {
+        const res = await fetch(`${s.baseUrl}/v1/health`, { headers: { Origin: origin } });
+        expect(res.status, origin).toBe(200);
+        expect(res.headers.get('access-control-allow-origin'), origin).toBeNull();
+        expect(res.headers.get('vary'), origin).toBeNull();
+      }
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('CORS 无 Origin：正常 200 且不给 Allow-Origin（curl 等非浏览器客户端不受影响）', async () => {
+    const s = await startTestServer();
+    try {
+      const res = await fetch(`${s.baseUrl}/v1/health`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('access-control-allow-origin')).toBeNull();
+      expect(res.headers.get('vary')).toBeNull();
     } finally {
       await s.close();
     }
