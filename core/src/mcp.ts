@@ -32,6 +32,13 @@ const DEFAULT_BACKOFF_MS = [1_000, 2_000, 5_000] as const;
  */
 export function startDomainMcp(options: DomainMcpOptions = {}): DomainMcp {
   const { command, args } = getDomainMcpCommand();
+  // domain 子进程环境：只叠加必需变量，不再整份透传 process.env（会带出 LLM_API_KEY 等秘密）。
+  // StdioClientTransport 未显式给 env 时已用 getDefaultEnvironment()（PATH/SystemRoot/TEMP 等启动必需）；
+  // 这里只在设置了 NOVEL_PROMPT_DIR 时补这一个变量，其余一律不传。
+  const domainEnv =
+    process.env.NOVEL_PROMPT_DIR !== undefined
+      ? { NOVEL_PROMPT_DIR: process.env.NOVEL_PROMPT_DIR }
+      : undefined;
   const createTransport =
     options.createTransport ??
     (() =>
@@ -39,7 +46,7 @@ export function startDomainMcp(options: DomainMcpOptions = {}): DomainMcp {
         command,
         args,
         cwd: path.resolve(import.meta.dirname, '..'),
-        env: Object.fromEntries(Object.entries(process.env).filter(([, v]) => v !== undefined)) as Record<string, string>,
+        ...(domainEnv ? { env: domainEnv } : {}),
         stderr: 'inherit',
       }));
   const backoffMs = options.backoffMs ?? DEFAULT_BACKOFF_MS;

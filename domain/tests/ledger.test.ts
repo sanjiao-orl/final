@@ -563,6 +563,24 @@ describe('ledgerSlice（审阅输入组装，禁止全量注入）', () => {
     expect(injected).toHaveLength(40); // 只注入最后 40 行
     expect(injected[0]).toContain('CR-006'); // 45 条日志 slice(-40) 从第 6 条开始
   });
+
+  it('正文/标题含占位 token 不被二次替换（单趟替换）', () => {
+    const work = makeWorkDir();
+    const issueLines = Array.from({ length: 3 }, (_, i) => `CR-${String(i + 1).padStart(3, '0')} | 1:1 | MINOR | CONT | "x" | why | fix | LINE`);
+    writeTree(work, {
+      // 章文件名与正文都带占位 token 字面量，不得被后续替换扫到
+      'manuscript/第1章·{{章节内容}}.md': '---\ntitle: 第1章\n---\n正文提到 {{问题日志尾部}} 与 {{章节内容}}。',
+      'editorial_notes/issues.md': issueLines.join('\n'),
+    });
+    writeLedger(work, sampleLedger());
+    const { slice } = ledgerSlice(work, 'manuscript/第1章·{{章节内容}}.md', undefined, 'editorial_notes/issues.md');
+    // 模板自身的占位符已正确替换
+    expect(slice).toContain('# Reader Ledger'); // 账本切片注入
+    expect(slice).toContain('CR-001'); // 问题日志尾部注入
+    // 用户可控文本里的字面量占位 token 原样保留
+    expect(slice).toContain('### 第1章·{{章节内容}}');
+    expect(slice).toContain('正文提到 {{问题日志尾部}} 与 {{章节内容}}。');
+  });
 });
 
 describe('countBlockers', () => {

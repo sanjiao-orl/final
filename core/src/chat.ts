@@ -39,16 +39,16 @@ export interface ChatDeps {
 
 const SYSTEM_PROMPT = loadPrompt('chat');
 
-/** 壳传入当前作品文件夹时，拼进系统提示：调领域工具一律用这个 workDir；尾部再注入可用 skill 清单。 */
+/** 壳传入当前作品文件夹时，拼进系统提示：调领域工具一律用这个 workDir；此时才注入可用 skill 清单（skill_read 的 workDir 必填，无 workDir 时模型无合法取值）。 */
 function systemPrompt(workDir: string | undefined): string {
   let prompt = SYSTEM_PROMPT;
   if (workDir) {
     prompt += `\n当前打开的作品文件夹：${workDir}。调用领域工具时 workDir 参数一律使用这个路径。`;
-  }
-  const skills = listSkills(workDir);
-  if (skills.length > 0) {
-    const lines = skills.map((s) => `- ${s.name}:${s.description}`).join('\n');
-    prompt += `\n\n## 可用 skill\n${lines}\n需要时调用领域工具 skill_read 传入 name 获取该 skill 正文并按其执行。`;
+    const skills = listSkills(workDir);
+    if (skills.length > 0) {
+      const lines = skills.map((s) => `- ${s.name}:${s.description}`).join('\n');
+      prompt += `\n\n## 可用 skill\n${lines}\n需要时调用领域工具 skill_read 传入 name 获取该 skill 正文并按其执行。`;
+    }
   }
   return prompt;
 }

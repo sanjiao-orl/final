@@ -859,7 +859,7 @@ export function diagnoseSeasonConflict(body: string): { seasons: string[]; confl
 // ---------- 审阅输入组装（禁止全量注入正文） ----------
 
 /** 冷读契约摘要（兜底，正本在 core/prompts/cold-read.md；文件缺失/损坏时退回本串）。 */
-export const COLD_READ_CHARTER = `读者契约（fiction-forge v2 冷读摘要）：
+export const COLD_READ_CHARTER = `读者契约（小说写作工作台 冷读摘要）：
 - 身份：刚付费买下本书的网文读者，带编辑的耳朵；先体验后诊断，每条问题都要能说出打断阅读的瞬间。
 - Rule zero：不改 manuscript 正文，全部产出进 editorial_notes。
 - 严重度：BLOCKER（破坏信任）/ MAJOR（重读略读）/ MODERATE（原谅一次不原谅三次）/ MINOR（打磨）。
@@ -962,11 +962,23 @@ export function ledgerSlice(
   }
 
   const template = coldReadSliceTemplate();
-  const slice = template
-    .replaceAll('{{账本切片}}', renderLedgerMarkdown(ledger))
-    .replaceAll('{{章节标题}}', title)
-    .replaceAll('{{章节内容}}', body.trim())
-    .replaceAll('{{问题日志尾部}}', issueTail || '（无）');
+  // 单趟替换四个占位符（一次扫描，替换结果不再被扫描）：避免「正文/标题/日志尾部」这类用户可控文本里
+  // 恰好含其它占位 token 时被后续 replaceAll 二次替换、混入审阅输入。
+  const slice = template.replace(
+    /\{\{账本切片\}\}|\{\{章节标题\}\}|\{\{章节内容\}\}|\{\{问题日志尾部\}\}/g,
+    (token) => {
+      switch (token) {
+        case '{{账本切片}}':
+          return renderLedgerMarkdown(ledger);
+        case '{{章节标题}}':
+          return title;
+        case '{{章节内容}}':
+          return body.trim();
+        default:
+          return issueTail || '（无）';
+      }
+    }
+  );
 
   return { workDir: wd, chapterRelPath, slice, injectedChapters: [chapterRelPath] };
 }
