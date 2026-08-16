@@ -69,10 +69,11 @@
     return c.notes ? ` · ${c.notes}` : head;
   }
 
-  /** 知情行：visibility 标签 + 已知事实首条 + 总条数。 */
+  /** 知情行：visibility 标签 + 已知事实首条（带得知章时间轴后缀）+ 总条数。 */
   function knowledgeLine(k: LedgerView['knowledge'][number]): string {
     const tag = k.visibility && k.visibility !== 'public' ? `[${k.visibility}] ` : '';
-    const first = k.knows[0] ?? '(空)';
+    const firstFact = k.knows[0];
+    const first = firstFact ? firstFact.fact + (firstFact.since ? `（自 ${chapterShort(firstFact.since)}）` : '') : '(空)';
     const more = k.knows.length > 1 ? ` · +${k.knows.length - 1}` : '';
     return k.character ? `${tag}${first}${more}` : first;
   }

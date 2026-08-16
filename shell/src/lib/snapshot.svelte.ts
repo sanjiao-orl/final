@@ -22,11 +22,17 @@ export interface SnapshotToast {
 }
 
 /** ledger_read 工具返回的账本视图（壳只读，只用到四维条目）。 */
+/** 知情维事实项（批三-2 结构深化）：since=得知章 relPath（时间轴），refs=回指伏笔 id。domain normalize 后恒为对象。 */
+export interface KnowledgeFactView {
+  fact: string;
+  since?: string;
+  refs?: string[];
+}
 export interface LedgerView {
   clock: Array<{ chapters: string[]; thread?: string; storyDay?: string; season?: string; absoluteDate?: string; notes?: string }>;
   props: Array<{ name: string; type?: string; holder?: string; status?: string; custody: Array<{ chapter: string; holder?: string; note?: string }>; tripwire?: string }>;
-  promises: Array<{ id: string; name: string; arc: string; heat?: string; setups: Array<{ chapter: string; line?: number; quote?: string }>; payoffs: Array<{ chapter: string; line?: number }>; due?: number; note?: string }>;
-  knowledge: Array<{ character: string; knows: string[]; doesNotKnow?: string[]; visibility?: string; knownBy?: string[] }>;
+  promises: Array<{ id: string; name: string; arc: string; heat?: string; setups: Array<{ chapter: string; line?: number; quote?: string }>; payoffs: Array<{ chapter: string; line?: number }>; due?: number; note?: string; expectedVolume?: string; links?: { props?: string[]; characters?: string[] } }>;
+  knowledge: Array<{ character: string; knows: KnowledgeFactView[]; doesNotKnow?: KnowledgeFactView[]; visibility?: string; knownBy?: string[] }>;
   doNotReexplain: string[];
   protect: Array<{ item: string; reason?: string }>;
   tripwires: string[];
