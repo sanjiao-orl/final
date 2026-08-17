@@ -10,6 +10,7 @@ const CAND: Candidate = {
   id: 'c1',
   sessionId: null,
   chapter: '章节A.md',
+  kind: 'replace',
   original: '原文X',
   proposed: '改写X',
   instruction: '润色',
@@ -133,7 +134,7 @@ describe('CandidatesStore', () => {
     store.init(client);
     work.init(client, 'C:/works/demo');
     work.current = { relPath: '章节A.md', title: '章节A', frontmatter: {}, frontmatterRaw: '---\n---\n', savedMd: '原文X' };
-    work.registerEditor({ getMd: () => '原文X改写X', applyEdit: () => 'ok' });
+    work.registerEditor({ getMd: () => '原文X改写X', applyEdit: () => 'ok', appendMd: () => 'ok', replaceBodyMd: () => 'ok' });
 
     store.items = [CAND];
     store.toggleSelect('c1');
@@ -150,7 +151,7 @@ describe('CandidatesStore', () => {
     const store = new CandidatesStore();
     store.init(client);
     work.current = { relPath: '章节A.md', title: '章节A', frontmatter: {}, frontmatterRaw: '---\n---\n', savedMd: 'x' };
-    work.registerEditor({ getMd: () => 'x', applyEdit: () => 'not-found' });
+    work.registerEditor({ getMd: () => 'x', applyEdit: () => 'not-found', appendMd: () => 'ok', replaceBodyMd: () => 'ok' });
 
     store.items = [CAND, { ...CAND, id: 'c2' }];
     store.toggleSelect('c1');
@@ -176,7 +177,7 @@ describe('CandidatesStore', () => {
     work.init(client, 'C:/works/demo');
     work.current = { relPath: '章节B.md', title: '章节B', frontmatter: {}, frontmatterRaw: '---\n---\n', savedMd: 'b' };
     work.structure = [{ type: 'volume', title: '第一卷', children: [{ type: 'chapter', title: '章节A', relPath: '章节A.md', wordCount: 1, scenes: [] }] }];
-    work.registerEditor({ getMd: () => '其他正文改', applyEdit: () => 'ok' });
+    work.registerEditor({ getMd: () => '其他正文改', applyEdit: () => 'ok', appendMd: () => 'ok', replaceBodyMd: () => 'ok' });
 
     store.items = [CAND];
     store.toggleSelect('c1');
@@ -184,6 +185,76 @@ describe('CandidatesStore', () => {
     expect(callTool).toHaveBeenCalledWith('read_chapter', expect.objectContaining({ relPath: '章节A.md' }));
     expect(work.current?.relPath).toBe('章节A.md');
     expect(patchCandidate).toHaveBeenCalledWith('c1', { status: 'adopted' });
+  });
+
+  it('anchoredIn：只回该章 kind=replace 且 original 非空（append/replace_all/空锚点被滤）', () => {
+    const store = new CandidatesStore();
+    store.items = [
+      { ...CAND, id: 'a' }, // replace 且有锚点 → 保留
+      { ...CAND, id: 'b', kind: 'append', original: '' },
+      { ...CAND, id: 'c', kind: 'replace_all', original: '' },
+      { ...CAND, id: 'd', chapter: '章节B.md' }, // 别的章
+      { ...CAND, id: 'e', original: '' }, // replace 但无锚点
+      { ...CAND, id: 'f', kind: 'append' }, // append 即使有 original 也不装饰
+    ];
+    expect(store.anchoredIn('章节A.md').map((i) => i.id)).toEqual(['a']);
+  });
+
+  it('adopt：按 kind 分派 append→appendMd / replace_all→replaceBodyMd / replace→applyEdit', async () => {
+    const patchCandidate = vi.fn().mockResolvedValue({ candidate: CAND });
+    const callTool = vi.fn().mockResolvedValue(undefined);
+    const client = clientOf({ patchCandidate, callTool });
+    const store = new CandidatesStore();
+    store.init(client);
+    work.init(client, 'C:/works/demo');
+    work.current = { relPath: '章节A.md', title: '章节A', frontmatter: {}, frontmatterRaw: '---\n---\n', savedMd: 'x' };
+    const applyEdit = vi.fn<(original: string, proposed: string) => 'ok' | 'not-found' | 'ambiguous'>(() => 'ok');
+    const appendMd = vi.fn<(md: string) => 'ok' | 'not-found'>(() => 'ok');
+    const replaceBodyMd = vi.fn<(md: string) => 'ok' | 'not-found'>(() => 'ok');
+    work.registerEditor({ getMd: () => 'x', applyEdit, appendMd, replaceBodyMd });
+
+    store.items = [
+      { ...CAND, id: 're' }, // kind=replace
+      { ...CAND, id: 'ap', kind: 'append', original: '' },
+      { ...CAND, id: 'ra', kind: 'replace_all', original: '' },
+    ];
+    store.toggleSelect('re');
+    store.toggleSelect('ap');
+    store.toggleSelect('ra');
+    await store.adoptSelected();
+    expect(applyEdit).toHaveBeenCalledWith('原文X', '改写X');
+    expect(appendMd).toHaveBeenCalledWith('改写X');
+    expect(replaceBodyMd).toHaveBeenCalledWith('改写X');
+    expect(patchCandidate).toHaveBeenCalledWith('re', { status: 'adopted' });
+    expect(patchCandidate).toHaveBeenCalledWith('ap', { status: 'adopted' });
+    expect(patchCandidate).toHaveBeenCalledWith('ra', { status: 'adopted' });
+    expect(store.busy).toBe(false);
+  });
+
+  it('adopt：append / replace_all 失败（编辑器未就绪）→ 各自失败文案，replace 照常', async () => {
+    const patchCandidate = vi.fn().mockResolvedValue({ candidate: CAND });
+    const client = clientOf({ patchCandidate });
+    const store = new CandidatesStore();
+    store.init(client);
+    work.current = { relPath: '章节A.md', title: '章节A', frontmatter: {}, frontmatterRaw: '---\n---\n', savedMd: 'x' };
+    work.registerEditor({ getMd: () => 'x', applyEdit: () => 'ok', appendMd: () => 'not-found', replaceBodyMd: () => 'not-found' });
+
+    store.items = [
+      { ...CAND, id: 're' },
+      { ...CAND, id: 'ap', kind: 'append', original: '' },
+      { ...CAND, id: 'ra', kind: 'replace_all', original: '' },
+    ];
+    store.toggleSelect('re');
+    store.toggleSelect('ap');
+    store.toggleSelect('ra');
+    await store.adoptSelected();
+    expect(work.error).toContain('部分候选未能采纳');
+    expect(work.error).toContain('追加失败：编辑器未就绪');
+    expect(work.error).toContain('整章替换失败：编辑器未就绪');
+    expect(patchCandidate).toHaveBeenCalledWith('re', { status: 'adopted' });
+    expect(patchCandidate).not.toHaveBeenCalledWith('ap', expect.anything());
+    expect(patchCandidate).not.toHaveBeenCalledWith('ra', expect.anything());
+    expect(store.busy).toBe(false);
   });
 
   it('discardSelected：批量丢弃 → 状态落库 → 重载列表 → 清选择', async () => {
@@ -280,7 +351,7 @@ describe('CandidatesStore · 采纳后自动诊断（批三-3）', () => {
     store.init(client);
     work.init(client, 'C:/works/demo');
     work.current = { relPath: '章节A.md', title: '章节A', frontmatter: {}, frontmatterRaw: '---\n---\n', savedMd: '原文X' };
-    work.registerEditor({ getMd: () => '原文X改写X', applyEdit: () => 'ok' });
+    work.registerEditor({ getMd: () => '原文X改写X', applyEdit: () => 'ok', appendMd: () => 'ok', replaceBodyMd: () => 'ok' });
     store.items = [CAND];
     store.toggleSelect('c1');
     return { store, callTool };

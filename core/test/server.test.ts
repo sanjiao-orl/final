@@ -290,6 +290,47 @@ describe('core HTTP 服务', () => {
     }
   });
 
+  it('POST /v1/candidates：kind=append + original="" → 200 且候选 kind=append', async () => {
+    const s = await startTestServer();
+    try {
+      const auth = { Authorization: `Bearer ${s.token}` };
+      const res = await fetch(`${s.baseUrl}/v1/candidates`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...auth },
+        body: JSON.stringify({ chapter: 'ch01.md', proposed: '续写一段', kind: 'append', original: '' }),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { candidate: { kind: string; original: string } };
+      expect(body.candidate.kind).toBe('append');
+      expect(body.candidate.original).toBe('');
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('POST /v1/candidates：kind=replace + original="" → 400（含缺省 kind 同口径）', async () => {
+    const s = await startTestServer();
+    try {
+      const auth = { Authorization: `Bearer ${s.token}` };
+      // 显式 kind=replace 且 original 为空 → 400
+      const explicit = await fetch(`${s.baseUrl}/v1/candidates`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...auth },
+        body: JSON.stringify({ chapter: 'ch01.md', proposed: 'x', kind: 'replace', original: '' }),
+      });
+      expect(explicit.status).toBe(400);
+      // 缺省 kind（=replace）且 original 为空 → 同样 400（既有行为不变）
+      const defaulted = await fetch(`${s.baseUrl}/v1/candidates`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...auth },
+        body: JSON.stringify({ chapter: 'ch01.md', proposed: 'x', original: '' }),
+      });
+      expect(defaulted.status).toBe(400);
+    } finally {
+      await s.close();
+    }
+  });
+
   it('非法 URL 编码的路径段 → 400（decodeURIComponent 的 URIError 不落入 500）', async () => {
     const s = await startTestServer();
     try {

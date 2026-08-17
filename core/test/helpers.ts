@@ -31,6 +31,7 @@ export async function startTestServer(overrides: {
   const token = randomUUID();
   const chat: ChatDeps = {
     store,
+    candidates,
     modelForTier:
       overrides.modelForTier ??
       (() => {

@@ -5,10 +5,14 @@
 import type { CoreClient } from './core.js';
 import type { ChapterNode, ReadChapterResult, VolumeNode } from './types.js';
 
-/** 编辑器现场入口：序列化 + 候选替换 / 插入（original 唯一定位）。 */
+/** 编辑器现场入口：序列化 md + 候选替换 / 追加 / 整章替换 / 插入（original 唯一定位）。 */
 export interface EditorApi {
   getMd: () => string;
   applyEdit: (original: string, proposed: string) => 'ok' | 'not-found' | 'ambiguous';
+  /** kind=append：md 追加到编辑器文档末尾；无编辑器返回 'not-found'。 */
+  appendMd: (md: string) => 'ok' | 'not-found';
+  /** kind=replace_all：整体替换编辑器正文（md 进 mdToHtml）；无编辑器返回 'not-found'。 */
+  replaceBodyMd: (md: string) => 'ok' | 'not-found';
   /** B1 插入其后：proposed 插入 original 之后（原文保留）。 */
   insertAfter?: (original: string, proposed: string) => 'ok' | 'not-found' | 'ambiguous';
 }
@@ -117,6 +121,18 @@ export class WorkStore {
   applyEdit(original: string, proposed: string): 'ok' | 'not-found' | 'ambiguous' | 'no-editor' {
     if (!this.editorApi) return 'no-editor';
     return this.editorApi.applyEdit(original, proposed);
+  }
+
+  /** kind=append：proposed 追加到编辑器文档末尾。 */
+  appendMd(md: string): 'ok' | 'not-found' | 'no-editor' {
+    if (!this.editorApi) return 'no-editor';
+    return this.editorApi.appendMd(md);
+  }
+
+  /** kind=replace_all：proposed 整体替换编辑器正文。 */
+  replaceBodyMd(md: string): 'ok' | 'not-found' | 'no-editor' {
+    if (!this.editorApi) return 'no-editor';
+    return this.editorApi.replaceBodyMd(md);
   }
 
   dismissError(): void {

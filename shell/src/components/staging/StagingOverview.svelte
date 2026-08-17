@@ -37,6 +37,7 @@
   }
 
   const STATUS_LABEL: Record<string, string> = { pending: '待处理', adopted: '已采纳', discarded: '已丢弃' };
+  const KIND_LABEL: Record<string, string> = { replace: '替换', append: '追加', replace_all: '整章' };
 
   async function adoptSelected(): Promise<void> {
     const count = candidates.selectedCount;
@@ -127,6 +128,7 @@
           {/if}
           <span class="status-pill {c.status}">{STATUS_LABEL[c.status] ?? c.status}</span>
           <span class="ch">{chapterLabel(c)}</span>
+          {#if c.kind}<span class="kind-pill" class:append={c.kind === 'append'} class:replace_all={c.kind === 'replace_all'}>{KIND_LABEL[c.kind] ?? c.kind}</span>{/if}
           {#if settings.showInstruction}
             <span class="instr">为何采纳(B8)：<b>{c.instruction || '润色'}</b></span>
           {/if}
@@ -366,6 +368,24 @@
     color: var(--ink);
     letter-spacing: 0.04em;
     flex: none;
+  }
+  .kind-pill {
+    flex: none;
+    height: 17px;
+    padding: 0 6px;
+    border-radius: 4px;
+    font-size: 10px;
+    line-height: 17px;
+    border: 1px solid var(--line);
+    color: var(--muted);
+  }
+  .kind-pill.append {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  }
+  .kind-pill.replace_all {
+    color: var(--status-polish);
+    border-color: color-mix(in srgb, var(--status-polish) 40%, var(--line));
   }
   .instr {
     flex: 1;

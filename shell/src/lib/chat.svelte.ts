@@ -10,6 +10,7 @@
 import type { CoreClient } from './core.js';
 import type { ChapterNode, SessionRow } from './types.js';
 import { approval } from './approval.svelte.js';
+import { candidates } from './candidates.svelte.js';
 import { settings } from './settings.svelte.js';
 import { snapshot } from './snapshot.svelte.js';
 import { work } from './work.svelte.js';
@@ -478,10 +479,13 @@ export class ChatStore {
     });
     // 批三-3：账本被 AI 改过（ledger_upsert）→ 上下文栏按当前口径（随章切片/全书）重拉。
     const touchedLedger = done.some((t) => t.name === 'ledger_upsert');
+    // chat 正文进暂存区：stage_chapter_proposal 落定 → 重拉暂存区（计数/抽屉即时刷新）。
+    const stagedProposal = done.some((t) => t.name === 'stage_chapter_proposal');
     try {
       if (changedStructure || wroteChapter) await work.loadStructure();
       if (wroteCurrent) await work.reloadCurrent();
       if (touchedLedger) void snapshot.refreshLedger();
+      if (stagedProposal) void candidates.load();
     } catch (err) {
       console.warn('AI 写完自动刷新失败：', err);
     }

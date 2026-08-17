@@ -73,6 +73,7 @@ async function main(): Promise<void> {
     devEnabled,
     chat: {
       store,
+      candidates,
       modelForTier: (tier: Tier) => modelForPurpose(process.env, tier),
       tools: mcp.tools,
       toolsAvailable: () => mcp.isConnected(),

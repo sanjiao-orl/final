@@ -51,11 +51,15 @@ export interface StoredMessage {
 
 export type CandidateStatus = 'pending' | 'adopted' | 'discarded';
 
+/** 候选动作类型：replace=锚定替换（现状）；append=追加章正文末尾；replace_all=替换整章正文。 */
+export type CandidateKind = 'replace' | 'append' | 'replace_all';
+
 /** 暂存候选（AI 产出进暂存区，批量采纳才落地）。 */
 export interface Candidate {
   id: string;
   sessionId: string | null;
   chapter: string;
+  kind: CandidateKind;
   original: string;
   proposed: string;
   instruction: string;

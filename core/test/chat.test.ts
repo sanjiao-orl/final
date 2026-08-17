@@ -836,4 +836,78 @@ describe('/v1/chat SSE 管道', () => {
       fs.rmSync(workDir, { recursive: true, force: true });
     }
   });
+
+  it('本地工具 stage_chapter_proposal：body 带 chapter、模型调（mode=append）→ 候选落库 kind=append', async () => {
+    const model = stepModel([
+      toolCallResult('tc-stage', 'stage_chapter_proposal', { proposed: '续写内容', mode: 'append' }),
+      textResult(['已送进暂存区。']),
+    ]);
+    // 不注入 MCP tools → 同时验证 MCP 断连时本地工具仍可用
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '续写第二章', chapter: 'manuscript/第2章.md' });
+      expect(res.status).toBe(200);
+      const events = await readSse(res);
+      const names = events.map((e) => e.event);
+      expect(names).toContain('tool-call');
+      expect(names).toContain('tool-result');
+      expect(names[names.length - 1]).toBe('done');
+
+      const toolCall = events.find((e) => e.event === 'tool-call')!.data;
+      expect(toolCall.name).toBe('stage_chapter_proposal');
+      expect(toolCall.args).toEqual({ proposed: '续写内容', mode: 'append' });
+      const toolResult = events.find((e) => e.event === 'tool-result')!.data;
+      expect(String(toolResult.result)).toContain('已进暂存区');
+      expect(String(toolResult.result)).toContain('候选 id');
+
+      // 候选恰好一条：kind=append、chapter=body 的 chapter、sessionId=会话 id、proposed 正确
+      const list = s.candidates.list();
+      expect(list).toHaveLength(1);
+      expect(list[0]!.kind).toBe('append');
+      expect(list[0]!.chapter).toBe('manuscript/第2章.md');
+      expect(list[0]!.original).toBe(''); // append 不需要锚定原文
+      expect(list[0]!.proposed).toBe('续写内容');
+      const sessionId = events[names.length - 1]!.data.sessionId as string;
+      expect(list[0]!.sessionId).toBe(sessionId);
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('本地工具 stage_chapter_proposal：body 与参数都无 chapter → 引导文本，候选不落库', async () => {
+    const model = stepModel([
+      toolCallResult('tc-2', 'stage_chapter_proposal', { proposed: '内容' }), // mode 缺省 append
+      textResult(['好，我去查一下章节。']),
+    ]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '帮我写一段' }); // body 不带 chapter
+      const events = await readSse(res);
+      const toolResult = events.find((e) => e.event === 'tool-result');
+      expect(toolResult).toBeDefined();
+      expect(String(toolResult!.data.result)).toContain('list_structure'); // 引导用 list_structure 查目标章
+      expect(s.candidates.list()).toHaveLength(0); // 未落库
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('本地工具 stage_chapter_proposal：mode=replace 缺 original → 报错文本，候选不落库', async () => {
+    const model = stepModel([
+      toolCallResult('tc-3', 'stage_chapter_proposal', { proposed: '改写', mode: 'replace' }),
+      textResult(['那我补一下锚定原文。']),
+    ]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '改写这段', chapter: 'manuscript/第1章.md' });
+      const events = await readSse(res);
+      const toolResult = events.find((e) => e.event === 'tool-result');
+      expect(toolResult).toBeDefined();
+      expect(String(toolResult!.data.result)).toContain('original'); // 提示需提供锚定原文
+      expect(String(toolResult!.data.result)).toContain('未创建候选');
+      expect(s.candidates.list()).toHaveLength(0); // 未落库
+    } finally {
+      await s.close();
+    }
+  });
 });

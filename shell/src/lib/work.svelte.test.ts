@@ -84,7 +84,7 @@ describe('WorkStore', () => {
     const work = new WorkStore();
     work.init(client, 'C:/works/demo');
     await work.openChapter(VOLUME[0]!.children[0]!);
-    work.registerEditor({ getMd: () => '改过的正文', applyEdit: () => 'not-found' });
+    work.registerEditor({ getMd: () => '改过的正文', applyEdit: () => 'not-found', appendMd: () => 'ok', replaceBodyMd: () => 'ok' });
     work.dirty = true;
     await work.openChapter(ch('第一卷/第二章.md', '第二章'));
     // 保存调用：content = frontmatterRaw + 编辑器序列化
@@ -106,7 +106,7 @@ describe('WorkStore', () => {
     const work = new WorkStore();
     work.init(client, 'C:/works/demo');
     await work.openChapter(VOLUME[0]!.children[0]!);
-    work.registerEditor({ getMd: () => '旧编辑器文', applyEdit: () => 'not-found' });
+    work.registerEditor({ getMd: () => '旧编辑器文', applyEdit: () => 'not-found', appendMd: () => 'ok', replaceBodyMd: () => 'ok' });
     work.dirty = true;
     await work.reloadCurrent();
     expect(callTool).toHaveBeenCalledTimes(2); // 只重读，不写回旧编辑器内容
@@ -139,7 +139,7 @@ describe('WorkStore', () => {
     const work = new WorkStore();
     work.init(client, 'C:/works/demo');
     await work.openChapter(VOLUME[0]!.children[0]!);
-    work.registerEditor({ getMd: () => '编辑器正文', applyEdit: () => 'not-found' });
+    work.registerEditor({ getMd: () => '编辑器正文', applyEdit: () => 'not-found', appendMd: () => 'ok', replaceBodyMd: () => 'ok' });
     work.dirty = true;
     const ok = await work.saveCurrent();
     expect(ok).toBe(true);
@@ -163,7 +163,7 @@ describe('WorkStore', () => {
     const work = new WorkStore();
     work.init(client, 'C:/works/demo');
     await work.openChapter(VOLUME[0]!.children[0]!);
-    work.registerEditor({ getMd: () => '编辑器正文', applyEdit: () => 'not-found' });
+    work.registerEditor({ getMd: () => '编辑器正文', applyEdit: () => 'not-found', appendMd: () => 'ok', replaceBodyMd: () => 'ok' });
     work.dirty = true;
     const ok = await work.saveCurrent();
     expect(ok).toBe(false);
@@ -204,21 +204,31 @@ describe('WorkStore', () => {
     expect(work2.error).toContain('导出失败');
   });
 
-  it('applyEdit / whenEditorReady：未注册返回 no-editor，注册后走编辑入口', async () => {
+  it('applyEdit / appendMd / replaceBodyMd / whenEditorReady：未注册返回 no-editor，注册后走编辑入口', async () => {
     const client = mockClient();
     const work = new WorkStore();
     work.init(client, 'C:/works/demo');
     expect(work.applyEdit('a', 'b')).toBe('no-editor');
+    expect(work.appendMd('y')).toBe('no-editor');
+    expect(work.replaceBodyMd('z')).toBe('no-editor');
     const ready = await work.whenEditorReady(50);
     expect(ready).toBe(false);
     work.registerEditor({
       getMd: () => 'x',
       applyEdit: (original: string) => (original === 'a' ? 'ok' : 'not-found'),
+      appendMd: (md: string) => (md === 'y' ? 'ok' : 'not-found'),
+      replaceBodyMd: (md: string) => (md === 'z' ? 'ok' : 'not-found'),
     });
     expect(await work.whenEditorReady(50)).toBe(true);
     expect(work.applyEdit('a', 'b')).toBe('ok');
+    expect(work.appendMd('y')).toBe('ok');
+    expect(work.replaceBodyMd('z')).toBe('ok');
+    expect(work.appendMd('其他')).toBe('not-found');
+    expect(work.replaceBodyMd('其他')).toBe('not-found');
     work.registerEditor(null);
     expect(work.applyEdit('a', 'b')).toBe('no-editor');
+    expect(work.appendMd('y')).toBe('no-editor');
+    expect(work.replaceBodyMd('z')).toBe('no-editor');
   });
 
   it('findChapter：按 relPath 命中/未命中', () => {

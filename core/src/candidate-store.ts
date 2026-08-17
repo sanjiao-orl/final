@@ -6,19 +6,24 @@ import { SESSIONS_TABLE_DDL } from './session-store.js';
 
 export type CandidateStatus = 'pending' | 'adopted' | 'discarded';
 
+/** 候选形态：replace=锚定替换（现状）；append=追加章正文末尾；replace_all=替换整章正文（frontmatter 由壳在保存时保留）。 */
+export type CandidateKind = 'replace' | 'append' | 'replace_all';
+
 export interface CandidateRow {
   id: string;
   /** 来源讨论会话（可空：选区浮动条发起的改写没有讨论上下文）。 */
   sessionId: string | null;
   /** 目标章 relPath。 */
   chapter: string;
-  /** 选中时的原文（锚定+预览；采纳时按它在正文里定位）。 */
+  /** 选中时的原文（锚定+预览；采纳时按它在正文里定位；append/replace_all 可空）。 */
   original: string;
   /** AI 建议替换文本。 */
   proposed: string;
   /** 当时的改写指令（整改时追加记录）。 */
   instruction: string;
   status: CandidateStatus;
+  /** 候选形态，创建后不可变。 */
+  kind: CandidateKind;
   createdAt: string;
   updatedAt: string;
 }
@@ -29,6 +34,8 @@ export interface NewCandidate {
   proposed: string;
   instruction?: string | undefined;
   sessionId?: string | undefined;
+  /** 缺省 'replace'=锚定替换（与既有生产路径一致）。 */
+  kind?: CandidateKind | undefined;
 }
 
 /** 整改：换新建议文本，指令追加留痕；状态保持 pending。 */
@@ -47,6 +54,7 @@ CREATE TABLE IF NOT EXISTS candidates (
   proposed TEXT NOT NULL,
   instruction TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'adopted', 'discarded')),
+  kind TEXT NOT NULL DEFAULT 'replace' CHECK (kind IN ('replace', 'append', 'replace_all')),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -62,6 +70,7 @@ interface DbCandidateRow {
   proposed: string;
   instruction: string;
   status: string;
+  kind: string;
   created_at: string;
   updated_at: string;
 }
@@ -75,6 +84,11 @@ export class CandidateStore {
     db.exec('PRAGMA busy_timeout = 2000;'); // 与 SessionStore 同库双连接，写操作瞬时，兜底防锁
     db.exec(SESSIONS_TABLE_DDL); // 外键父表，CandidateStore 独立打开库时也要先存在
     db.exec(SCHEMA);
+    // 旧库迁移：候选模型扩展（铁律回归批）之前的 candidates 表没有 kind 列，缺则补上（默认 'replace'=锚定替换，既有行语义不变）。
+    const cols = db.prepare('PRAGMA table_info(candidates)').all() as unknown as { name: string }[];
+    if (!cols.some((c) => c.name === 'kind')) {
+      db.exec("ALTER TABLE candidates ADD COLUMN kind TEXT NOT NULL DEFAULT 'replace' CHECK (kind IN ('replace', 'append', 'replace_all'))");
+    }
     this.db = db;
   }
 
@@ -83,9 +97,9 @@ export class CandidateStore {
     const id = randomUUID();
     this.db
       .prepare(
-        'INSERT INTO candidates (id, session_id, chapter, original, proposed, instruction, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO candidates (id, session_id, chapter, original, proposed, instruction, status, kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
       )
-      .run(id, c.sessionId ?? null, c.chapter, c.original, c.proposed, c.instruction ?? '', 'pending', now, now);
+      .run(id, c.sessionId ?? null, c.chapter, c.original, c.proposed, c.instruction ?? '', 'pending', c.kind ?? 'replace', now, now);
     return this.get(id)!;
   }
 
@@ -152,6 +166,7 @@ function mapCandidate(row: DbCandidateRow): CandidateRow {
     proposed: row.proposed,
     instruction: row.instruction,
     status: row.status as CandidateStatus,
+    kind: row.kind as CandidateKind,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

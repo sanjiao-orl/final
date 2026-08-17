@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChatStreamHandlers, CoreClient } from './core.js';
 import { ChatStore } from './chat.svelte.js';
 import { approval } from './approval.svelte.js';
+import { candidates } from './candidates.svelte.js';
 import { settings } from './settings.svelte.js';
 import { snapshot } from './snapshot.svelte.js';
 import { work } from './work.svelte.js';
@@ -853,5 +854,21 @@ describe('ChatStore · AI 写完自动刷新（反馈#6）', () => {
     expect(chat.streaming).toBe(false);
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+  });
+
+  it('stage_chapter_proposal 落定 → refreshAfterTools 调 candidates.load 刷新暂存区', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+      h.onToolCall?.({ id: 'p1', name: 'stage_chapter_proposal', args: { chapter: 'manuscript/a.md' } });
+      h.onToolResult?.({ id: 'p1', name: 'stage_chapter_proposal', result: { ok: true } });
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const client = streamClient({ chatStream });
+    const chat = new ChatStore();
+    chat.init(client);
+    work.workDir = 'C:/works/demo';
+    const loadSpy = vi.spyOn(candidates, 'load').mockResolvedValue(undefined);
+    await chat.send('把 AI 正文放进暂存区');
+    expect(loadSpy).toHaveBeenCalled();
+    loadSpy.mockRestore();
   });
 });

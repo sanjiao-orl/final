@@ -33,13 +33,20 @@ export interface ServerDeps {
   devEnabled?: boolean;
 }
 
-const candidateCreateSchema = z.object({
-  chapter: z.string().min(1).max(500),
-  original: z.string().min(1).max(20_000),
-  proposed: z.string().min(1).max(20_000),
-  instruction: z.string().max(2_000).optional(),
-  sessionId: z.string().uuid().optional(),
-});
+const candidateCreateSchema = z
+  .object({
+    chapter: z.string().min(1).max(500),
+    // original 松开 min(1)：append/replace_all 允许为空（空串或缺省）；kind=replace（含缺省）时须非空，见下方 refine。
+    original: z.string().max(20_000).optional(),
+    proposed: z.string().min(1).max(20_000),
+    instruction: z.string().max(2_000).optional(),
+    sessionId: z.string().uuid().optional(),
+    kind: z.enum(['replace', 'append', 'replace_all']).optional(),
+  })
+  .refine((o) => (o.kind ?? 'replace') !== 'replace' || (o.original !== undefined && o.original.length > 0), {
+    message: 'kind=replace（含缺省）时 original 必须非空',
+    path: ['original'],
+  });
 
 const candidatePatchSchema = z
   .object({
@@ -262,7 +269,7 @@ async function routeCandidates(
     if (!parsed.success) {
       throw new HttpError(400, '请求体不合法: ' + parsed.error.issues.map((i) => i.message).join('; '));
     }
-    const candidate = store.create(parsed.data);
+    const candidate = store.create({ ...parsed.data, original: parsed.data.original ?? '' });
     writeJson(res, 200, { candidate }, req.headers.origin);
     return;
   }

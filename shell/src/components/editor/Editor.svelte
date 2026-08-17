@@ -48,7 +48,7 @@
       extensions: [
         StarterKit.configure({ heading: { levels: [1, 2, 3] } }),
         Suggest.configure({
-          getItems: () => candidates.items.filter((i) => i.chapter === work.current?.relPath),
+          getItems: () => candidates.anchoredIn(work.current?.relPath ?? ''),
           onAccept: (id) => {
             const c = candidates.items.find((i) => i.id === id);
             if (c) void candidates.adoptOne(c);
@@ -69,6 +69,8 @@
     work.registerEditor({
       getMd: () => (editor ? htmlToMd(editor.getHTML()) : ''),
       applyEdit,
+      appendMd,
+      replaceBodyMd,
       insertAfter,
     });
     if (scene) {
@@ -221,6 +223,21 @@
     } else {
       editor.chain().insertContentAt({ from, to }, html).run();
     }
+    return 'ok';
+  }
+
+  /** kind=append：md 追加到文档末尾（原文保留）。 */
+  function appendMd(md: string): 'ok' | 'not-found' {
+    if (!editor) return 'not-found';
+    const html = mdToHtml(md);
+    editor.chain().insertContentAt(editor.state.doc.content.size, html).run();
+    return 'ok';
+  }
+
+  /** kind=replace_all：md 整体替换编辑器正文（md 进 mdToHtml）。 */
+  function replaceBodyMd(md: string): 'ok' | 'not-found' {
+    if (!editor) return 'not-found';
+    editor.commands.setContent(mdToHtml(md));
     return 'ok';
   }
 

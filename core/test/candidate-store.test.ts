@@ -1,11 +1,12 @@
 // 测试：CandidateStore 的 CRUD、过滤、状态流转与同库双连接共存（纯本地 sqlite，不走网络）。
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 import { CandidateStore } from '../src/candidate-store.js';
-import { SessionStore } from '../src/session-store.js';
+import { SessionStore, SESSIONS_TABLE_DDL } from '../src/session-store.js';
 
 function tmpDbPath(): string {
   return path.join(mkdtempSync(path.join(os.tmpdir(), 'novel-cand-test-')), 'sessions.sqlite');
@@ -30,6 +31,64 @@ describe('CandidateStore', () => {
     expect(got!.proposed).toBe('改写后一段');
     expect(got!.instruction).toBe('更紧张一点');
     expect(got!.createdAt).toBeTruthy();
+    store.close();
+  });
+
+  it('旧库迁移：无 kind 列的 candidates 表补列，既有行缺省 kind=replace', () => {
+    const dbPath = tmpDbPath();
+    // 手工建候选模型扩展之前的旧结构（无 kind 列），并插一行既有数据
+    const raw = new DatabaseSync(dbPath);
+    raw.exec('PRAGMA foreign_keys = ON;');
+    raw.exec(SESSIONS_TABLE_DDL); // candidates 外键父表
+    raw.exec(`CREATE TABLE candidates (
+      id TEXT PRIMARY KEY,
+      session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+      chapter TEXT NOT NULL,
+      original TEXT NOT NULL,
+      proposed TEXT NOT NULL,
+      instruction TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'adopted', 'discarded')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );`);
+    const now = new Date().toISOString();
+    const id = randomUUID();
+    raw
+      .prepare(
+        'INSERT INTO candidates (id, session_id, chapter, original, proposed, instruction, status, created_at, updated_at) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)'
+      )
+      .run(id, 'c.md', '原文', '建议', '', 'pending', now, now);
+    raw.close();
+
+    const store = new CandidateStore(dbPath); // 构造时触发 ALTER TABLE 迁移
+    const got = store.get(id);
+    expect(got).toBeDefined();
+    expect(got!.kind).toBe('replace');
+    expect(got!.proposed).toBe('建议'); // 既有数据不受迁移影响
+    // 迁移后新建缺省仍是 replace，正常读写
+    const fresh = store.create({ chapter: 'c.md', original: 'a', proposed: 'b' });
+    expect(fresh.kind).toBe('replace');
+    store.close();
+  });
+
+  it('create 带 kind 往返：get/list 返回 kind，缺省为 replace', () => {
+    const store = new CandidateStore(tmpDbPath());
+    const c = store.create({ chapter: 'c1.md', original: '', proposed: '续写', kind: 'append' });
+    expect(c.kind).toBe('append');
+    expect(store.get(c.id)!.kind).toBe('append');
+    expect(store.list({ chapter: 'c1.md' })[0]!.kind).toBe('append');
+
+    const d = store.create({ chapter: 'c2.md', original: '旧文', proposed: '改写', kind: 'replace' });
+    expect(d.kind).toBe('replace');
+    expect(store.get(d.id)!.kind).toBe('replace');
+
+    const e = store.create({ chapter: 'c3.md', original: '', proposed: '整章', kind: 'replace_all' });
+    expect(e.kind).toBe('replace_all');
+    expect(store.get(e.id)!.kind).toBe('replace_all');
+
+    // 缺省 = replace（与既有生产路径一致）
+    const f = store.create({ chapter: 'c4.md', original: 'a', proposed: 'b' });
+    expect(f.kind).toBe('replace');
     store.close();
   });
 

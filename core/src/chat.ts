@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   stepCountIs,
   streamText,
+  tool,
   type LanguageModel,
   type ModelMessage,
   type ToolCallPart,
@@ -10,6 +11,7 @@ import {
   type ToolSet,
 } from 'ai';
 import { z } from 'zod';
+import type { CandidateStore } from './candidate-store.js';
 import type { MessageRow, SessionRow, SessionStore } from './session-store.js';
 import { getLlmTimeoutSeconds, type Tier } from './config.js';
 import { EventPump } from './event-pump.js';
@@ -48,6 +50,8 @@ export type ChatBody = z.infer<typeof chatBodySchema>;
 
 export interface ChatDeps {
   store: SessionStore;
+  /** 暂存候选库：chat 本地工具 stage_chapter_proposal 的落库目标（AI 产出先进暂存区，铁律）。 */
+  candidates: CandidateStore;
   /** 按档位返回模型；测试注入 mock。 */
   modelForTier: (tier: Tier) => LanguageModel;
   /** MCP 领域工具，连不上时为 undefined。 */
@@ -418,6 +422,43 @@ export async function handleChatRequest(
     const model = deps.modelForTier(tier);
     // 统一中止信号：服务端超时 + 客户端断连，先于 streamText 的数据层账本切片调用也挂在这里（超时即中止）。
     const combinedSignal = AbortSignal.any([abort.signal, timeoutSignal]);
+    // 本地暂存提案工具（非 MCP）：AI 产出先进暂存区，作者批量采纳后才落盘（铁律回归）。只在本次请求里构造——
+    // 闭包当前会话 id 与挂载章（body.chapter）；MCP 断连时本地工具仍可用（见下方 options.tools 合并）。
+    const stageChapterProposal = tool({
+      description:
+        '把讨论定稿的正文提案送进暂存区（作者批量采纳后才落盘）。何时用：新写/续写/大段改写章正文一律先调本工具，不要在对话里贴大段正文代替。何时不用：作者明确指令直接写入章文件时用 write_chapter；记录设定/伏笔/知情/时间线用 ledger_upsert；书级元数据用 write_meta。',
+      inputSchema: z.object({
+        proposed: z.string().min(1).max(20_000).describe('提案正文（纯正文，不含 frontmatter）'),
+        mode: z
+          .enum(['append', 'replace_all', 'replace'])
+          .default('append')
+          .describe('append=追加章正文末尾；replace_all=替换整章正文；replace=锚定替换'),
+        original: z.string().describe('mode=replace 时必填：本章中将被替换的原文（锚定）').optional(),
+        chapter: z
+          .string()
+          .describe('目标章 relPath（manuscript/ 内 .md）；缺省用本请求 chat body 的 chapter 字段（挂载章）')
+          .optional(),
+        instruction: z.string().max(2_000).describe('提案说明').optional(),
+      }),
+      execute: async (input) => {
+        const chapter = input.chapter ?? parsed.data.chapter;
+        if (!chapter) {
+          return '需要指定目标章：请用 list_structure 查询 manuscript/ 内的 .md relPath 填入 chapter 参数，或在聊天挂载章（请求带 chapter 字段）后重试。本次未创建候选。';
+        }
+        if (input.mode === 'replace' && !input.original) {
+          return 'mode=replace 需要 original 锚定原文：请提供本章中将被替换的原文。本次未创建候选。';
+        }
+        const candidate = deps.candidates.create({
+          chapter,
+          original: input.original ?? '',
+          proposed: input.proposed,
+          instruction: input.instruction ?? '',
+          sessionId,
+          kind: input.mode,
+        });
+        return `已进暂存区（候选 id ${candidate.id}），等作者批量采纳后落盘`;
+      },
+    });
     const options: Parameters<typeof streamText>[0] = {
       model,
       // 分层组装：契约层 + 姿态层（占位）+ 数据层（声口摘要/本章账本切片，见 systemPrompt）。
@@ -426,7 +467,8 @@ export async function handleChatRequest(
       stopWhen: stepCountIs(MAX_STEPS),
       abortSignal: combinedSignal,
     };
-    if (deps.tools) options.tools = deps.tools;
+    // 本地工具与领域工具合并：MCP 断连（deps.tools 为 undefined）时本地暂存提案仍可用。
+    options.tools = { ...(deps.tools ?? {}), stage_chapter_proposal: stageChapterProposal };
     const result = streamText(options);
 
     for await (const part of result.stream) {

@@ -84,7 +84,7 @@ server.registerTool(
   {
     title: '原子写入一章',
     description:
-      '把 content 原子写入 workDir/manuscript/ 内的 relPath（同目录临时文件+rename），父目录自动创建；只允许 .md 后缀。返回 { ok, bytes }。',
+      '把 content 原子写入 workDir/manuscript/ 内的 relPath（同目录临时文件+rename），父目录自动创建；只允许 .md 后缀。仅限章正文——设定/伏笔/知情/道具托管/时间线用 ledger_upsert，书级元数据用 write_meta，禁止把设定、账本、笔记类内容写进章文件。返回 { ok, bytes }。',
     inputSchema: {
       workDir: z.string().describe('作品文件夹的绝对路径'),
       relPath: z.string().describe('相对 workDir 的目标路径，必须位于 manuscript/ 下且以 .md 结尾'),
@@ -178,7 +178,7 @@ server.registerTool(
   {
     title: '新建一章',
     description:
-      '在 manuscript 下新建 第N章·标题.md（volume 省略/空串时为散章），编号=卷内（或根）已匹配「第N章」模式的最大编号+1。frontmatter 模板含 title/status/id，goal 传了才写；volume 不能带路径分隔符、title 不能带编号前缀，同名文件已存在则抛错（不覆盖）。返回 { ok, relPath }。',
+      '在 manuscript 下新建 第N章·标题.md（volume 省略/空串时为散章），编号=卷内（或根）已匹配「第N章」模式的最大编号+1。frontmatter 模板含 title/status/id，goal 传了才写；volume 不能带路径分隔符、title 不能带编号前缀，同名文件已存在则抛错（不覆盖）。新建章只承载章正文——严禁为设定/账本/笔记类内容新建章（设定用 ledger_upsert，书级元数据用 write_meta）。返回 { ok, relPath }。',
     inputSchema: {
       workDir: z.string().describe('作品文件夹的绝对路径'),
       volume: z.string().optional().describe('可选：manuscript 下的卷目录名，如 第一卷·风起；省略为散章'),

@@ -44,6 +44,11 @@ export class CandidatesStore {
     this.revision++;
   }
 
+  /** 内联装饰用：某章里可锚定替换的候选（append/replace_all 无锚点，不打删除线；original=='' 会全匹配，滤掉）。 */
+  anchoredIn(chapter: string): Candidate[] {
+    return this.items.filter((i) => i.chapter === chapter && i.kind === 'replace' && i.original !== '');
+  }
+
   async load(): Promise<void> {
     try {
       const r = await this.client.listCandidates({ status: 'pending' });
@@ -239,13 +244,29 @@ export class CandidatesStore {
 
         const applied: string[] = [];
         for (const c of group) {
-          const r = work.applyEdit(c.original, c.proposed);
-          if (r === 'ok') {
-            applied.push(c.id);
+          if (c.kind === 'append') {
+            const r = work.appendMd(c.proposed);
+            if (r === 'ok') {
+              applied.push(c.id);
+            } else {
+              failures.push('追加失败：编辑器未就绪');
+            }
+          } else if (c.kind === 'replace_all') {
+            const r = work.replaceBodyMd(c.proposed);
+            if (r === 'ok') {
+              applied.push(c.id);
+            } else {
+              failures.push('整章替换失败：编辑器未就绪');
+            }
           } else {
-            failures.push(
-              `${c.original.slice(0, 24)}…（${r === 'ambiguous' ? '原文在本章多处出现，无法定位' : '原文已变动，找不到锚点'}）`,
-            );
+            const r = work.applyEdit(c.original, c.proposed);
+            if (r === 'ok') {
+              applied.push(c.id);
+            } else {
+              failures.push(
+                `${c.original.slice(0, 24)}…（${r === 'ambiguous' ? '原文在本章多处出现，无法定位' : '原文已变动，找不到锚点'}）`,
+              );
+            }
           }
         }
         if (applied.length === 0) continue;
