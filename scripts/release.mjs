@@ -306,7 +306,9 @@ function ghToken() {
 }
 
 function ghReleaseId(repo, tag) {
-  const res = runCapture('gh', ['release', 'view', tag, '--repo', repo, '--json', 'id', '--jq', '.id']);
+  // gh release view --json id 返回的是 node_id（RE_...），不能当 uploads API 的 id 用；
+  // 改走 REST 列表按 tag_name 匹配拿数字 id（uploads.github.com 只认数字 id）。
+  const res = runCapture('gh', ['api', `repos/${repo}/releases`, '--jq', `([.[] | select(.tag_name == "${tag}")] | first).id`]);
   if (res.status !== 0 || !res.stdout.trim()) fail(`无法获取 release ${tag} 的 ID`);
   return res.stdout.trim();
 }
