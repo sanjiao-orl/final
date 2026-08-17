@@ -27,7 +27,7 @@ node core/scripts/e2e-workflow.mjs   # 写作闭环剧本:起草→暂存→采�
 - `domain/` — MCP 领域服务:结构树(卷/章/场,标题派生)、章节读写(原子写)、搜索、字数统计、章/卷生产与组织(新建/重命名/卷内重排)、历史快照读取
 - `shell/` — Tauri 2 + Svelte 5 + TipTap 壳(v5 布局:48px AI 窄条 + 会话/对话/工具/上下文/设置五栏,点击切换;左侧结构树 + 作者笔记(AI 物理不可见);多候选浮层 B1、工具卡 B3/B10、快照浏览器、目标字数 B5、ask/auto/yolo 审批 B6、会话多级挂载 B7、采纳留痕 B8、树搜索/场大纲/拖拽 B9、设置面板;自动保存间隔可配)
 - `.demo-work/` — 演示作品(测试文本,随时可删)
-- `docs/` — 需求基线(01-产品定义)、现状与计划(现状.md)、决策记录(decisions/0001-0008);历史文档(诊断 00/roadmap/壳重设计系列/审核手册/生态调研/路线偏移与最新进展等)在 `docs/archive/`
+- `docs/` — 需求基线(01-产品定义)、现状与计划(现状.md)、决策记录(decisions/0001-0010);历史文档(诊断 00/roadmap/壳重设计系列/审核手册/生态调研/路线偏移与最新进展等)在 `docs/archive/`
 - `scripts/check-env.ps1` — 检查 LLM_* 环境变量是否配置
 
 ## 下一轮流程（动工前必读）
@@ -55,7 +55,7 @@ node core/scripts/e2e-workflow.mjs   # 写作闭环剧本:起草→暂存→采�
 
 ## 验收口径
 
-- `npm run check` / `npm test`(464 用例:core 117 + domain 177 + shell 170;另 cargo test 16;写作闭环 e2e-workflow 7 步,真实 LLM key 在场才跑)
+- `npm run check` / `npm test`(570 用例:core 140 + domain 235 + shell 195;另 cargo test 16;写作闭环 e2e-workflow 7 步,真实 LLM key 在场才跑)
 - 每周出口 = 作者用本仓真实写作;不以测试绿为验收
 
 ## 已知现象
