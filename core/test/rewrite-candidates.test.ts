@@ -1,4 +1,7 @@
 // 测试：/v1/rewrite SSE 改写管道与 /v1/candidates REST——mock 模型驱动的改写流、候选 CRUD、鉴权与校验。
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { readSse, startTestServer, stepModel, textResult } from './helpers.js';
 
@@ -117,6 +120,62 @@ describe('/v1/rewrite SSE 改写管道', () => {
       const events = await readSse(res);
       expect(events.map((e) => e.event)).toEqual(['text-delta', 'done']);
       expect(events.at(-1)?.data.text).toBe('改后文本。');
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('带 workDir：系统提示末尾拼「## 声口摘要」段（style.md 有 `## 摘要` 节）', async () => {
+    const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'core-rewrite-workdir-'));
+    fs.mkdirSync(path.join(workDir, '.novel'), { recursive: true });
+    fs.writeFileSync(path.join(workDir, '.novel', 'style.md'), '## 摘要\n\n冷峻克制，对话短促。', 'utf8');
+    const model = stepModel([textResult(['改后一段。'])]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const res = await postRewrite(s.baseUrl, s.token, { original: '原一段。', instruction: '更冷峻', workDir });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      const content = sys?.content;
+      const sysText = typeof content === 'string' ? content : JSON.stringify(content);
+      expect(sysText).toContain('## 声口摘要');
+      expect(sysText).toContain('冷峻克制，对话短促。');
+    } finally {
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('带 workDir 但 style.md 不存在 → 系统提示不含声口摘要段', async () => {
+    const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'core-rewrite-workdir-'));
+    // 不建 .novel/style.md：loadStyleSummary 返回 null，不拼声口摘要段
+    const model = stepModel([textResult(['改后一段。'])]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const res = await postRewrite(s.baseUrl, s.token, { original: '原一段。', instruction: '更冷峻', workDir });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      const content = sys?.content;
+      const sysText = typeof content === 'string' ? content : JSON.stringify(content);
+      expect(sysText).not.toContain('## 声口摘要');
+    } finally {
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('无 workDir → 系统提示不含声口摘要段（原行为不变）', async () => {
+    const model = stepModel([textResult(['改后。'])]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const res = await postRewrite(s.baseUrl, s.token, { original: '原。', instruction: '' });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      const content = sys?.content;
+      const sysText = typeof content === 'string' ? content : JSON.stringify(content);
+      expect(sysText).not.toContain('## 声口摘要');
     } finally {
       await s.close();
     }

@@ -17,7 +17,7 @@ import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import { atomicWrite, assertWorkDir, collectMdFiles, resolveInside, toPosix } from './fsutil.js';
+import { atomicWrite, assertWorkDir, collectMdFiles, resolveInside, sortMdFilesNumberAware, toPosix } from './fsutil.js';
 import { frontmatterEnd, parseFrontmatter } from './frontmatter.js';
 import { loadPrompt } from './prompts.js';
 import { SNAPSHOT_KEEP } from './tools.js';
@@ -319,6 +319,68 @@ export function applyOps(ledger: Ledger, ops: LedgerOp[]): Ledger {
     throw new Error(`ledger_upsert 的 ops 不合法: ${err instanceof Error ? err.message : String(err)}`);
   }
   return out;
+}
+
+// ---------- 按章过滤账本（纯函数，可独立测试） ----------
+
+/**
+ * filterLedgerForChapter：按当前章把账本裁成「截至本章已知」的视角（冷读注入用，只读视图）。
+ * 语义（批三-3）：
+ * - relPath 不在 chapterOrder 内 → 返回 null；idx = 当前章在 chapterOrder 的下标，某章 c 的序号 idxOf(c) 不在序内视为「未知」；
+ * - clock：保留行内任一章未知或 idxOf≤idx 的行（整段跨度都在未来才删——跨多章的时间状态在当前章仍活着，不能丢）；
+ * - props：每条托管链裁到只留 chapter 未知或 ≤idx 的链节；裁后链空 → 整条 prop 删除；
+ * - promises：保留 iff (无 setups 或至少一个 setups 章未知或 ≤idx) 且 (无 payoffs 或至少一个 payoffs 章未知或 ≥idx)；
+ *   全部 setups 在未来=尚未开埋（规划信息）删；全部 payoffs 在过去=已回收完（噪音）删；
+ *   多节伏笔（setups[ch2,ch8]/payoffs[ch3,ch9]）只埋了几节/只收了几节仍存活——drop iff 全在过去，防漏回收；
+ * - knowledge：knows/doesNotKnow 的每条事实保留 iff 无 since 或 since 章未知或 idxOf(since)≤idx；refs 原样透传；
+ * - 其余各节（doNotReexplain/protect/tripwires/extra）原样透传。
+ * 不 mutate 入参（逐维重建，风格同 applyOps）。
+ */
+export function filterLedgerForChapter(ledger: Ledger, chapterOrder: ChapterRef[], relPath: string): Ledger | null {
+  const idx = chapterOrder.findIndex((c) => c.relPath === relPath);
+  if (idx === -1) return null;
+  const orderIndex = new Map(chapterOrder.map((c, i) => [c.relPath, i]));
+  const idxOf = (ref: string): number | undefined => orderIndex.get(ref);
+  /** 章引用在「当前章或之前」或未知（无法定位按保留处理，不泄露确定未来）。 */
+  const atOrBefore = (ref: string): boolean => {
+    const i = idxOf(ref);
+    return i === undefined || i <= idx;
+  };
+
+  const clock = ledger.clock.filter((r) => r.chapters.some((c) => atOrBefore(c)));
+  const props = ledger.props
+    .map((p) => ({ ...p, custody: p.custody.filter((s) => atOrBefore(s.chapter)) }))
+    .filter((p) => p.custody.length > 0);
+  const promises = ledger.promises.filter((p) => {
+    // 仍未开埋（全部埋设点都在未来）才删；埋过至少一次即存活。
+    const plantedOk = p.setups.length === 0 || p.setups.some((s) => atOrBefore(s.chapter));
+    // 已回收完（全部回收点都在过去）才删；多节伏笔只回收了前几节仍存活。
+    const resolutionOk =
+      p.payoffs.length === 0 ||
+      p.payoffs.some((x) => {
+        const i = idxOf(x.chapter);
+        return i === undefined || i >= idx;
+      });
+    return plantedOk && resolutionOk;
+  });
+  const filterFacts = (facts: KnowledgeFact[]): KnowledgeFact[] =>
+    facts.filter((f) => f.since === undefined || atOrBefore(f.since));
+  const knowledge = ledger.knowledge.map((k) => ({
+    ...k,
+    knows: filterFacts(k.knows),
+    ...(k.doesNotKnow !== undefined ? { doesNotKnow: filterFacts(k.doesNotKnow) } : {}),
+  }));
+
+  return {
+    clock,
+    props,
+    promises,
+    knowledge,
+    doNotReexplain: [...ledger.doNotReexplain],
+    protect: [...ledger.protect],
+    tripwires: [...ledger.tripwires],
+    ...(ledger.extra ? { extra: ledger.extra } : {}),
+  };
 }
 
 function assertClockRow(entry: unknown): asserts entry is ClockRow {
@@ -949,9 +1011,13 @@ export function readLedger(workDir: string, ledgerPath?: string): { ledger: Ledg
   }
 }
 
-/** 全书章序（title 直接用文件名去 .md，不读章正文——读 frontmatter 取 title 在写/冷读路径太贵）；渲染时间轴化与逾期标记用。 */
-function chapterOrderForWork(wd: string): ChapterRef[] {
-  return collectMdFiles(path.join(wd, 'manuscript')).map((f) => ({
+/**
+ * 全书章序（title 直接用文件名去 .md，不读章正文——读 frontmatter 取 title 在写/冷读路径太贵）；
+ * 「第10章不再排到第2章前」：编号感知排序（复用 fsutil 的 compareNames，第2章 < 第10章），
+ * 修正 collectMdFiles 路径字典序在 >9 章/汉字编号时错序的 bug。渲染时间轴化与逾期标记用。
+ */
+export function chapterOrderForWork(wd: string): ChapterRef[] {
+  return sortMdFilesNumberAware(collectMdFiles(path.join(wd, 'manuscript'))).map((f) => ({
     relPath: toPosix(path.join('manuscript', f.rel)),
     title: path.basename(f.abs, '.md'),
   }));
@@ -964,6 +1030,35 @@ export function writeLedger(workDir: string, ledger: Ledger, ledgerPath?: string
   const abs = ledgerAbs(wd, rel);
   const content = serializeLedger(ledger, { chapterOrder: chapterOrderForWork(wd) });
   snapshotLedgerBeforeWrite(wd, rel, abs, content);
+  const { bytes } = atomicWrite(abs, content);
+  return { ok: true, path: rel, bytes };
+}
+
+/**
+ * write_meta：写入书级元数据文件（如 .novel/style.md），原子写，写前对旧版本快照进 .novel/history/。
+ * 边界（白名单化）：只允许 .novel/ 根目录正下的 .md（相对路径匹配 ^\.novel/[^/]+\.md$，不含子目录，
+ * 守卫复用 assertLedgerMetaPath(kind:'ledger')）；拒写 manuscript 正文、问题日志、.novel/ 子目录；
+ * 拒覆写账本——目标已存在且其内容能被 parseLedger 解析为账本时抛错（账本请走 ledger_upsert）。
+ * 返回 { ok, path, bytes }。
+ */
+export function writeMeta(workDir: string, relPath: string, content: string): { ok: true; path: string; bytes: number } {
+  const wd = assertWorkDir(workDir);
+  const abs = assertLedgerMetaPath(wd, relPath, 'ledger'); // 白名单：.novel/ 根下 .md；越界/白名单外在此抛错
+  // 目标已存在且能解析为账本 → 拒写（账本归 ledger_upsert 管，write_meta 只写书级元数据）
+  if (fs.existsSync(abs)) {
+    let isLedger = false;
+    try {
+      parseLedger(fs.readFileSync(abs, 'utf8'));
+      isLedger = true;
+    } catch {
+      isLedger = false; // 解析不了 = 不是合法账本（书级元数据可覆盖；若恰为损坏账本则走 ledger 修复/删除流程）
+    }
+    if (isLedger) {
+      throw new Error(`write_meta 拒绝覆写账本文件（本工具不写账本，账本请用 ledger_upsert）: ${relPath}`);
+    }
+  }
+  const rel = toPosix(relPath);
+  snapshotLedgerBeforeWrite(wd, rel, abs, content); // 旧版快照进 .novel/history/<拍平路径>/（复用账本快照口径）
   const { bytes } = atomicWrite(abs, content);
   return { ok: true, path: rel, bytes };
 }
@@ -1403,6 +1498,61 @@ export function ledgerSlice(
   return { workDir: wd, chapterRelPath, slice, injectedChapters: [chapterRelPath] };
 }
 
+export interface LedgerChapterSliceResult {
+  workDir: string;
+  chapterRelPath: string;
+  found: boolean;
+  chapterTitle: string | null;
+  ledger: Ledger;
+  slice: string;
+}
+
+/**
+ * ledger_chapter_slice：按章过滤的账本视图（只读，不写账本、不注入全账本）。
+ * - chapterRelPath 必须是 manuscript/ 内的 .md（守卫口径同 ledgerSlice 约 1359-1361）；
+ * - ledgerPath 走 assertLedgerMetaPath(kind:'ledger') 白名单（readLedger 内部已复用该守卫）；
+ * - 章在 chapterOrder（编号感知章序）内 → found=true：ledger = filterLedgerForChapter 结果，
+ *   slice = renderLedgerMarkdown(过滤后账本, { chapterOrder: chapterOrderForWork(wd) })，
+ *   chapterTitle 取自 chapterOrder 条目；章不在序内 → found=false：空账本 + slice='' + chapterTitle=null。
+ */
+export function ledgerChapterSlice(
+  workDir: string,
+  chapterRelPath: string,
+  ledgerPath?: string,
+): LedgerChapterSliceResult {
+  const wd = assertWorkDir(workDir);
+  const { ledger } = readLedger(wd, ledgerPath);
+  const chapterOrder: ChapterRef[] = chapterOrderForWork(wd);
+
+  // 守卫（复用 ledgerSlice 口径）：只允许 manuscript/ 内的 .md，防止把全稿/元数据当章切片
+  const abs = resolveInside(wd, chapterRelPath); // 越界在此抛错
+  const chapterPosix = toPosix(path.relative(wd, abs));
+  if (!chapterPosix.startsWith('manuscript/') || !chapterPosix.toLowerCase().endsWith('.md')) {
+    throw new Error(`ledger_chapter_slice 的 chapterRelPath 只允许 manuscript/ 内的 .md 文件: ${chapterRelPath}`);
+  }
+
+  const entry = chapterOrder.find((c) => c.relPath === chapterPosix);
+  if (!entry) {
+    return {
+      workDir: wd,
+      chapterRelPath,
+      found: false,
+      chapterTitle: null,
+      ledger: emptyLedger(),
+      slice: '',
+    };
+  }
+  const filtered = filterLedgerForChapter(ledger, chapterOrder, chapterPosix) ?? emptyLedger();
+  return {
+    workDir: wd,
+    chapterRelPath,
+    found: true,
+    chapterTitle: entry.title,
+    ledger: filtered,
+    slice: renderLedgerMarkdown(filtered, { chapterOrder }),
+  };
+}
+
 // ---------- 全作品诊断编排（读账本 + 逐章正文） ----------
 
 export interface WorkDiagnostics {
@@ -1423,7 +1573,7 @@ export function diagnosticsForWork(workDir: string, ledgerPath?: string, issueLo
   const wd = assertWorkDir(workDir);
   const { ledger } = readLedger(wd, ledgerPath);
 
-  const files = collectMdFiles(path.join(wd, 'manuscript'));
+  const files = sortMdFilesNumberAware(collectMdFiles(path.join(wd, 'manuscript')));
   const chapterOrder: ChapterRef[] = [];
   const bodies: Array<{ relPath: string; title: string; body: string }> = [];
   for (const f of files) {

@@ -4,7 +4,16 @@
  */
 import type { CoreClient } from './core.js';
 import type { Candidate } from './types.js';
+import { snapshot } from './snapshot.svelte.js';
 import { work } from './work.svelte.js';
+import { ISSUE_LOG_DEFAULT } from './paths.js';
+
+/** ledger_diagnostics 返回的机械诊断结果（契约镜像，只消费 findings 计数）。 */
+interface LedgerDiagnosticsNotice {
+  findings?: Array<{ severity: string; code?: string; message?: string; category?: string }>;
+  hasBlockers?: boolean;
+  blockerCount?: number;
+}
 
 export class CandidatesStore {
   /** 待处理候选（status=pending，按更新时间倒序）。 */
@@ -120,7 +129,7 @@ export class CandidatesStore {
     this.generateAbort = ac;
     try {
       await this.client.rewriteStream(
-        { original, instruction },
+        { original, instruction, ...(work.workDir ? { workDir: work.workDir } : {}) },
         {
           onDelta: (d) => {
             text += d;
@@ -157,13 +166,14 @@ export class CandidatesStore {
     original: string,
     instruction: string,
     onProgress?: (text: string) => void,
+    workDir?: string,
     signal?: AbortSignal,
   ): Promise<string | null> {
     let text = '';
     const failure: { err: Error | null } = { err: null }; // 闭包赋值，TS 收窄不跨闭包，用对象持有
     try {
       await this.client.rewriteStream(
-        { original, instruction },
+        { original, instruction, ...(workDir ? { workDir } : {}) },
         {
           onDelta: (d) => {
             text += d;
@@ -211,6 +221,7 @@ export class CandidatesStore {
       }
 
       const failures: string[] = [];
+      let adoptedAny = false;
       for (const [chapter, group] of byChapter) {
         if (work.current?.relPath !== chapter) {
           const node = work.findChapter(chapter);
@@ -238,6 +249,7 @@ export class CandidatesStore {
           }
         }
         if (applied.length === 0) continue;
+        adoptedAny = true;
 
         // 采纳是作者决策：替换成功即落状态；保存失败另有红条+脏标记兜底
         for (const id of applied) await this.client.patchCandidate(id, { status: 'adopted' });
@@ -247,6 +259,9 @@ export class CandidatesStore {
       if (failures.length > 0) {
         work.error = `部分候选未能采纳：${failures.join('；')}`;
       }
+      // 批三-3：采纳落定（PATCH 完成、保存触发）后机械层自动跑账本诊断；有发现弹轻提示，无发现/失败静默。
+      // 单一收口点在这里：StagingDrawer / StagingOverview / Editor 内联 ✓ 三个入口全部走 adopt()。
+      if (adoptedAny) void this.notifyDiagnosticsAfterAdopt();
       await this.load();
       if (this.overviewOpen) void this.loadAll();
       this.clearSelection();
@@ -254,6 +269,28 @@ export class CandidatesStore {
       work.error = `采纳失败：${err instanceof Error ? err.message : String(err)}`;
     } finally {
       this.busy = false;
+    }
+  }
+
+  /**
+   * 采纳落定后的自动账本诊断（确定性工具，零 LLM 成本；fire-and-forget，不阻塞采纳主链路）：
+   * findings>0 → 复用 SnapshotToast 机制弹无还原动作的轻提示（提示作者在审阅面板查看）；findings==0 / 调用失败 → 不打扰。
+   */
+  private async notifyDiagnosticsAfterAdopt(): Promise<void> {
+    if (!this.client || !work.workDir) return;
+    try {
+      const diag = (await this.client.callTool<LedgerDiagnosticsNotice>('ledger_diagnostics', {
+        workDir: work.workDir,
+        issueLogPath: ISSUE_LOG_DEFAULT,
+      })) ?? {};
+      const findings = diag.findings ?? [];
+      if (findings.length === 0) return;
+      const severe = findings.filter((f) => f.severity === 'MAJOR' || f.severity === 'BLOCKER').length;
+      snapshot.showNotice(
+        `诊断现存 ${findings.length} 条（含 ${severe} 条 MAJOR/BLOCKER）· 审阅面板查看；若采纳改变了剧情事实，让 AI 同步账本`,
+      );
+    } catch {
+      // 诊断失败静默：不打扰采纳主链路
     }
   }
 
@@ -282,7 +319,7 @@ export class CandidatesStore {
         let text = '';
         const failure: { err: Error | null } = { err: null };
         await this.client.rewriteStream(
-          { original: c.original, instruction: `上一版改写：\n${c.proposed}\n\n整改要求：${ask}` },
+          { original: c.original, instruction: `上一版改写：\n${c.proposed}\n\n整改要求：${ask}`, ...(work.workDir ? { workDir: work.workDir } : {}) },
           {
             onDelta: (d) => {
               text += d;

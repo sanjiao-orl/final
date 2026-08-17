@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { collectSkills, loadPrompt, parsePromptFile, releasePrompts, scanSkills } from '../src/prompts.js';
+import { collectSkills, loadPrompt, loadStyleSummary, parsePromptFile, releasePrompts, scanSkills } from '../src/prompts.js';
 
 const tmpDirs: string[] = [];
 
@@ -143,5 +143,83 @@ describe('skill 清单', () => {
       { name: '体检', description: 'app 体检' },
       { name: '书级技能', description: '只在本书' },
     ]);
+  });
+});
+
+describe('loadStyleSummary 声口摘要', () => {
+  it('提取 `## 摘要` 节内容（到下一个 `## ` 标题止，不含后续节）', () => {
+    const dir = makeTmpDir();
+    writeTree(dir, {
+      '.novel/style.md':
+        '# 声口档案\n\n主角冷峻克制，对话短促。\n\n## 摘要\n\n惜字如金，兵器用长句，情绪靠动作。\n\n## 节奏\n\n更多细节。',
+    });
+    expect(loadStyleSummary(dir)).toBe('惜字如金，兵器用长句，情绪靠动作。');
+  });
+
+  it('摘要节在文件任意位置都生效（frontmatter 后也能取到）', () => {
+    const dir = makeTmpDir();
+    writeTree(dir, {
+      '.novel/style.md': '---\nkind: style\nname: demo\n---\n## 摘要\n\n带头文件也认。',
+    });
+    expect(loadStyleSummary(dir)).toBe('带头文件也认。');
+  });
+
+  it('无 `## 摘要` 节：回退正文前 1500 字符', () => {
+    const dir = makeTmpDir();
+    writeTree(dir, { '.novel/style.md': '没有摘要节的一段声口正文。'.repeat(5) });
+    expect(loadStyleSummary(dir)).toBe('没有摘要节的一段声口正文。'.repeat(5));
+  });
+
+  it('无 `## 摘要` 节且超长：截断到 1500 字符并加省略标注', () => {
+    const dir = makeTmpDir();
+    writeTree(dir, { '.novel/style.md': '没有摘要节的长正文。'.repeat(300) }); // 3300 字符
+    const summary = loadStyleSummary(dir)!;
+    const marker = '\n…（声口摘要超 1500 字符，已截断）';
+    expect(summary.length).toBe(1500 + marker.length);
+    expect(summary.startsWith('没有摘要节的长正文。')).toBe(true);
+    expect(summary).toContain('已截断');
+  });
+
+  it('摘要节超长：截断到 1500 字符并加省略标注', () => {
+    const dir = makeTmpDir();
+    writeTree(dir, { '.novel/style.md': `## 摘要\n\n${'长'.repeat(2000)}` });
+    const summary = loadStyleSummary(dir)!;
+    const marker = '\n…（声口摘要超 1500 字符，已截断）';
+    expect(summary.length).toBe(1500 + marker.length);
+    expect(summary.startsWith('长'.repeat(1500))).toBe(true);
+    expect(summary).toContain('已截断');
+  });
+
+  it('摘要节为空（只含空白）→ null（调用方静默跳过）', () => {
+    const dir = makeTmpDir();
+    writeTree(dir, { '.novel/style.md': '## 摘要\n\n   \n' });
+    expect(loadStyleSummary(dir)).toBeNull();
+  });
+
+  it('文件不存在/不可读 → null', () => {
+    const dir = makeTmpDir();
+    expect(loadStyleSummary(dir)).toBeNull();
+  });
+
+  it('mtime 热重载：改文件后拿到新摘要（决策 0008「改文件即生效」同口径）', () => {
+    const dir = makeTmpDir();
+    const file = path.join(dir, '.novel', 'style.md');
+    writeTree(dir, { '.novel/style.md': '## 摘要\n\n第一版。' });
+    expect(loadStyleSummary(dir)).toBe('第一版。');
+
+    // 改内容并显式拨动 mtime（防文件系统时间精度抖动：同 ms 内写入可能 mtimeMs 不变）
+    fs.writeFileSync(file, '## 摘要\n\n第二版。', 'utf8');
+    const bumped = new Date(Date.now() + 5_000);
+    fs.utimesSync(file, bumped, bumped);
+    expect(loadStyleSummary(dir)).toBe('第二版。');
+  });
+
+  it('热重载：文件被删后 → null（文件消失即失效，不用陈旧缓存）', () => {
+    const dir = makeTmpDir();
+    const file = path.join(dir, '.novel', 'style.md');
+    writeTree(dir, { '.novel/style.md': '## 摘要\n\n第一版。' });
+    expect(loadStyleSummary(dir)).toBe('第一版。');
+    fs.rmSync(file);
+    expect(loadStyleSummary(dir)).toBeNull();
   });
 });

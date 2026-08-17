@@ -18,6 +18,12 @@
     <button class="dismiss" onclick={() => snapshot.dismissToast()} aria-label="关闭">×</button>
   </div>
 {/if}
+{#if snapshot.notice}
+  <div class="toast notice" role="status" style:bottom={snapshot.toast ? '72px' : '26px'}>
+    <span class="msg">{snapshot.notice.message}</span>
+    <button class="dismiss" onclick={() => snapshot.dismissNotice()} aria-label="关闭">×</button>
+  </div>
+{/if}
 
 <style>
   .toast {
@@ -72,5 +78,13 @@
   }
   .dismiss:hover {
     color: var(--ink);
+  }
+  /* 轻提示变体（采纳后诊断等）：无还原动作，长文可换行，常驻在快照 toast 之上 */
+  .toast.notice {
+    border-left-color: var(--accent);
+    max-width: min(520px, calc(100vw - 40px));
+    white-space: normal;
+    line-height: 1.5;
+    align-items: flex-start;
   }
 </style>

@@ -134,3 +134,24 @@ describe('resolveBareParam（裸联调 token/workDir 记忆）', () => {
     expect(lsSet).not.toHaveBeenCalled();
   });
 });
+
+describe('CoreClient.rewriteStream（workDir 透传）', () => {
+  it('workDir 进 POST /v1/rewrite 请求体，done 回传完整改写文本', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response('event: done\ndata: {"text":"改写结果"}\n\n', {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      }),
+    );
+    const c = new CoreClient('http://127.0.0.1:1', 't');
+    let received: string | undefined;
+    await c.rewriteStream(
+      { workDir: 'C:/works/demo', original: '旧文', instruction: '润色' },
+      { onDelta: () => undefined, onDone: ({ text }) => (received = text) },
+    );
+    expect(received).toBe('改写结果');
+    const callArgs = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as RequestInit | undefined;
+    const body = JSON.parse(String(callArgs?.body)) as Record<string, unknown>;
+    expect(body).toMatchObject({ workDir: 'C:/works/demo', original: '旧文', instruction: '润色' });
+  });
+});

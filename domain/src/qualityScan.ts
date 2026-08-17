@@ -14,8 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { frontmatterEnd, parseFrontmatter } from './frontmatter.js';
-import { assertWorkDir, collectMdFiles, toPosix } from './fsutil.js';
-import { CHAPTER_NAME_RE, VOLUME_NAME_RE, compareNames } from './tools.js';
+import { CHAPTER_NAME_RE, VOLUME_NAME_RE, assertWorkDir, collectMdFiles, compareNames, toPosix } from './fsutil.js';
 
 export type Severity = 'pass' | 'warn' | 'fail' | 'info';
 
@@ -592,7 +591,7 @@ function computeBook(raws: RawChapter[]): BookScan {
 
 /**
  * 章文件阅读序：按路径段逐段编号感知比较（卷段用 VOLUME_NAME_RE、文件名用 CHAPTER_NAME_RE，
- * 复用 tools.ts 的 compareNames）。collectMdFiles 的字典序在 >9 章阿拉伯编号或汉字编号时错序，
+ * 复用 fsutil.ts 的 compareNames）。collectMdFiles 的字典序在 >9 章阿拉伯编号或汉字编号时错序，
  * sceneContinuity/templateParagraphs 的「连续章」判定必须按真实阅读顺序。
  */
 function compareChapterFiles(a: string, b: string): number {

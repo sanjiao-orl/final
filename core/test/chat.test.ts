@@ -643,4 +643,197 @@ describe('/v1/chat SSE 管道', () => {
       await s.close();
     }
   });
+
+  /** 建一个带 `/chapters/tmp` 声口档案的临时作品目录；返回该目录（用例 finally 里清理）。 */
+  function makeWorkDir(styleSummary?: string): string {
+    const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'core-chat-data-'));
+    if (styleSummary !== undefined) {
+      fs.mkdirSync(path.join(workDir, '.novel'), { recursive: true });
+      fs.writeFileSync(path.join(workDir, '.novel', 'style.md'), styleSummary, 'utf8');
+    }
+    return workDir;
+  }
+
+  /** 含 ledger_chapter_slice 的 domain 工具集（与 review 测试同口径：本地工具直接返回对象）。 */
+  function chapterSliceTools(
+    slice: string,
+    execute?: (input: unknown) => Promise<unknown>
+  ): ToolSet {
+    const tools: Record<string, unknown> = {
+      ledger_chapter_slice: {
+        description: '按章裁剪账本切片',
+        inputSchema: z.object({ workDir: z.string(), chapterRelPath: z.string() }),
+        execute:
+          execute ??
+          (async () => ({
+            found: true,
+            slice,
+            chapterTitle: '第一章',
+            ledger: {},
+          })),
+      },
+    };
+    return tools as unknown as ToolSet;
+  }
+
+  it('数据层注入：style.md 声口摘要 + 章挂载 + 账本切片工具 → 系统提示含「声口摘要」「本章账本切片」', async () => {
+    const workDir = makeWorkDir('## 摘要\n\n冷峻克制，惜字如金。');
+    const ledgerExecute = vi.fn(async () => ({
+      found: true,
+      slice: '第一〇一则：少年拔剑  15:00\n第一〇二则：少年收剑  15:02',
+      chapterTitle: '第一章',
+      ledger: {},
+    }));
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model, tools: chapterSliceTools('', ledgerExecute) });
+    try {
+      const res = await postChat(s.baseUrl, s.token, {
+        text: '这章节奏如何',
+        workDir,
+        chapter: 'manuscript/第1章.md',
+      });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      const sysText = promptText(sys!);
+      // 声口摘要
+      expect(sysText).toContain('## 声口摘要');
+      expect(sysText).toContain('冷峻克制，惜字如金。');
+      // 本章账本切片
+      expect(sysText).toContain('## 本章账本切片(第一章)');
+      expect(sysText).toContain('仅含与当前章相关的账本条目，非全书。');
+      expect(sysText).toContain('第一〇一则');
+      expect(sysText).toContain('第一〇二则');
+      expect(ledgerExecute).toHaveBeenCalledWith(
+        { workDir, chapterRelPath: 'manuscript/第1章.md' },
+        expect.objectContaining({ toolCallId: 'chat-ledger-chapter-slice' })
+      );
+    } finally {
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('数据层：无 chapter 字段 → 只注声口摘要，不注账本切片', async () => {
+    const workDir = makeWorkDir('## 摘要\n\n沉郁内敛。');
+    const ledgerExecute = vi.fn(async () => ({ found: true, slice: '不应出现', chapterTitle: '第一章' }));
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model, tools: chapterSliceTools('', ledgerExecute) });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '整体基调', workDir });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      const sysText = promptText(sys!);
+      expect(sysText).toContain('## 声口摘要');
+      expect(sysText).not.toContain('## 本章账本切片');
+      expect(ledgerExecute).not.toHaveBeenCalled();
+    } finally {
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('数据层：style.md 不存在 → 不注声口摘要（账本切片照注）', async () => {
+    const workDir = makeWorkDir(); // 无 style.md
+    const ledgerExecute = vi.fn(async () => ({ found: true, slice: '账本目录', chapterTitle: '第一章' }));
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model, tools: chapterSliceTools('', ledgerExecute) });
+    try {
+      const res = await postChat(s.baseUrl, s.token, {
+        text: '这章账本如何',
+        workDir,
+        chapter: 'manuscript/第1章.md',
+      });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      const sysText = promptText(sys!);
+      expect(sysText).not.toContain('## 声口摘要');
+      expect(sysText).toContain('## 本章账本切片(第一章)');
+    } finally {
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('数据层：ledger_chapter_slice 抛错 → warn 降级跳过，不阻断聊天（不 5xx，照常 done）', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const workDir = makeWorkDir('## 摘要\n\n冷峻克制。');
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({
+      modelForTier: () => model,
+      tools: chapterSliceTools('', async () => {
+        throw new Error('mock 账本切片失败');
+      }),
+    });
+    try {
+      const res = await postChat(s.baseUrl, s.token, {
+        text: '这章账本如何',
+        workDir,
+        chapter: 'manuscript/第1章.md',
+      });
+      expect(res.status).toBe(200);
+      const events = await readSse(res);
+      expect(events.at(-1)!.event).toBe('done'); // 不 5xx，聊天照常
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      const sysText = promptText(sys!);
+      expect(sysText).not.toContain('## 本章账本切片');
+      expect(sysText).toContain('## 声口摘要'); // 声口摘要照常注入
+      expect(warn).toHaveBeenCalled(); // 工具失败已 warn 降级
+    } finally {
+      warn.mockRestore();
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('数据层：tools 缺 ledger_chapter_slice（无 MCP 连接）→ warn 降级跳过账本切片', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const workDir = makeWorkDir('## 摘要\n\n冷峻克制。');
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model, tools: {} }); // 空工具集：无 ledger_chapter_slice
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '这段怎么改', workDir, chapter: 'manuscript/第1章.md' });
+      expect(res.status).toBe(200);
+      const events = await readSse(res);
+      expect(events.at(-1)!.event).toBe('done');
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      const sysText = promptText(sys!);
+      expect(sysText).not.toContain('## 本章账本切片');
+      expect(sysText).toContain('## 声口摘要'); // 声口摘要不依赖工具，照常注入
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('数据层：账本切片工具执行后 tools 照常注入 streamText（新 tools 合并，不覆盖既有领域工具）', async () => {
+    const workDir = makeWorkDir('## 摘要\n\n冷峻克制。');
+    const model = stepModel([
+      toolCallResult('tc-1', 'word_count', { relPath: 'ch01.md' }),
+      textResult(['共 42 字。']),
+    ]);
+    const s = await startTestServer({
+      modelForTier: () => model,
+      tools: { ...domainTools, ...chapterSliceTools('', async () => ({ found: true, slice: '账本', chapterTitle: '第一章' })) },
+    });
+    try {
+      const res = await postChat(s.baseUrl, s.token, {
+        text: '统计字数',
+        workDir,
+        chapter: 'manuscript/第1章.md',
+      });
+      const events = await readSse(res);
+      expect(events.map((e) => e.event)).toEqual(['tool-call', 'tool-result', 'text-delta', 'done']);
+      // 系统提示仍含账本切片（数据层注入不覆盖既有领域工具）
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      expect(promptText(sys!)).toContain('## 本章账本切片(第一章)');
+    } finally {
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
 });

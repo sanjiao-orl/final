@@ -1,6 +1,7 @@
 /**
- * server.ts —— MCP stdio server 装配：注册二十四个工具并连接 stdio transport。
+ * server.ts —— MCP stdio server 装配：注册二十六个工具并连接 stdio transport。
  * 双侧合并口径：基础工具 8 个 + WS-9 scan_quality + A 组 8 工具 + WS-17 账本 4 工具 + 0008 skill_read 1 工具 + 0009 问题日志 2 工具（issue_append/issue_set_status）。
+ * 批三-3 新增 2 工具：ledger_chapter_slice（按章过滤的账本视图，只读）+ write_meta（书级元数据写入，不写账本/不写正文）。
  * 被 core 包经 MCP stdio spawn 调用；工具实现见 tools.ts。
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -32,9 +33,11 @@ import {
   ISSUE_LOG_TAIL_LINES,
   issueAppend,
   issueSetStatus,
+  ledgerChapterSlice,
   ledgerSlice,
   readLedger,
   upsertLedger,
+  writeMeta,
   type IssueFinding,
   type LedgerOp,
 } from './ledger.js';
@@ -347,6 +350,38 @@ server.registerTool(
   },
   async ({ workDir, chapterRelPath, ledgerPath, issueLogPath }) =>
     jsonResult(ledgerSlice(workDir, chapterRelPath, ledgerPath, issueLogPath)),
+);
+
+// 批三-3：按章过滤的账本视图（只读，不注入全账本）
+server.registerTool(
+  'ledger_chapter_slice',
+  {
+    title: '按章过滤的账本视图',
+    description:
+      '返回按章过滤的账本视角（只读，不写账本、不注入全账本）——只保留截至本章已发生的信息：clock 只留当前及之前的章行（任一未来章行整行删）、props 托管链裁到当前章（链空则整条删）、promises 排除未来埋设（planted 在未来=规划泄露）与已完成回收（resolution 在过去=噪音，恰为当前章的回收章必留）、knowledge 排除未来得知（since 在未来删，refs 原样透传）；do-not-re-explain/PROTECT/tripwires/未知字段原样透传。chapterRelPath 必须是 manuscript/ 内的 .md；章在全书章序内才 found=true（否则返回空账本与空 slice）；ledgerPath 必须是 .novel/ 根目录正下的 .md（不含子目录）。返回 { workDir, chapterRelPath, found, chapterTitle, ledger, slice }。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      chapterRelPath: z.string().describe('当前章相对 workDir 路径，必须是 manuscript/ 内的 .md，如 manuscript/卷一/第1章.md'),
+      ledgerPath: z.string().optional().describe('可选：账本文件相对 workDir 路径，必须是 .novel/ 根目录正下的 .md（不含子目录），默认 .novel/ledger.md'),
+    },
+  },
+  async ({ workDir, chapterRelPath, ledgerPath }) => jsonResult(ledgerChapterSlice(workDir, chapterRelPath, ledgerPath)),
+);
+
+// 批三-3：书级元数据写入（不写账本、不写 manuscript 正文）
+server.registerTool(
+  'write_meta',
+  {
+    title: '写入书级元数据文件',
+    description:
+      '把 content 原子写入 workDir/.novel/ 根目录下的书级元数据 .md 文件（如 .novel/style.md），写前对旧版本快照进 .novel/history/。边界：只允许 .novel/ 根目录正下的 .md（不含子目录，白名单化）；不写账本——目标已存在且内容能解析为账本时拒写（账本请用 ledger_upsert）；不写 manuscript 正文、不写问题日志与 .novel/ 子目录内文件。返回 { ok, path, bytes }。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      relPath: z.string().describe('相对 workDir 的目标路径，必须是 .novel/ 根目录下的 .md（不含子目录），如 .novel/style.md'),
+      content: z.string().describe('文件完整内容（书级元数据，可含 frontmatter）'),
+    },
+  },
+  async ({ workDir, relPath, content }) => jsonResult(writeMeta(workDir, relPath, content)),
 );
 
 server.registerTool(

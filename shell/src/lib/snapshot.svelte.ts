@@ -38,13 +38,48 @@ export interface LedgerView {
   tripwires: string[];
 }
 
+/** ledger_chapter_slice 工具返回（契约为准，domain 并行开发）：found=false 时 ledger 为空结构。 */
+export interface LedgerSliceResult {
+  workDir: string;
+  chapterRelPath: string;
+  found: boolean;
+  chapterTitle: string | null;
+  ledger: LedgerView;
+  slice: string;
+}
+
+/** 上下文栏渲染现场（单口径：组件渲染与 chat 联动刷新读写同一处）。 */
+export interface LedgerPanelState {
+  ledger: LedgerView;
+  /** 数据来源路径（切片=章 relPath，全书=.novel/ledger.md）。 */
+  dataPath: string;
+  /** 切片命中时的章名；全书口径为 null。 */
+  chapterTitle: string | null;
+}
+
+function hms(now: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`;
+}
+
 export class SnapshotStore {
   toast = $state<SnapshotToast | null>(null);
   busy = $state(false);
+  /** 上下文栏口径：随章切片 / 全书。会话内状态，不落 localStorage。 */
+  ledgerMode = $state<'chapter' | 'all'>('chapter');
+  /** 上下文栏渲染现场（单口径：ContextColumn 渲染与 chat 联动刷新都读写这里）。 */
+  ledgerPanel = $state<LedgerPanelState | null>(null);
+  /** 最近一次刷新时间戳（HH:MM:SS）。 */
+  ledgerAt = $state<string | null>(null);
+  ledgerLoading = $state(false);
+  ledgerError = $state<string | null>(null);
+  /** 轻提示（采纳后诊断提醒等，无还原动作，复用 toast 展示机制）。 */
+  notice = $state<{ message: string } | null>(null);
 
   private client!: CoreClient;
   private workDir = '';
   private toastTimer: ReturnType<typeof setTimeout> | undefined;
+  private noticeTimer: ReturnType<typeof setTimeout> | undefined;
 
   init(client: CoreClient, workDir: string): void {
     this.client = client;
@@ -152,6 +187,57 @@ export class SnapshotStore {
       workDir: this.workDir,
     });
     return r;
+  }
+
+  /** 读本章账本切片（四维过滤视图，随章口径）；found=false 时 ledger 为空结构。 */
+  async loadChapterSlice(chapterRelPath: string): Promise<LedgerSliceResult> {
+    return this.client.callTool<LedgerSliceResult>('ledger_chapter_slice', {
+      workDir: this.workDir,
+      chapterRelPath,
+    });
+  }
+
+  /**
+   * 按当前口径重拉上下文栏（ContextColumn 唯一取数入口，chat 的 ledger_upsert 联动也走这里）：
+   * 随章且有当前章 → ledger_chapter_slice（found=false 回退全书）；全书/无当前章 → ledger_read。
+   * 结果落 ledgerPanel，组件以它为唯一渲染源；刷新失败写 ledgerError 不外抛（组件展示区分）。
+   */
+  async refreshLedger(): Promise<void> {
+    this.ledgerLoading = true;
+    this.ledgerError = null;
+    try {
+      const cur = this.ledgerMode === 'chapter' ? work.current : null;
+      if (cur) {
+        const slice = await this.loadChapterSlice(cur.relPath);
+        if (slice.found && slice.ledger) {
+          this.ledgerPanel = { ledger: slice.ledger, dataPath: cur.relPath, chapterTitle: slice.chapterTitle };
+          this.ledgerAt = hms(new Date());
+          return;
+        }
+        // found=false（章不在账本/尚无切片）→ 回退全书
+      }
+      const r = await this.loadLedger();
+      this.ledgerPanel = { ledger: r.ledger, dataPath: r.path, chapterTitle: null };
+      this.ledgerAt = hms(new Date());
+    } catch (err) {
+      this.ledgerError = err instanceof Error ? err.message : String(err);
+    } finally {
+      this.ledgerLoading = false;
+    }
+  }
+
+  /** 轻提示（无还原动作）：采纳后诊断提醒等；复用 SnapshotToast 展示机制，自动消隐。 */
+  showNotice(message: string): void {
+    this.notice = { message };
+    clearTimeout(this.noticeTimer);
+    this.noticeTimer = setTimeout(() => {
+      this.notice = null;
+    }, 6000);
+  }
+
+  dismissNotice(): void {
+    clearTimeout(this.noticeTimer);
+    this.notice = null;
   }
 }
 

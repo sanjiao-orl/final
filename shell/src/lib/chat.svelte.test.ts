@@ -474,6 +474,110 @@ describe('ChatStore · B6 审批联动', () => {
   });
 });
 
+describe('ChatStore · 批三-3 章节挂载（chapter 字段）与账本联动', () => {
+  const CH_NODE = {
+    type: 'chapter' as const,
+    title: '第一章',
+    relPath: 'manuscript/a.md',
+    wordCount: 0,
+    scenes: [] as import('./types.js').SceneNode[],
+    id: 'ch-abc',
+  };
+
+  function doneStream() {
+    return vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+  }
+
+  it('send：scope=ch:<id> 且结构树解析到章 → 请求体带 chapter=relPath（新会话）', async () => {
+    const chatStream = doneStream();
+    const client = streamClient({ chatStream });
+    const chat = new ChatStore();
+    chat.init(client);
+    work.structure = [{ type: 'volume', title: '第一卷', children: [CH_NODE] }];
+    chat.scope = 'ch:ch-abc';
+    await chat.send('帮我看这章');
+    expect(chatStream).toHaveBeenCalledWith(
+      { text: '帮我看这章', workDir: '', scope: 'ch:ch-abc', tier: 'writing', chapter: 'manuscript/a.md' },
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('send：scope=ch:<id> 且已有会话 → 请求体同样带 chapter', async () => {
+    const chatStream = doneStream();
+    const client = streamClient({ chatStream });
+    const chat = new ChatStore();
+    chat.init(client);
+    chat.sessionId = 's1';
+    work.structure = [{ type: 'volume', title: '第一卷', children: [CH_NODE] }];
+    chat.scope = 'ch:ch-abc';
+    await chat.send('继续');
+    expect(chatStream).toHaveBeenCalledWith(
+      { sessionId: 's1', text: '继续', workDir: '', tier: 'writing', chapter: 'manuscript/a.md' },
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('send：scope=ch:<unknown> 结构树解析不到 → 不带 chapter', async () => {
+    const chatStream = doneStream();
+    const client = streamClient({ chatStream });
+    const chat = new ChatStore();
+    chat.init(client);
+    work.structure = [];
+    chat.scope = 'ch:ghost';
+    await chat.send('这章挂了');
+    expect(chatStream).toHaveBeenCalledWith(
+      { text: '这章挂了', workDir: '', scope: 'ch:ghost', tier: 'writing' },
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('send：非章挂载（vol:）→ 不带 chapter', async () => {
+    const chatStream = doneStream();
+    const client = streamClient({ chatStream });
+    const chat = new ChatStore();
+    chat.init(client);
+    chat.scope = 'vol:第一卷';
+    await chat.send('卷内讨论');
+    expect(chatStream).toHaveBeenCalledWith(
+      { text: '卷内讨论', workDir: '', scope: 'vol:第一卷', tier: 'writing' },
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('refreshAfterTools：ledger_upsert 落定 → 按当前口径重拉上下文栏', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+      h.onToolCall?.({ id: 'l1', name: 'ledger_upsert', args: { kind: 'prop', name: '剑' } });
+      h.onToolResult?.({ id: 'l1', name: 'ledger_upsert', result: { ok: true } });
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const callTool = vi.fn().mockResolvedValue({
+      workDir: 'C:/works/demo',
+      chapterRelPath: 'manuscript/a.md',
+      found: true,
+      chapterTitle: '第一章',
+      ledger: { clock: [], props: [], promises: [], knowledge: [], doNotReexplain: [], protect: [], tripwires: [] },
+      slice: '# 切片',
+    });
+    const client = streamClient({ chatStream, callTool });
+    const chat = new ChatStore();
+    chat.init(client);
+    snapshot.init(client, 'C:/works/demo');
+    work.workDir = 'C:/works/demo';
+    work.current = { relPath: 'manuscript/a.md', title: '第一章', frontmatter: {}, frontmatterRaw: '', savedMd: 'x' };
+    await chat.send('记道具');
+    expect(callTool).toHaveBeenCalledWith('ledger_chapter_slice', {
+      workDir: 'C:/works/demo',
+      chapterRelPath: 'manuscript/a.md',
+    });
+  });
+});
+
 describe('ChatStore · D3 分组与定位', () => {
   it('focusToolsGroupKey 初始为 null，可设可清', () => {
     const chat = new ChatStore();

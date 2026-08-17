@@ -176,4 +176,108 @@ describe('SnapshotStore', () => {
     expect(r.path).toBe('.novel/ledger.md');
     expect(r.ledger.clock).toHaveLength(1);
   });
+
+  // ---------- 批三-3：上下文栏随章切片 / 全书口径 ----------
+
+  const LEDGER_EMPTY = {
+    clock: [] as Array<{ chapters: string[] }>,
+    props: [],
+    promises: [],
+    knowledge: [],
+    doNotReexplain: [],
+    protect: [],
+    tripwires: [],
+  };
+
+  it('refreshLedger：随章口径且有当前章 → ledger_chapter_slice 带 workDir+chapterRelPath，命中用切片', async () => {
+    const client = mockClient({
+      callTool: vi.fn().mockResolvedValue({
+        workDir: 'C:/works/demo',
+        chapterRelPath: 'manuscript/a.md',
+        found: true,
+        chapterTitle: '第一章',
+        ledger: { ...LEDGER_EMPTY, promises: [{ id: 'p1', name: '伏笔', arc: '主线', setups: [], payoffs: [] }] },
+        slice: '# 第一章切片',
+      }),
+    });
+    const s = new SnapshotStore();
+    s.init(client, 'C:/works/demo');
+    work.current = { relPath: 'manuscript/a.md', title: '第一章', frontmatter: {}, frontmatterRaw: '', savedMd: 'x' };
+    await s.refreshLedger();
+    expect(client.callTool).toHaveBeenCalledWith('ledger_chapter_slice', {
+      workDir: 'C:/works/demo',
+      chapterRelPath: 'manuscript/a.md',
+    });
+    expect(s.ledgerPanel?.ledger.promises).toHaveLength(1);
+    expect(s.ledgerPanel?.chapterTitle).toBe('第一章');
+    expect(s.ledgerLoading).toBe(false);
+    expect(s.ledgerAt).not.toBeNull();
+  });
+
+  it('refreshLedger：全书口径 → ledger_read 全书，忽略当前章', async () => {
+    const callTool = vi.fn().mockResolvedValue({ ledger: LEDGER_EMPTY, path: '.novel/ledger.md' });
+    const s = new SnapshotStore();
+    s.init(mockClient({ callTool }), 'C:/works/demo');
+    s.ledgerMode = 'all';
+    work.current = { relPath: 'manuscript/a.md', title: '第一章', frontmatter: {}, frontmatterRaw: '', savedMd: 'x' };
+    await s.refreshLedger();
+    expect(callTool).toHaveBeenCalledWith('ledger_read', { workDir: 'C:/works/demo' });
+    expect(callTool).not.toHaveBeenCalledWith('ledger_chapter_slice', expect.anything());
+    expect(s.ledgerPanel?.chapterTitle).toBeNull();
+    expect(s.ledgerPanel?.dataPath).toBe('.novel/ledger.md');
+  });
+
+  it('refreshLedger：随章口径但无当前章 → 回退 ledger_read 全书', async () => {
+    const callTool = vi.fn().mockResolvedValue({ ledger: LEDGER_EMPTY, path: '.novel/ledger.md' });
+    const s = new SnapshotStore();
+    s.init(mockClient({ callTool }), 'C:/works/demo');
+    work.current = null;
+    await s.refreshLedger();
+    expect(callTool).toHaveBeenCalledWith('ledger_read', { workDir: 'C:/works/demo' });
+    expect(callTool).not.toHaveBeenCalledWith('ledger_chapter_slice', expect.anything());
+    expect(s.ledgerPanel?.chapterTitle).toBeNull();
+  });
+
+  it('refreshLedger：切片 found=false → 回退 ledger_read 全书', async () => {
+    const callTool = vi
+      .fn()
+      .mockResolvedValueOnce({
+        workDir: 'C:/works/demo',
+        chapterRelPath: 'manuscript/a.md',
+        found: false,
+        chapterTitle: null,
+        ledger: LEDGER_EMPTY,
+        slice: '',
+      })
+      .mockResolvedValueOnce({ ledger: LEDGER_EMPTY, path: '.novel/ledger.md' });
+    const s = new SnapshotStore();
+    s.init(mockClient({ callTool }), 'C:/works/demo');
+    work.current = { relPath: 'manuscript/a.md', title: '第一章', frontmatter: {}, frontmatterRaw: '', savedMd: 'x' };
+    await s.refreshLedger();
+    expect(callTool).toHaveBeenNthCalledWith(1, 'ledger_chapter_slice', {
+      workDir: 'C:/works/demo',
+      chapterRelPath: 'manuscript/a.md',
+    });
+    expect(callTool).toHaveBeenNthCalledWith(2, 'ledger_read', { workDir: 'C:/works/demo' });
+    expect(s.ledgerPanel?.chapterTitle).toBeNull();
+    expect(s.ledgerPanel?.dataPath).toBe('.novel/ledger.md');
+  });
+
+  it('refreshLedger 失败：ledgerError 展示，不外抛', async () => {
+    const s = new SnapshotStore();
+    s.init(mockClient({ callTool: vi.fn().mockRejectedValue(new Error('core 掉线')) }), 'C:/works/demo');
+    await s.refreshLedger();
+    expect(s.ledgerError).toContain('core 掉线');
+    expect(s.ledgerLoading).toBe(false);
+    expect(s.ledgerPanel).toBeNull();
+  });
+
+  it('showNotice：设置无还原动作的轻提示，dismiss 清空', async () => {
+    const s = new SnapshotStore();
+    s.init(mockClient(), 'd');
+    s.showNotice('诊断现存 2 条(含 1 条 MAJOR/BLOCKER)');
+    expect(s.notice?.message).toContain('诊断现存 2 条');
+    s.dismissNotice();
+    expect(s.notice).toBeNull();
+  });
 });

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CoreClient, RewriteStreamHandlers } from './core.js';
 import type { Candidate } from './types.js';
 import { CandidatesStore } from './candidates.svelte.js';
+import { snapshot } from './snapshot.svelte.js';
 import { work } from './work.svelte.js';
 
 const CAND: Candidate = {
@@ -249,5 +250,76 @@ describe('CandidatesStore', () => {
       instruction: '润色 / 整改：加细节',
     });
     expect(store.allItems[0]?.proposed).toBe('整改完成'); // 完成后 loadAll 刷新一致
+  });
+});
+
+describe('CandidatesStore · 采纳后自动诊断（批三-3）', () => {
+  beforeEach(() => {
+    snapshot.dismissNotice();
+  });
+
+  const flush = () => new Promise<void>((r) => setTimeout(r, 0));
+
+  function adoptContext(overrides: Record<string, unknown> = {}): { store: CandidatesStore; callTool: ReturnType<typeof vi.fn> } {
+    const patchCandidate = vi.fn().mockResolvedValue({ candidate: CAND });
+    const callTool = vi.fn((name: string) => {
+      if (name === 'ledger_diagnostics') {
+        return Promise.resolve({
+          findings: [
+            { severity: 'MAJOR', category: 'clock', message: '时钟冲突' },
+            { severity: 'BLOCKER', category: 'promise', message: '伏笔未收' },
+          ],
+          hasBlockers: true,
+          blockerCount: 1,
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+    const client = clientOf({ patchCandidate, callTool, ...overrides });
+    const store = new CandidatesStore();
+    store.init(client);
+    work.init(client, 'C:/works/demo');
+    work.current = { relPath: '章节A.md', title: '章节A', frontmatter: {}, frontmatterRaw: '---\n---\n', savedMd: '原文X' };
+    work.registerEditor({ getMd: () => '原文X改写X', applyEdit: () => 'ok' });
+    store.items = [CAND];
+    store.toggleSelect('c1');
+    return { store, callTool };
+  }
+
+  it('adoptSelected：采纳落定后诊断有 findings → 弹无还原动作的轻提示（含 MAJOR/BLOCKER 计数）', async () => {
+    const { store, callTool } = adoptContext();
+    await store.adoptSelected();
+    await flush();
+    expect(callTool).toHaveBeenCalledWith('ledger_diagnostics', {
+      workDir: 'C:/works/demo',
+      issueLogPath: 'editorial_notes/issues.md',
+    });
+    expect(snapshot.notice?.message).toContain('诊断现存 2 条');
+    expect(snapshot.notice?.message).toContain('含 2 条 MAJOR/BLOCKER');
+  });
+
+  it('adoptSelected：诊断无 findings → 不弹提示（不打扰）', async () => {
+    const { store } = adoptContext({
+      callTool: vi.fn((name: string) => {
+        if (name === 'ledger_diagnostics') return Promise.resolve({ findings: [], hasBlockers: false, blockerCount: 0 });
+        return Promise.resolve(undefined);
+      }),
+    });
+    await store.adoptSelected();
+    await flush();
+    expect(snapshot.notice).toBeNull();
+  });
+
+  it('adoptSelected：诊断调用失败 → 静默不弹提示', async () => {
+    const { store } = adoptContext({
+      callTool: vi.fn((name: string) => {
+        if (name === 'ledger_diagnostics') return Promise.reject(new Error('core 掉线'));
+        return Promise.resolve(undefined);
+      }),
+    });
+    await store.adoptSelected();
+    await flush();
+    expect(snapshot.notice).toBeNull();
+    expect(work.error).toBeNull(); // 不污染采纳主链路
   });
 });

@@ -172,7 +172,15 @@ export class CoreClient {
 
   /** POST /v1/chat 的 SSE 流：手工解析帧，text-delta 经 DeltaBatcher 批次后才进 onDelta。 */
   async chatStream(
-    body: { sessionId?: string; text: string; workDir?: string; scope?: string; tier?: 'writing' | 'background' },
+    body: {
+      sessionId?: string;
+      text: string;
+      workDir?: string;
+      scope?: string;
+      tier?: 'writing' | 'background';
+      /** 章节挂载（scope=ch:…）时携带的当前章 relPath。 */
+      chapter?: string;
+    },
     handlers: ChatStreamHandlers,
     signal?: AbortSignal,
   ): Promise<void> {
@@ -200,7 +208,7 @@ export class CoreClient {
 
   /** POST /v1/rewrite 的 SSE 流：纯改写（无工具、不落库），done 带完整改写文本。 */
   async rewriteStream(
-    body: { original: string; instruction: string },
+    body: { workDir?: string; original: string; instruction: string },
     handlers: RewriteStreamHandlers,
     signal?: AbortSignal,
   ): Promise<void> {

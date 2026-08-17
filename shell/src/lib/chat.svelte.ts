@@ -8,7 +8,7 @@
  * 改名覆盖显示标题、归档从列表隐藏。
  */
 import type { CoreClient } from './core.js';
-import type { SessionRow } from './types.js';
+import type { ChapterNode, SessionRow } from './types.js';
 import { approval } from './approval.svelte.js';
 import { settings } from './settings.svelte.js';
 import { snapshot } from './snapshot.svelte.js';
@@ -172,14 +172,20 @@ export class ChatStore {
     this.streamAbort?.abort();
   }
 
+  /** 当前挂载章节点（scope='ch:' 前缀）：按 frontmatter 稳定 id 或 relPath 解析；解析不到返回 null。 */
+  private chapterNodeForScope(): ChapterNode | null {
+    if (!this.scope.startsWith('ch:')) return null;
+    const key = this.scope.slice(3);
+    return work.findChapterById(key) ?? work.findChapter(key);
+  }
+
   /** 当前挂载点的人类可读标签（会话栏/对话栏标题用）。 */
   scopeLabel(): string {
     if (this.scope === '') return '无归属';
     if (this.scope === 'work') return '作品根';
     if (this.scope.startsWith('vol:')) return this.scope.slice(4);
     if (this.scope.startsWith('ch:')) {
-      const key = this.scope.slice(3);
-      const node = work.findChapterById(key) ?? work.findChapter(key);
+      const node = this.chapterNodeForScope();
       return node?.title ?? '本章';
     }
     return this.scope;
@@ -361,9 +367,11 @@ export class ChatStore {
     const ac = new AbortController();
     this.streamAbort = ac;
     try {
+      // 批三-3：章节挂载（scope=ch:…）时把当前章 relPath 带给 core（账本切片/章上下文用）；解析不到不带。
+      const chapterNode = this.chapterNodeForScope();
       const body = this.sessionId
-        ? { sessionId: this.sessionId, text: trimmed, workDir: work.workDir, tier: this.tier }
-        : { text: trimmed, workDir: work.workDir, scope: this.scope, tier: this.tier };
+        ? { sessionId: this.sessionId, text: trimmed, workDir: work.workDir, tier: this.tier, ...(chapterNode ? { chapter: chapterNode.relPath } : {}) }
+        : { text: trimmed, workDir: work.workDir, scope: this.scope, tier: this.tier, ...(chapterNode ? { chapter: chapterNode.relPath } : {}) };
       await this.client.chatStream(body, {
         onDelta: (t) => {
           const m = this.messages[idx];
@@ -468,9 +476,12 @@ export class ChatStore {
       const rel = (t.args as { relPath?: string } | null | undefined)?.relPath;
       return typeof rel === 'string' && work.current?.relPath === rel;
     });
+    // 批三-3：账本被 AI 改过（ledger_upsert）→ 上下文栏按当前口径（随章切片/全书）重拉。
+    const touchedLedger = done.some((t) => t.name === 'ledger_upsert');
     try {
       if (changedStructure || wroteChapter) await work.loadStructure();
       if (wroteCurrent) await work.reloadCurrent();
+      if (touchedLedger) void snapshot.refreshLedger();
     } catch (err) {
       console.warn('AI 写完自动刷新失败：', err);
     }

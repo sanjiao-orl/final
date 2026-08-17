@@ -6,13 +6,24 @@ import { z } from 'zod';
 import { getLlmTimeoutSeconds } from './config.js';
 import { EventPump } from './event-pump.js';
 import { toPublicErrorMessage, writeJson } from './http.js';
-import { loadPrompt } from './prompts.js';
+import { loadPrompt, loadStyleSummary } from './prompts.js';
+import { normalizeWorkDir } from './workdir.js';
 
 export const rewriteBodySchema = z.object({
   /** 选区原文（锚定文本，改写对象）。 */
   original: z.string().min(1).max(20_000),
   /** 改写指令；空串 = 只做文字润色。 */
   instruction: z.string().max(2_000).default(''),
+  /**
+   * 壳当前打开的作品文件夹绝对路径（可选）：有则拼声口档案摘要进系统提示末尾，让改写贴合本书声口。
+   * 上限 500 字符并拒绝控制字符——口径同 chat（workDir 会拼进系统提示，控制字符可破出提示行，注入面）。
+   */
+  workDir: z
+    .string()
+    .min(1)
+    .max(500)
+    .refine((s) => !/[\x00-\x1f\x7f]/.test(s), '不能包含控制字符')
+    .optional(),
 });
 export type RewriteBody = z.infer<typeof rewriteBodySchema>;
 
@@ -39,6 +50,8 @@ export async function handleRewriteRequest(
     return;
   }
   const { original, instruction } = parsed.data;
+  // workDir 清洗：归一化并校验存在且为目录（不合法抛 400，见 workdir.ts normalizeWorkDir，与 chat 同源）。
+  const workDir = parsed.data.workDir ? normalizeWorkDir(parsed.data.workDir) : undefined;
 
   // 断连中止：只挂 res.on('close')——请求体在进入本函数前已被路由层读完，
   // 此刻再注册 req.on('close') 已无意义（request 侧事件早已完成），只会误导排查。
@@ -53,9 +66,17 @@ export async function handleRewriteRequest(
   const pump = new EventPump(res, undefined, req.headers.origin);
   pump.start();
   try {
+    // 每次请求现取（mtime 感知热重载，改文件即生效）；有 workDir 时末尾拼声口摘要段（style.md 无摘要则不拼）。
+    let system = loadPrompt('rewrite'); // rewrite.md 契约不动
+    if (workDir) {
+      const summary = loadStyleSummary(workDir);
+      if (summary) {
+        system += `\n\n## 声口摘要\n${summary}`;
+      }
+    }
     const result = streamText({
       model: deps.modelForTier('writing'),
-      system: loadPrompt('rewrite'), // 每次请求现取（mtime 感知热重载，改文件即生效）
+      system,
       prompt: `【原文】\n${original}\n\n【改写指令】\n${instruction || '（无）'}`,
       abortSignal: AbortSignal.any([abort.signal, timeoutSignal]),
     });

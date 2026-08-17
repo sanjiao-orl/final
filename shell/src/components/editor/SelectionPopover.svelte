@@ -86,7 +86,7 @@
     const text = await candidates.rewriteText(original, variant, (t) => {
       progress = t.length;
       draft = t; // 增量追加显示（30–50ms 批次）
-    });
+    }, work.workDir);
     polishing = false;
     draft = '';
     if (text === null) return;

@@ -1,6 +1,4 @@
 // 模块职责：POST /v1/chat 的 SSE 聊天管道——落库用户消息 → streamText 多轮工具流 → 逐条转发 SSE → done 前落库完整 assistant 消息；客户端断连中止 LLM 请求。
-import fs from 'node:fs';
-import path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   stepCountIs,
@@ -15,8 +13,9 @@ import { z } from 'zod';
 import type { MessageRow, SessionRow, SessionStore } from './session-store.js';
 import { getLlmTimeoutSeconds, type Tier } from './config.js';
 import { EventPump } from './event-pump.js';
-import { HttpError, toPublicErrorMessage, writeJson } from './http.js';
-import { listSkills, loadPrompt } from './prompts.js';
+import { toPublicErrorMessage, writeJson } from './http.js';
+import { listSkills, loadPrompt, loadStyleSummary } from './prompts.js';
+import { normalizeWorkDir } from './workdir.js';
 
 export const chatBodySchema = z.object({
   sessionId: z.string().uuid().optional(),
@@ -34,6 +33,16 @@ export const chatBodySchema = z.object({
     .optional(),
   /** 新建会话的讨论归属：'' = 无归属；章 relPath = 章节内讨论。已存在的会话忽略此字段。 */
   scope: z.string().max(500).optional(),
+  /**
+   * 会话挂载章的 relPath（manuscript/ 内 .md）：壳在章挂载会话的每条请求带出，
+   * 供数据层账本切片注入（ledger_chapter_slice）。上限 500 字符并拒绝控制字符——口径同 workDir
+   * （章 relPath 会原样拼进系统提示，控制字符可破出提示行，注入面）。
+   */
+  chapter: z
+    .string()
+    .max(500)
+    .refine((s) => !/[\x00-\x1f\x7f]/.test(s), '不能包含控制字符')
+    .optional(),
 });
 export type ChatBody = z.infer<typeof chatBodySchema>;
 
@@ -47,27 +56,28 @@ export interface ChatDeps {
   toolsAvailable?: () => boolean;
 }
 
-/**
- * workDir 清洗：path.resolve 归一并校验存在且为目录；不合法抛 HttpError(400)。
- * 控制字符已在 schema 层拒绝（注入面），这里兜底路径合法性——非法目录名要么拼进系统提示、要么让模型工具拿无效路径。
- */
-function normalizeWorkDir(raw: string): string {
-  const resolved = path.resolve(raw);
-  let stat: fs.Stats;
-  try {
-    stat = fs.statSync(resolved);
-  } catch {
-    throw new HttpError(400, `workDir 路径不存在: ${raw}`);
-  }
-  if (!stat.isDirectory()) {
-    throw new HttpError(400, `workDir 不是目录: ${raw}`);
-  }
-  return resolved;
+/** ledger_chapter_slice 工具名：core 侧数据层注入契约（domain 并行开发的账本按章切片工具）。 */
+const LEDGER_CHAPTER_SLICE_TOOL = 'ledger_chapter_slice';
+
+interface ChapterSlice {
+  found: boolean;
+  slice: string;
+  chapterTitle: string | null;
 }
 
-/** 壳传入当前作品文件夹时，拼进系统提示：调领域工具一律用这个 workDir；此时才注入可用 skill 清单（skill_read 的 workDir 必填，无 workDir 时模型无合法取值）。 */
-function systemPrompt(workDir: string | undefined): string {
+/**
+ * 组装系统提示：按决策 0010 注入面分层——契约层（prompt md + workDir 行 + skill 清单，现有不动）→
+ * 姿态层（批三-4 角色注入占位，本批无）→ 数据层（声口摘要 + 本章账本切片，缺则静默跳过）。
+ * 数据层账本切片需要调 domain 工具，故为 async（可挂 abortSignal，超时/断连可中止）。
+ */
+async function systemPrompt(
+  workDir: string | undefined,
+  chapter: string | undefined,
+  tools: ToolSet | undefined,
+  abortSignal: AbortSignal
+): Promise<string> {
   // 每次请求现取 prompt（mtime 感知热重载，改文件即生效），不再用模块级常量缓存。
+  // 契约层：提示词文件 + workDir 行 + skill 清单（现有不动）
   let prompt = loadPrompt('chat');
   if (workDir) {
     prompt += `\n当前打开的作品文件夹：${workDir}。调用领域工具时 workDir 参数一律使用这个路径。`;
@@ -77,7 +87,102 @@ function systemPrompt(workDir: string | undefined): string {
       prompt += `\n\n## 可用 skill\n${lines}\n需要时调用领域工具 skill_read 传入 name 获取该 skill 正文并按其执行。`;
     }
   }
+  // 姿态层（批三-4 角色注入占位，本批无）
+
+  // 数据层 a：声口摘要（style.md 有摘要才注，缺则静默跳过）
+  if (workDir) {
+    const summary = loadStyleSummary(workDir);
+    if (summary) {
+      prompt += `\n\n## 声口摘要\n${summary}`;
+    }
+  }
+  // 数据层 b：本章账本切片（章挂载会话 + domain 工具可用才注；工具缺失/报错/超时 warn 降级，不阻断聊天）
+  if (workDir && chapter && tools) {
+    const sliceResult = await fetchChapterSlice(workDir, chapter, tools, abortSignal);
+    if (sliceResult?.found && sliceResult.slice) {
+      prompt += `\n\n## 本章账本切片(${sliceResult.chapterTitle ?? chapter})\n仅含与当前章相关的账本条目，非全书。\n\n${sliceResult.slice}`;
+    }
+  }
   return prompt;
+}
+
+/**
+ * 数据层账本切片：仿 review.ts 的 MCP 工具调用模式调 ledger_chapter_slice。
+ * 工具缺失/调用失败（含超时）→ console.warn 并返回 undefined（跳过注入，不阻断聊天）。
+ */
+async function fetchChapterSlice(
+  workDir: string,
+  chapter: string,
+  tools: ToolSet,
+  abortSignal: AbortSignal
+): Promise<ChapterSlice | undefined> {
+  const tool = tools[LEDGER_CHAPTER_SLICE_TOOL];
+  if (!tool?.execute) {
+    console.warn('[chat] ledger_chapter_slice 工具不可用（domain MCP 未连接或工具不存在），跳过本章账本切片注入');
+    return undefined;
+  }
+  try {
+    const result: unknown = await tool.execute({ workDir, chapterRelPath: chapter } as never, {
+      toolCallId: 'chat-ledger-chapter-slice',
+      messages: [],
+      context: undefined,
+      abortSignal,
+    });
+    return extractChapterSlice(result);
+  } catch (err) {
+    console.warn(
+      '[chat] ledger_chapter_slice 调用失败，跳过本章账本切片注入：',
+      err instanceof Error ? err.message : err
+    );
+    return undefined;
+  }
+}
+
+/** 从 ledger_chapter_slice 结果提取 {found, slice, chapterTitle}：兼容 structuredContent / 直接返回对象 / content text JSON 三态（review.ts extractSlice 同口径）；格式不识别返回 undefined（降级跳过）。 */
+function extractChapterSlice(result: unknown): ChapterSlice | undefined {
+  if (!result || typeof result !== 'object') return undefined;
+  const r = result as {
+    isError?: unknown;
+    structuredContent?: unknown;
+    found?: unknown;
+    slice?: unknown;
+    chapterTitle?: unknown;
+    content?: Array<{ type?: string; text?: string }>;
+  };
+  const text = r.content?.find((c) => c && c.type === 'text' && typeof c.text === 'string')?.text;
+  if (r.isError) {
+    console.warn(`[chat] ledger_chapter_slice 执行失败：${text ?? '未知错误'}`);
+    return undefined;
+  }
+
+  const candidates: unknown[] = [];
+  if (r.structuredContent !== undefined) candidates.push(r.structuredContent);
+  if (r.found !== undefined || r.slice !== undefined || r.chapterTitle !== undefined) candidates.push(r);
+  if (text !== undefined) {
+    try {
+      candidates.push(JSON.parse(text));
+    } catch {
+      candidates.push(text);
+    }
+  }
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string') {
+      const trimmed = candidate.trim();
+      if (trimmed) return { found: true, slice: trimmed, chapterTitle: null };
+      continue;
+    }
+    if (candidate && typeof candidate === 'object') {
+      const c = candidate as { found?: unknown; slice?: unknown; chapterTitle?: unknown };
+      if (typeof c.slice === 'string') {
+        return {
+          found: typeof c.found === 'boolean' ? c.found : c.slice !== '',
+          slice: c.slice,
+          chapterTitle: typeof c.chapterTitle === 'string' && c.chapterTitle.length > 0 ? c.chapterTitle : null,
+        };
+      }
+    }
+  }
+  return undefined;
 }
 
 /** 多轮工具调用的步数上限。 */
@@ -311,12 +416,15 @@ export async function handleChatRequest(
   };
   try {
     const model = deps.modelForTier(tier);
+    // 统一中止信号：服务端超时 + 客户端断连，先于 streamText 的数据层账本切片调用也挂在这里（超时即中止）。
+    const combinedSignal = AbortSignal.any([abort.signal, timeoutSignal]);
     const options: Parameters<typeof streamText>[0] = {
       model,
-      system: systemPrompt(workDir),
+      // 分层组装：契约层 + 姿态层（占位）+ 数据层（声口摘要/本章账本切片，见 systemPrompt）。
+      system: await systemPrompt(workDir, parsed.data.chapter, deps.tools, combinedSignal),
       messages: buildReplayMessages(deps.store.listMessages(sessionId)),
       stopWhen: stepCountIs(MAX_STEPS),
-      abortSignal: AbortSignal.any([abort.signal, timeoutSignal]),
+      abortSignal: combinedSignal,
     };
     if (deps.tools) options.tools = deps.tools;
     const result = streamText(options);

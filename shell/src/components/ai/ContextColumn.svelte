@@ -1,42 +1,30 @@
 <script lang="ts">
   // 上下文栏（v5 新增，D3 五栏之一）：四维账本只读视图 —— 伏笔 / 道具 / 时钟 / 知情。
-  // 数据来源 snapshot.loadLedger（.novel/ledger.md，避硬塞 ledger_upsert）；空态给引导文案。
-  // 行高紧凑（查阅面板不是编辑器）；刷新 = 手动按钮 + 开栏自动取数；最近刷新时间小字。
-  import { onMount } from 'svelte';
+  // 数据源 snapshot 单口径：随章口径（章切片）或全书口径（ledger_read），都在 snapshot store 里取数；
+  // $effect 自动跟随口径/当前章重拉（取代 onMount 单次），刷新按钮保留手动兜底。
+  // 行高紧凑（查阅面板不是编辑器）；最近刷新时间小字。
   import { iconSvg } from '../../lib/icons.js';
   import { snapshot, type LedgerView } from '../../lib/snapshot.svelte.js';
+  import { work } from '../../lib/work.svelte.js';
 
-  type LoadState =
-    | { kind: 'idle' }
-    | { kind: 'loading' }
-    | { kind: 'ready'; ledger: LedgerView; at: string }
-    | { kind: 'error'; message: string };
-
-  let state = $state<LoadState>({ kind: 'idle' });
-
-  /** 短刷：仅 re-fetch，不重 mount 副作用。 */
-  async function refresh(): Promise<void> {
-    state = { kind: 'loading' };
-    try {
-      const r = await snapshot.loadLedger();
-      const at = new Date();
-      const stamp = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}:${String(at.getSeconds()).padStart(2, '0')}`;
-      state = { kind: 'ready', ledger: r.ledger, at: stamp };
-    } catch (err) {
-      state = { kind: 'error', message: err instanceof Error ? err.message : String(err) };
-    }
-  }
-
-  onMount(() => {
-    void refresh();
+  // 口径切换（随章/全书）或切章 → 按当前口径自动重拉；结果实时进 snapshot.ledgerPanel，本组件只读渲染。
+  $effect(() => {
+    void snapshot.ledgerMode;
+    void work.current?.relPath;
+    void snapshot.refreshLedger();
   });
 
-  const ledger = $derived(state.kind === 'ready' ? state.ledger : null);
+  const ledger = $derived(snapshot.ledgerPanel?.ledger ?? null);
   const promisesCount = $derived(ledger?.promises.length ?? 0);
   const propsCount = $derived(ledger?.props.length ?? 0);
   const clockCount = $derived(ledger?.clock.length ?? 0);
   const knowledgeCount = $derived(ledger?.knowledge.length ?? 0);
   const totalEntries = $derived(promisesCount + propsCount + clockCount + knowledgeCount);
+
+  /** 头栏口径标签：跟随实际数据源（ledgerPanel）——切片命中=「本章切片·章名」，全书/回退/未取数=「全书」。 */
+  const scopedLabel = $derived(
+    snapshot.ledgerPanel?.chapterTitle ? `本章切片·${snapshot.ledgerPanel.chapterTitle}` : '全书',
+  );
 
   // ---------- 行渲染用的紧凑字符串 ----------
 
@@ -97,20 +85,29 @@
 <div class="ctx">
   <div class="head">
     <span class="title">四维账本</span>
+    <span class="scope">{scopedLabel}</span>
     <span class="hint">{totalEntries > 0 ? `共 ${totalEntries} 条` : '空账本'}</span>
-    <button class="refresh" onclick={() => void refresh()} title="刷新账本" aria-label="刷新账本">
+    <button
+      class="mode-btn"
+      onclick={() => (snapshot.ledgerMode = snapshot.ledgerMode === 'chapter' ? 'all' : 'chapter')}
+      title={snapshot.ledgerMode === 'chapter' ? '只看当前章切片' : '切回随章切片'}
+      aria-label="切换账本口径"
+    >
+      {snapshot.ledgerMode === 'chapter' ? '随章' : '全书'}
+    </button>
+    <button class="refresh" onclick={() => void snapshot.refreshLedger()} title="刷新账本" aria-label="刷新账本">
       {@html iconSvg('refresh', 13)}
     </button>
   </div>
 
-  {#if state.kind === 'ready' && state.at}
-    <span class="stamp">已刷新 {state.at}</span>
+  {#if snapshot.ledgerAt}
+    <span class="stamp">已刷新 {snapshot.ledgerAt}</span>
   {/if}
 
-  {#if state.kind === 'loading'}
+  {#if snapshot.ledgerLoading}
     <div class="status">加载账本中…</div>
-  {:else if state.kind === 'error'}
-    <div class="status err">加载失败：{state.message}</div>
+  {:else if snapshot.ledgerError}
+    <div class="status err">加载失败：{snapshot.ledgerError}</div>
   {:else if !ledger}
     <div class="status">尚未取数</div>
   {:else}
@@ -216,6 +213,31 @@
     flex: 1;
     font-size: 11px;
     color: var(--muted);
+  }
+  .scope {
+    font-size: 10.5px;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    border-radius: 8px;
+    padding: 1px 7px;
+    white-space: nowrap;
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .mode-btn {
+    height: 20px;
+    padding: 0 8px;
+    font-size: 10.5px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    color: var(--muted);
+    transition: all var(--t-hover);
+    flex: none;
+  }
+  .mode-btn:hover {
+    border-color: var(--accent-line);
+    color: var(--accent);
   }
   .refresh {
     width: 22px;

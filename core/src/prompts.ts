@@ -203,6 +203,64 @@ export function listSkills(workDir?: string): SkillInfo[] {
   return collectSkills(activePromptRoot, workDir);
 }
 
+/** 声口摘要正文最大字符数：远超上下文无益且挤占对话预算，超长截断并加省略标注。 */
+const STYLE_SUMMARY_MAX_CHARS = 1500;
+
+/** 声口档案 style.md 摘要的 mtime 感知缓存（同 loadPrompt 口径：改文件即生效，文件出现/消失触发重读）。 */
+const styleSummaryCache = new Map<string, { mtimeMs: number; value: string | null }>();
+
+/**
+ * 读书级声口档案 <workDir>/.novel/style.md 的摘要（决策 0010 数据层注入）。
+ * 提取 `## 摘要` 节内容（到下一个 `## ` 标题止）；无该节取正文前 1500 字符；
+ * 超 1500 字符截断并加省略标注；文件缺失/不可读返回 null（调用方静默跳过，不阻断）。
+ * mtime 感知缓存：每次调用先 stat，文件 mtimeMs 变化/出现/消失都触发重读（同 loadPrompt 机制）。
+ */
+export function loadStyleSummary(workDir: string): string | null {
+  const file = path.join(workDir, '.novel', 'style.md');
+  let mtimeMs = 0;
+  try {
+    mtimeMs = fs.statSync(file).mtimeMs;
+  } catch {
+    // 文件缺失/不可读：按 0 记，缓存里的真实 mtime 一旦存在即视为变化 → 重读（走 null）。
+  }
+  const cached = styleSummaryCache.get(file);
+  if (cached !== undefined && cached.mtimeMs === mtimeMs) return cached.value;
+  const value = readStyleSummaryUncached(file);
+  styleSummaryCache.set(file, { mtimeMs, value });
+  return value;
+}
+
+function readStyleSummaryUncached(file: string): string | null {
+  let content: string;
+  try {
+    content = fs.readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+  // 容忍 frontmatter（无则 body 即全文），与 prompt/skill 读取同口径。
+  const body = parsePromptFile(content).body;
+  const section = extractSummarySection(body);
+  let summary = section ?? body;
+  if (summary.length > STYLE_SUMMARY_MAX_CHARS) {
+    summary = summary.slice(0, STYLE_SUMMARY_MAX_CHARS) + '\n…（声口摘要超 1500 字符，已截断）';
+  }
+  summary = summary.trim();
+  return summary === '' ? null : summary;
+}
+
+/** 取 `## 摘要` 节正文（到下一个 `## ` 标题止，不含标题行与后续节）；无该节返回 null。 */
+function extractSummarySection(body: string): string | null {
+  const lines = body.split(/\r?\n/);
+  const start = lines.findIndex((line) => /^##\s+摘要\s*$/.test(line));
+  if (start < 0) return null;
+  const parts: string[] = [];
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^##\s+/.test(lines[i]!)) break;
+    parts.push(lines[i]!);
+  }
+  return parts.join('\n').trim();
+}
+
 /** 进程启动即解析根目录并做首次释放（有 NOVEL_PROMPT_DIR 时），后续 loadPrompt/listSkills 都从这里取。 */
 const activePromptRoot: string = (() => {
   const root = resolvePromptRoot(process.env);

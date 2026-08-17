@@ -6,11 +6,14 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   applyOps,
+  chapterOrderForWork,
   countBlockers,
   diagnoseChapterHeadJump,
   diagnoseSeasonConflict,
   diagnosticsForWork,
   emptyLedger,
+  filterLedgerForChapter,
+  ledgerChapterSlice,
   ledgerDiagnostics,
   ledgerSlice,
   parseLedger,
@@ -19,6 +22,7 @@ import {
   serializeLedger,
   upsertLedger,
   writeLedger,
+  writeMeta,
   type Ledger,
   type LedgerOp,
 } from '../src/ledger.js';
@@ -1096,5 +1100,310 @@ describe('diagnosticsForWork（端到端）', () => {
     // 白名单内但文件缺失 → 仍计 0（与「缺失计 0」口径一致）
     const res = diagnosticsForWork(work, undefined, 'editorial_notes/issues.md');
     expect(res.blockerCount).toBe(0);
+  });
+});
+
+const SLICE_ORDER: { relPath: string; title: string }[] = [
+  { relPath: 'manuscript/卷一/第1章.md', title: '第1章' },
+  { relPath: 'manuscript/卷一/第2章.md', title: '第2章' },
+  { relPath: 'manuscript/卷一/第3章.md', title: '第3章' },
+  { relPath: 'manuscript/卷一/第4章.md', title: '第4章' },
+];
+
+describe('filterLedgerForChapter（按章过滤，批三-3）', () => {
+  it('relPath 不在 chapterOrder 内 → 返回 null', () => {
+    expect(filterLedgerForChapter(emptyLedger(), SLICE_ORDER, 'manuscript/卷一/不存在.md')).toBeNull();
+  });
+
+  it('clock：跨度行含当前/过去章即保留；整段都在未来的行才删', () => {
+    const ledger: Ledger = {
+      ...emptyLedger(),
+      clock: [
+        { chapters: ['manuscript/卷一/第1章.md'], storyDay: '第1日' },
+        { chapters: ['manuscript/卷一/第2章.md'], storyDay: '第2日' },
+        { chapters: ['manuscript/卷一/第3章.md'], storyDay: '第3日' }, // 未来章 → 删
+        { chapters: ['manuscript/旧/未知.md'], storyDay: '第9日' }, // 未知章 → 留
+        { chapters: ['manuscript/卷一/第1章.md', 'manuscript/卷一/第3章.md'], storyDay: '双章' }, // 跨第1-3章,第2章仍在跨度内 → 留
+        { chapters: ['manuscript/卷一/第3章.md', 'manuscript/卷一/第4章.md'], storyDay: '未来跨度' }, // 整段未来 → 删
+      ],
+    };
+    const out = filterLedgerForChapter(ledger, SLICE_ORDER, 'manuscript/卷一/第2章.md')!;
+    expect(out.clock.map((r) => r.chapters)).toEqual([
+      ['manuscript/卷一/第1章.md'],
+      ['manuscript/卷一/第2章.md'],
+      ['manuscript/旧/未知.md'],
+      ['manuscript/卷一/第1章.md', 'manuscript/卷一/第3章.md'],
+    ]);
+  });
+
+  it('props：托管链裁到 ≤idx，链空整条删，其余字段保留', () => {
+    const ledger: Ledger = {
+      ...emptyLedger(),
+      props: [
+        {
+          name: '铜钱',
+          type: '信物',
+          holder: '林渡',
+          status: '磨亮',
+          custody: [
+            { chapter: 'manuscript/卷一/第1章.md', holder: '师父' },
+            { chapter: 'manuscript/卷一/第3章.md', holder: '阿九' }, // 未来链节 → 裁掉
+          ],
+        },
+        { name: '木剑', holder: '路人', custody: [{ chapter: 'manuscript/卷一/第3章.md', holder: '路人' }] }, // 裁后链空 → 整条删
+        { name: '信物', custody: [{ chapter: 'manuscript/旧/未知.md', holder: '?' }] }, // 未知章 → 留
+      ],
+    };
+    const out = filterLedgerForChapter(ledger, SLICE_ORDER, 'manuscript/卷一/第2章.md')!;
+    expect(out.props.map((p) => p.name)).toEqual(['铜钱', '信物']);
+    const tong = out.props[0]!;
+    expect(tong.custody).toEqual([{ chapter: 'manuscript/卷一/第1章.md', holder: '师父' }]);
+    expect(tong.holder).toBe('林渡'); // 链裁掉后当前 holder 原样保留
+    expect(tong.type).toBe('信物');
+  });
+
+  it('promises：未来 planted 删、过去 resolution 删、当前章 resolution 必留、未知章保留、多节伏笔仍存活即留', () => {
+    const ledger: Ledger = {
+      ...emptyLedger(),
+      promises: [
+        { id: 'P-future', name: '未来埋设', arc: 'planted', setups: [{ chapter: 'manuscript/卷一/第3章.md' }], payoffs: [] },
+        { id: 'P-now', name: '当前埋设', arc: 'planted', setups: [{ chapter: 'manuscript/卷一/第2章.md' }], payoffs: [] },
+        { id: 'P-past-r', name: '早回收', arc: 'resolved', setups: [{ chapter: 'manuscript/卷一/第1章.md' }], payoffs: [{ chapter: 'manuscript/卷一/第1章.md' }] },
+        { id: 'P-now-r', name: '当前回收', arc: 'resolved', setups: [{ chapter: 'manuscript/卷一/第1章.md' }], payoffs: [{ chapter: 'manuscript/卷一/第2章.md' }] },
+        { id: 'P-un', name: '未知章', arc: 'planted', setups: [{ chapter: 'manuscript/旧/未知.md' }], payoffs: [{ chapter: 'manuscript/旧/未知2.md' }] },
+        // 已埋过第1章、第3章还要推进 → 存活保留(只删「全部埋设点都在未来」的未开埋伏笔)
+        { id: 'P-multi', name: '多埋设含未来', arc: 'planted', setups: [{ chapter: 'manuscript/卷一/第1章.md' }, { chapter: 'manuscript/卷一/第3章.md' }], payoffs: [] },
+        // 第1章收了一节、第3章还有一节待收 → 存活保留(只删「全部回收点都在过去」的已完结伏笔)
+        { id: 'P-multi-r', name: '多节回收半完成', arc: 'pending', setups: [{ chapter: 'manuscript/卷一/第1章.md' }], payoffs: [{ chapter: 'manuscript/卷一/第1章.md' }, { chapter: 'manuscript/卷一/第3章.md' }] },
+      ],
+    };
+    const out = filterLedgerForChapter(ledger, SLICE_ORDER, 'manuscript/卷一/第2章.md')!;
+    expect(out.promises.map((p) => p.id)).toEqual(['P-now', 'P-now-r', 'P-un', 'P-multi', 'P-multi-r']);
+  });
+
+  it('knowledge：since 未来删、无 since/≤idx/未知章留、doesNotKnow 同口径、refs 透传', () => {
+    const ledger: Ledger = {
+      ...emptyLedger(),
+      knowledge: [
+        {
+          character: '林渡',
+          knows: [
+            { fact: '无锚事实' },
+            { fact: '第1章得知', since: 'manuscript/卷一/第1章.md' },
+            { fact: '第3章得知', since: 'manuscript/卷一/第3章.md' }, // 未来 → 删
+            { fact: '未知章得知', since: 'manuscript/旧/未知.md' },
+            { fact: '带回指', since: 'manuscript/卷一/第1章.md', refs: ['P1', 'P2'] },
+          ],
+          doesNotKnow: [{ fact: '他不知道的' }, { fact: '未来才知道', since: 'manuscript/卷一/第4章.md' }],
+          visibility: 'secret',
+          knownBy: ['作者'],
+        },
+      ],
+    };
+    const out = filterLedgerForChapter(ledger, SLICE_ORDER, 'manuscript/卷一/第2章.md')!;
+    const k = out.knowledge[0]!;
+    expect(k.knows).toEqual([
+      { fact: '无锚事实' },
+      { fact: '第1章得知', since: 'manuscript/卷一/第1章.md' },
+      { fact: '未知章得知', since: 'manuscript/旧/未知.md' },
+      { fact: '带回指', since: 'manuscript/卷一/第1章.md', refs: ['P1', 'P2'] },
+    ]);
+    expect(k.doesNotKnow).toEqual([{ fact: '他不知道的' }]);
+    expect(k.visibility).toBe('secret');
+    expect(k.knownBy).toEqual(['作者']);
+  });
+
+  it('其余各节（注册表/PROTECT/tripwires/extra）原样透传且不 mutate 入参', () => {
+    const ledger: Ledger = {
+      ...emptyLedger(),
+      doNotReexplain: ['a'],
+      protect: [{ item: 'b', reason: 'r' }],
+      tripwires: ['c'],
+      extra: { custom: { x: 1 } },
+    };
+    const before = JSON.stringify(ledger);
+    const out = filterLedgerForChapter(ledger, SLICE_ORDER, 'manuscript/卷一/第1章.md')!;
+    expect(out.doNotReexplain).toEqual(['a']);
+    expect(out.protect).toEqual([{ item: 'b', reason: 'r' }]);
+    expect(out.tripwires).toEqual(['c']);
+    expect(out.extra).toEqual({ custom: { x: 1 } });
+    expect(JSON.stringify(ledger)).toBe(before);
+  });
+
+  it('第1章切片：unknown/当前章行保留、未来一切删除，promises 需无未来埋设', () => {
+    const ledger: Ledger = {
+      ...emptyLedger(),
+      clock: [{ chapters: ['manuscript/卷一/第1章.md'] }, { chapters: ['manuscript/卷一/第2章.md'] }],
+      promises: [
+        { id: 'P1', name: 'a', arc: 'planted', setups: [{ chapter: 'manuscript/卷一/第1章.md' }], payoffs: [] },
+        { id: 'P2', name: 'b', arc: 'resolved', setups: [{ chapter: 'manuscript/卷一/第1章.md' }], payoffs: [{ chapter: 'manuscript/卷一/第2章.md' }] },
+      ],
+    };
+    const out = filterLedgerForChapter(ledger, SLICE_ORDER, 'manuscript/卷一/第1章.md')!;
+    expect(out.clock).toHaveLength(1); // 只留第1章行
+    // P2 resolution 在未来（第2章 ≥ idx=0）→ 保留（未在本章发生，不算过去噪音）
+    expect(out.promises.map((p) => p.id)).toEqual(['P1', 'P2']);
+  });
+});
+
+describe('ledger_chapter_slice（按章过滤的账本视图，批三-3）', () => {
+  it('found=true：返回过滤后 ledger、渲染 slice 与 chapterTitle', () => {
+    const work = makeWorkDir();
+    writeTree(work, {
+      'manuscript/卷一/第1章.md': '---\ntitle: 第1章\n---\n正文一。',
+      'manuscript/卷一/第2章.md': '---\ntitle: 第2章\n---\n正文二。',
+      'manuscript/卷一/第3章.md': '---\ntitle: 第3章\n---\n正文三。',
+    });
+    const ledger: Ledger = {
+      ...emptyLedger(),
+      clock: [{ chapters: ['manuscript/卷一/第1章.md'], storyDay: '第1日' }],
+      promises: [
+        { id: 'P-now', name: '现在', arc: 'planted', setups: [{ chapter: 'manuscript/卷一/第2章.md' }], payoffs: [] },
+        { id: 'P-future', name: '未来', arc: 'planted', setups: [{ chapter: 'manuscript/卷一/第3章.md' }], payoffs: [] },
+      ],
+    };
+    writeLedger(work, ledger);
+    const res = ledgerChapterSlice(work, 'manuscript/卷一/第2章.md');
+    expect(res.found).toBe(true);
+    expect(res.chapterTitle).toBe('第2章'); // chapterOrder title = 文件名去 .md
+    expect(res.workDir).toBe(path.resolve(work));
+    expect(res.chapterRelPath).toBe('manuscript/卷一/第2章.md');
+    expect(res.ledger.promises.map((p) => p.id)).toEqual(['P-now']);
+    expect(res.ledger.clock).toHaveLength(1);
+    expect(res.slice).toContain('## Position / Clock table');
+    expect(res.slice).toContain('**P-now**');
+    expect(res.slice).not.toContain('**P-future**');
+  });
+
+  it('found=false：章不在序内（文件不存在）→ 空账本 + 空 slice + chapterTitle=null', () => {
+    const work = makeWorkDir();
+    writeTree(work, { 'manuscript/卷一/第1章.md': '正文。' });
+    writeLedger(work, sampleLedger());
+    const res = ledgerChapterSlice(work, 'manuscript/卷一/不存在的章.md');
+    expect(res.found).toBe(false);
+    expect(res.chapterTitle).toBeNull();
+    expect(res.ledger).toEqual(emptyLedger());
+    expect(res.slice).toBe('');
+  });
+
+  it('守卫：chapterRelPath 非 manuscript/ 内 .md 一律拒绝', () => {
+    const work = makeWorkDir();
+    writeTree(work, {
+      'manuscript/第1章.md': '正文。',
+      '全稿-20260101.txt': '全稿',
+      '.novel/ledger.md': serializeLedger(emptyLedger()),
+    });
+    expect(() => ledgerChapterSlice(work, '全稿-20260101.txt')).toThrow(/manuscript/);
+    expect(() => ledgerChapterSlice(work, '.novel/ledger.md')).toThrow(/manuscript/);
+    expect(() => ledgerChapterSlice(work, '../外面.md')).toThrow();
+  });
+
+  it('ledgerPath 走账本白名单：manuscript/ 内文件拒绝', () => {
+    const work = makeWorkDir();
+    writeTree(work, { 'manuscript/第1章.md': '正文。' });
+    expect(() => ledgerChapterSlice(work, 'manuscript/第1章.md', 'manuscript/第1章.md')).toThrow(/ledgerPath/);
+  });
+});
+
+describe('write_meta（书级元数据写入，批三-3）', () => {
+  it('新文件：原子写入 .novel/style.md，返回 { ok, path, bytes } 且无 .tmp 残留', () => {
+    const work = makeWorkDir();
+    const content = '# 书风格\n\n正文风格说明。';
+    const res = writeMeta(work, '.novel/style.md', content);
+    expect(res.ok).toBe(true);
+    expect(res.path).toBe('.novel/style.md');
+    expect(res.bytes).toBe(Buffer.byteLength(content, 'utf8'));
+    expect(fs.readFileSync(path.join(work, '.novel/style.md'), 'utf8')).toBe(content);
+    expect(fs.readdirSync(path.join(work, '.novel'))).toEqual(['style.md']);
+  });
+
+  it('白名单：拒绝 manuscript/、editorial_notes/、.novel/ 子目录与根目录 .md', () => {
+    const work = makeWorkDir();
+    expect(() => writeMeta(work, 'manuscript/第1章.md', 'x')).toThrow(/只允许/);
+    expect(() => writeMeta(work, 'editorial_notes/issues.md', 'x')).toThrow(/只允许/);
+    expect(() => writeMeta(work, '.novel/notes/book.md', 'x')).toThrow(/只允许/);
+    expect(() => writeMeta(work, 'AGENTS.md', 'x')).toThrow(/只允许/);
+  });
+
+  it('目标已存在且可解析为账本 → 拒写，报错指明 ledger_upsert，原账本不被破坏', () => {
+    const work = makeWorkDir();
+    writeLedger(work, sampleLedger());
+    expect(() => writeMeta(work, '.novel/ledger.md', '# 会被拒的元数据')).toThrow(/账本请用 ledger_upsert/);
+    expect(fs.readFileSync(path.join(work, '.novel/ledger.md'), 'utf8')).toContain('铜钱'); // 原样保留
+    expect(readLedger(work).ledger).toEqual(sampleLedger());
+  });
+
+  it('非账本元数据文件可覆盖，写前对旧版本快照进 .novel/history/', () => {
+    const work = makeWorkDir();
+    writeTree(work, { '.novel/style.md': '旧风格。' });
+    writeMeta(work, '.novel/style.md', '新风格。');
+    expect(fs.readFileSync(path.join(work, '.novel/style.md'), 'utf8')).toContain('新风格');
+    const snapDir = path.join(work, '.novel', 'history', '.novel__style');
+    const snaps = fs.readdirSync(snapDir).filter((n) => n.endsWith('.md'));
+    expect(snaps).toHaveLength(1);
+    expect(fs.readFileSync(path.join(snapDir, snaps[0]!), 'utf8')).toBe('旧风格。');
+  });
+
+  it('新文件首写不产生快照', () => {
+    const work = makeWorkDir();
+    writeMeta(work, '.novel/style.md', '风格。');
+    expect(fs.existsSync(path.join(work, '.novel', 'history'))).toBe(false);
+  });
+});
+
+describe('章序修复（编号感知，批三-3 顺带修复）', () => {
+  it('12 章作品 chapterOrderForWork 数值序：第2章 < 第10章（非路径字典序）', () => {
+    const work = makeWorkDir();
+    const files: Record<string, string> = {};
+    for (let n = 1; n <= 12; n++) files[`manuscript/卷一/第${n}章.md`] = `---\ntitle: 第${n}章\n---\n正文 ${n}。`;
+    writeTree(work, files);
+    const order = chapterOrderForWork(work);
+    expect(order).toHaveLength(12);
+    expect(order.map((c) => c.relPath)).toEqual(Array.from({ length: 12 }, (_, i) => `manuscript/卷一/第${i + 1}章.md`));
+  });
+
+  it('writeLedger 渲染 clock 表按编号序：第2章 在 第10章 前（字典序会把第10章排到第2章前）', () => {
+    const work = makeWorkDir();
+    const files: Record<string, string> = {};
+    for (let n = 1; n <= 12; n++) files[`manuscript/卷一/第${n}章.md`] = `正文 ${n}。`;
+    writeTree(work, files);
+    const ledger: Ledger = {
+      ...emptyLedger(),
+      clock: [
+        { chapters: ['manuscript/卷一/第10章.md'], storyDay: '第10日' },
+        { chapters: ['manuscript/卷一/第2章.md'], storyDay: '第2日' },
+        { chapters: ['manuscript/卷一/第1章.md'], storyDay: '第1日' },
+        { chapters: ['manuscript/卷一/第11章.md'], storyDay: '第11日' },
+        { chapters: ['manuscript/卷一/第12章.md'], storyDay: '第12日' },
+      ],
+    };
+    writeLedger(work, ledger, '.novel/review.md');
+    const content = fs.readFileSync(path.join(work, '.novel/review.md'), 'utf8');
+    const table = content.slice(content.indexOf('| Chapters |'));
+    for (const n of [1, 2, 10, 11, 12]) expect(table.indexOf(`第${n}章.md`)).toBeGreaterThan(-1);
+    expect(table.indexOf('第1章.md')).toBeLessThan(table.indexOf('第2章.md'));
+    expect(table.indexOf('第2章.md')).toBeLessThan(table.indexOf('第10章.md'));
+    expect(table.indexOf('第10章.md')).toBeLessThan(table.indexOf('第11章.md'));
+    expect(table.indexOf('第11章.md')).toBeLessThan(table.indexOf('第12章.md'));
+  });
+
+  it('diagnostics 章序数值化：第10章 planted+due=5 不误报逾期（字典序会把第10章排到第2位→误报）', () => {
+    const work = makeWorkDir();
+    const files: Record<string, string> = {};
+    for (let n = 1; n <= 12; n++) files[`manuscript/卷一/第${n}章.md`] = `正文 ${n}。`;
+    writeTree(work, files);
+    upsertLedger(work, [
+      {
+        op: 'promise',
+        entry: {
+          id: 'P1', name: 'x', arc: 'planted', heat: 'HOT', due: 5,
+          setups: [{ chapter: 'manuscript/卷一/第10章.md' }], payoffs: [],
+        },
+      },
+    ]);
+    const res = diagnosticsForWork(work);
+    // 数值序：第10章之后只剩 2 章（< due=5）→ 不逾期；字典序会把第10章排第2位 → 误报逾期
+    expect(res.findings.some((f) => f.code === 'overdue-promise')).toBe(false);
+    expect(res.findings.some((f) => f.code === 'dangling-promise')).toBe(true);
   });
 });

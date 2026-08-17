@@ -10,11 +10,17 @@ import { frontmatterEnd, parseFrontmatter } from './frontmatter.js';
 import {
   assertWorkDir,
   atomicWrite,
+  CHAPTER_NAME_RE,
+  VOLUME_NAME_RE,
   collectMdFiles,
+  compareNames,
+  numOf,
   resolveInside,
   toPosix,
   type MdFile,
 } from './fsutil.js';
+// 旧公共面保持（改名后质量扫描等仍可从 tools.js 引入，避免破坏既有导入）
+export { CHAPTER_NAME_RE, VOLUME_NAME_RE, compareNames } from './fsutil.js';
 export { scanWork as scanQuality } from './qualityScan.js';
 
 // ---------- 字数统计 ----------
@@ -69,55 +75,7 @@ const SCENE_RE = /^###[ \t]+(.+)$/;
 /** 一级标题：单个 # 开头；##、### 不误匹配。 */
 const H1_RE = /^#(?!#)[ \t]+(.+)$/;
 
-/**
- * 命名规范：带编号的章文件名/卷目录名（组 1=编号，阿拉伯或汉字均可；组 2=用户标题部分）。
- * 匹配即“带编号”；不匹配的旧文件/旧目录保持原名不动。
- * 新名/重编号一律输出阿拉伯数字编号（第1章·少年 样式）。
- */
-export const CHAPTER_NAME_RE = /^第(\d+|[一二三四五六七八九十百]+)章[·.、\s]*(.*)$/;
-export const VOLUME_NAME_RE = /^第(\d+|[一二三四五六七八九十百]+)卷[·.、\s]*(.*)$/;
-
-const CN_DIGIT: Record<string, number> = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
-
-/** 编号文本（阿拉伯或汉字）→ 数值；无法解析返回 NaN。 */
-function numOf(s: string): number {
-  if (/^\d+$/.test(s)) return Number.parseInt(s, 10);
-  let total = 0;
-  let section = 0;
-  let num = 0;
-  for (const ch of s) {
-    if (ch === '百') {
-      total += (section + (num || 1)) * 100;
-      section = 0;
-      num = 0;
-    } else if (ch === '十') {
-      section += (num || 1) * 10;
-      num = 0;
-    } else {
-      num = CN_DIGIT[ch] ?? 0;
-    }
-  }
-  return total + section + num;
-}
-
-/**
- * 章/卷文件名比较：编号感知（汉字/阿拉伯编号按数值排，第一章 < 第二章），
- * 未匹配编号模式的名字按字典序兜底。注意：纯字典序会把 三(U+4E09) 排在 二(U+4E8C) 前，
- * 顺序真相必须按编号数值，否则结构树/重排会乱序。scan_quality 的书级连续章判定也复用此比较器。
- */
-export function compareNames(a: string, b: string, re: RegExp): number {
-  const ma = re.exec(a);
-  const mb = re.exec(b);
-  if (ma && mb) {
-    const na = numOf(ma[1]!);
-    const nb = numOf(mb[1]!);
-    if (Number.isFinite(na) && Number.isFinite(nb) && na !== nb) return na - nb;
-  }
-  if (ma && !mb) return -1;
-  if (!ma && mb) return 1;
-  return a < b ? -1 : a > b ? 1 : 0;
-}
-
+/** 收集 manuscript 下全部 .md 章文件（相对 manuscript 的 rel 与绝对路径）。 */
 function collectManuscriptFiles(workDir: string): { files: MdFile[] } {
   const msDir = path.join(assertWorkDir(workDir), 'manuscript');
   return { files: collectMdFiles(msDir) };
