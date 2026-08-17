@@ -1,12 +1,12 @@
 // release.mjs —— 真实发布脚本（零依赖 node）。
 // 职责：工作树预检 → 同步五处版本号（tauri.conf.json、shell/package.json、Cargo.toml、core/package.json、domain/package.json，写完后自检）
 //       → 带签名私钥跑 tauri build → 收集 bundle/.sig → 生成 latest.json → 版本落账（自动 commit/tag/push）→ 发布 release。
-// 发布流程（对网络限速/断流友好，两阶段 + 逐文件重试）：
+// 发布流程（对网络限速/断流友好，幂等续传）：
 //   1) 工作树预检：git status --porcelain 非空则列出脏文件并中止，防止带未提交改动发版；
 //   2) gh release create vX.Y.Z --draft（只带 notes 不带文件；已存在则复用，可幂等续传）；
-//   3) 逐个文件用 curl 直传 uploads.github.com（Bearer token 取 gh auth token，Content-Type application/octet-stream），
-//      每次尝试前先调 API 删除同名 starter 残留资产；失败按 代理(-x http://127.0.0.1:7897 --http1.1) / 直连 两种路由轮换重试
-//      （默认 3 次、间隔 15s），HTTP 201 才算上传成功；
+//   3) 逐个文件用 gh release upload --clobber 上传（gh 走 rustls，根治 Windows curl/schannel 传大文件
+//      握手即卡死的问题——2026-08-17 v0.2.2 发布实证：curl 代理/直连三步全卡 0 字节，gh 同刻传 26MB/40MB 秒级成功；
+//      断传残留由 --clobber 覆盖；失败默认 3 次、间隔 15s 重试）；
 //   4) 全部资产传完才 gh release edit vX.Y.Z --draft=false 发布；任一文件重试耗尽则中止并保留草稿，
 //      打印续传指引——修复网络后重跑同一命令即可（幂等）。
 // 版本落账自动化：build 后自动 git add 六件（tauri.conf.json、shell/package.json、Cargo.toml、core/package.json、domain/package.json、Cargo.lock）
@@ -290,78 +290,22 @@ function releaseExists(repo, version) {
 
 const UPLOAD_MAX_ATTEMPTS = 3;   // 每个文件最大尝试次数
 const UPLOAD_RETRY_SECONDS = 15; // 失败后重试间隔
-const UPLOAD_ROUTES = [          // 路由轮换：代理 HTTP/1.1 → 直连 HTTP/1.1
-  ['-x', 'http://127.0.0.1:7897', '--http1.1'],
-  ['--http1.1'],
-];
 
 function sleep(seconds) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, seconds * 1000);
 }
 
-function ghToken() {
-  const res = runCapture('gh', ['auth', 'token']);
-  if (res.status !== 0 || !res.stdout.trim()) fail('无法获取 GitHub token（gh auth token）');
-  return res.stdout.trim();
-}
-
-function ghReleaseId(repo, tag) {
-  // gh release view --json id 返回的是 node_id（RE_...），不能当 uploads API 的 id 用；
-  // 改走 REST 列表按 tag_name 匹配拿数字 id（uploads.github.com 只认数字 id）。
-  const res = runCapture('gh', ['api', `repos/${repo}/releases`, '--jq', `([.[] | select(.tag_name == "${tag}")] | first).id`]);
-  if (res.status !== 0 || !res.stdout.trim()) fail(`无法获取 release ${tag} 的 ID`);
-  return res.stdout.trim();
-}
-
-// 删除 release 下所有同名资产（清理 gh 失败/断传留下的 starter 半成品）
-function deleteAssetsByName(repo, releaseId, name) {
-  const list = runCapture('gh', ['api', `repos/${repo}/releases/${releaseId}/assets`, '--jq', `.[] | select(.name=="${name}") | .id`]);
-  if (list.status !== 0) return;
-  for (const id of list.stdout.trim().split(/\r?\n/).filter(Boolean)) {
-    const del = runCapture('gh', ['api', '-X', 'DELETE', `repos/${repo}/releases/assets/${id}`]);
-    if (del.status === 0) {
-      console.warn(`[release] 已清理同名 starter 残留资产 #${id}（${name}）`);
-    }
-  }
-}
-
-// 单次 curl 直传 uploads.github.com，返回 HTTP 状态码；连接失败返回 null
-function curlUpload(url, filePath, route, token) {
-  const dataArg = `@${path.resolve(filePath).replace(/\\/g, '/')}`;
-  const res = runCapture('curl', [
-    '-sS', '--max-time', '1200',
-    '-w', '\n%{http_code}',
-    ...route,
-    '-X', 'POST',
-    '-H', `Authorization: Bearer ${token}`,
-    '-H', 'Accept: application/vnd.github+json',
-    '-H', 'Content-Type: application/octet-stream',
-    '--data-binary', dataArg,
-    url,
-  ], { maxBuffer: 8 * 1024 * 1024 });
-  const lines = String(res.stdout || '').split(/\r?\n/).filter(Boolean);
-  const code = lines.length ? lines[lines.length - 1].trim() : '';
-  if (res.status !== 0) {
-    console.warn(`[release] curl 退出码 ${res.status}: ${String(res.stderr || '').trim()}`);
-  }
-  return /^\d{3}$/.test(code) ? code : null;
-}
-
-// 上传单个文件：每次尝试前先删同名残留资产，路由轮换重试，直到 201 或重试耗尽
-function uploadFile(repo, releaseId, file, token) {
+// 经 gh release upload 上传单个文件（--clobber 覆盖同名的断传残留；gh 走 rustls，
+// 根治 Windows curl/schannel 传大文件握手即卡死的问题——2026-08-17 v0.2.2 发布实证）。
+function uploadFile(repo, tag, file) {
   const name = path.basename(file);
-  const url = `https://uploads.github.com/repos/${repo}/releases/${releaseId}/assets?name=${encodeURIComponent(name)}`;
   for (let attempt = 1; attempt <= UPLOAD_MAX_ATTEMPTS; attempt += 1) {
-    deleteAssetsByName(repo, releaseId, name);
-    const route = UPLOAD_ROUTES[(attempt - 1) % UPLOAD_ROUTES.length];
-    const via = route.length > 1 ? '代理 http://127.0.0.1:7897' : '直连';
-    console.log(`[release] 上传 ${name}（第 ${attempt}/${UPLOAD_MAX_ATTEMPTS} 次，${via}）`);
-    const code = curlUpload(url, file, route, token);
-    if (code === '201') {
+    console.log(`[release] 上传 ${name}（第 ${attempt}/${UPLOAD_MAX_ATTEMPTS} 次，gh release upload）`);
+    if (run('gh', ['release', 'upload', tag, '--repo', repo, '--clobber', file]) === 0) {
       console.log(`[release] 上传成功 ${name}`);
       return true;
     }
-    console.warn(`[release] 上传失败 ${name}（HTTP ${code ?? '无响应'}），${UPLOAD_RETRY_SECONDS}s 后重试…`);
+    console.warn(`[release] 上传失败 ${name}，${UPLOAD_RETRY_SECONDS}s 后重试…`);
     if (attempt < UPLOAD_MAX_ATTEMPTS) sleep(UPLOAD_RETRY_SECONDS);
   }
   return false;
@@ -369,10 +313,6 @@ function uploadFile(repo, releaseId, file, token) {
 
 function uploadRelease(repo, version, notes, files) {
   const tag = `v${version}`;
-  if (runCapture('curl', ['--version']).status !== 0) {
-    fail('未找到 curl。请先安装（Windows Git Bash / Linux / macOS 通常自带）。');
-  }
-  const token = ghToken();
 
   // 阶段一：确保草稿 release 存在（只带 notes，不带文件；已存在则复用，幂等续传）
   if (releaseExists(repo, version)) {
@@ -382,14 +322,13 @@ function uploadRelease(repo, version, notes, files) {
     if (status !== 0) fail(`gh release create --draft 失败，退出码 ${status}`);
     console.log(`[release] 已创建草稿 release ${tag}`);
   }
-  const releaseId = ghReleaseId(repo, tag);
 
-  // 阶段二：逐个文件 curl 直传；任一文件重试耗尽即中止，保留草稿供续传
+  // 阶段二：逐个文件 gh release upload；任一文件重试耗尽即中止，保留草稿供续传
   for (const file of files) {
-    if (!uploadFile(repo, releaseId, file, token)) {
+    if (!uploadFile(repo, tag, file)) {
       console.error(`[release] 资产上传失败: ${path.basename(file)}`);
       console.error(`[release] 草稿已保留: https://github.com/${repo}/releases/tag/${tag}`);
-      console.error(`[release] 请修复网络后重跑同一命令（幂等：已传文件会覆盖重传，未传的续传）。`);
+      console.error(`[release] 请修复网络后重跑同一命令（幂等：已传文件由 --clobber 覆盖重传，未传的续传）。`);
       process.exit(1);
     }
   }

@@ -42,7 +42,7 @@ node core/scripts/e2e-workflow.mjs   # 写作闭环剧本:起草→暂存→采�
   npm run release -- 0.1.1          # 指定版本
   npm run release -- patch          # 或 patch / minor / major 自增
   ```
-  脚本 `scripts/release.mjs` 先工作树预检(有未提交改动即拦截)→ 同步五处版本号(`shell/src-tauri/tauri.conf.json`、`shell/package.json`、`shell/src-tauri/Cargo.toml`、`core/package.json`、`domain/package.json`;写完由 `scripts/check-versions.mjs` 自检,不一致即中止)→ 带签名私钥跑 `npx tauri build --ci` → 收集 NSIS/MSI 与 `.sig` → 生成 `latest.json` → 版本落账(自动 `chore(release): bump vX.Y.Z` + tag + push,幂等)→ 建草稿 release 逐文件 curl 直传资产(路由轮换重试,断网修复后重跑同一命令续传)→ 全部传完才发布。
+  脚本 `scripts/release.mjs` 先工作树预检(有未提交改动即拦截)→ 同步五处版本号(`shell/src-tauri/tauri.conf.json`、`shell/package.json`、`shell/src-tauri/Cargo.toml`、`core/package.json`、`domain/package.json`;写完由 `scripts/check-versions.mjs` 自检,不一致即中止)→ 带签名私钥跑 `npx tauri build --ci` → 收集 NSIS/MSI 与 `.sig` → 生成 `latest.json` → 版本落账(自动 `chore(release): bump vX.Y.Z` + tag + push,幂等)→ 建草稿 release 逐文件 `gh release upload --clobber` 上传(gh 走 rustls,根治 curl/schannel 大文件上传卡死;失败重试,断网修复后重跑同一命令续传)→ 全部传完才发布。
 - 签名密钥在仓外 `%USERPROFILE%\.tauri\novel-ws.key`(本仓为空密码;pubkey 已写入 tauri.conf.json,私钥绝不入库)。可用 `TAURI_SIGNING_PRIVATE_KEY_PATH` 覆盖路径,或 `TAURI_SIGNING_PRIVATE_KEY` 直接给密钥内容;密码用 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。
 - 版本号改动由脚本自动落账(commit/tag/push),无需手动提交;工作树不干净时脚本会直接拦截。
 - 发布记录:v0.1.0 首发(真实更新通道基线);v0.1.1 升级通道闭环验证;v0.1.x 壳 v4 与真实使用反馈修复;v0.2.0 壳 v5;v0.2.1 批一安全修复 + prompt/skill 文件机制;v0.2.2 审计收口 + 批三-1/-2/-3 + 更新体验修复(当前最新,实机 0.2.1→0.2.2 自动升级验证通过)。
