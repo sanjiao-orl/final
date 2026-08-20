@@ -3,9 +3,9 @@
 ## 硬事实
 - 产品:网文连载单作者本地 AI 写作工作台(小说领域的 Cursor)。Windows 桌面、纯本地、无账号、BYOK 双模型。
 - 架构:harness+壳。`core/`=Node sidecar 核心(AI SDK v7 + MCP client + node:sqlite 会话 + 127.0.0.1 HTTP/SSE);`domain/`=MCP 领域服务(structure/entities/stats,stdio);`shell/`=Tauri 2 + Svelte 5 + TipTap。
-- 数据模型:尚在重建，需要查询当前事实。
+- 数据模型:已收口(0004 定稿 + 批三-2 账本四维深化);当前事实查 `docs/现状.md` 与 `docs/decisions/`。
 - 设计原则:人的方向 AI 的笔(AI 产出全部先进暂存区);结构即智能;可配置默认否，可配置。
-- 北极星:网文长期更新，可以让读者挑错，但不能感到离谱。
+- 北极星:网文长期更新，可以让读者挑错，但不能感到离谱;批次校验门=成稿速度/离谱率双指标(决策 0011)。
 
 ## 禁令
 - 禁止把小说正文全量注入上下文:永远检索/分片。
