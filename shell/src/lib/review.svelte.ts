@@ -8,6 +8,7 @@
  * 壳不 import domain：返回形状以 JSON 契约为准，这里镜像类型。
  */
 import type { CoreClient, ReviewFinding } from './core.js';
+import { scheme } from './scheme.svelte.js';
 import { work } from './work.svelte.js';
 import { ISSUE_LOG_DEFAULT } from './paths.js';
 
@@ -329,7 +330,11 @@ export class ReviewStore {
     this.error = null;
     this.mode = 'premium';
     try {
-      const res = await this.client.review(this.workDir, chapterRelPath);
+      // 决策 0010：激活方案映射到 review 通道的 persona；无激活/无映射则 2 参调用不携带
+      const persona = scheme.channelPersona('review');
+      const res = persona
+        ? await this.client.review(this.workDir, chapterRelPath, persona)
+        : await this.client.review(this.workDir, chapterRelPath);
       this.premium.set(chapterRelPath, res.findings);
       const ids = res.persisted?.ids ?? [];
       this.premiumIds.set(chapterRelPath, res.findings.map((_, i) => ids[i]));

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { collectSkills, loadPrompt, loadStyleSummary, parsePromptFile, releasePrompts, scanSkills } from '../src/prompts.js';
+import { collectPersonas, collectSchemes, collectSkills, loadPersona, loadPrompt, loadStyleSummary, parsePromptFile, readActiveScheme, releasePrompts, scanPersonas, scanSchemes, scanSkills } from '../src/prompts.js';
 
 const tmpDirs: string[] = [];
 
@@ -143,6 +143,151 @@ describe('skill 清单', () => {
       { name: '体检', description: 'app 体检' },
       { name: '书级技能', description: '只在本书' },
     ]);
+  });
+});
+
+describe('角色与方案（决策 0010/0013）', () => {
+  it('scanFiles kind 过滤：persona 与 skill 互不串扰，坏文件跳过', () => {
+    const dir = makeTmpDir();
+    writeTree(dir, {
+      'a.md': '---\nkind: persona\nname: 责编\ndescription: 何时用…\n---\n正文',
+      'b.md': '---\nkind: skill\nname: 润色\ndescription: 去 AI 味\n---\n正文',
+      'c.md': '---\nkind: persona\ndescription: 缺 name\n---\n正文',
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(scanPersonas(dir)).toEqual([{ name: '责编', description: '何时用…' }]);
+    expect(scanSkills(dir)).toEqual([{ name: '润色', description: '去 AI 味' }]);
+  });
+
+  it('persona/scheme 缺 kind 的书级手写文件也接受（目录语境即类型，与 domain 口径对齐）；kind 错配仍跳过', () => {
+    const personasDir = makeTmpDir();
+    writeTree(personasDir, {
+      'a.md': '---\nname: 无kind责编\ndescription: 手写没带kind\n---\n正文',
+      'b.md': '---\nkind: skill\nname: 润色\ndescription: 串目录的 skill\n---\n正文',
+    });
+    expect(scanPersonas(personasDir)).toEqual([{ name: '无kind责编', description: '手写没带kind' }]);
+
+    const schemesDir = makeTmpDir();
+    writeTree(schemesDir, {
+      'a.md': '---\nname: 无kind方案\nchat: 责编\n---\n备注',
+      'b.md': '---\nkind: persona\nname: 责编\n---\n串目录的 persona',
+    });
+    expect(scanSchemes(schemesDir)).toEqual([{ name: '无kind方案', description: '', channels: { chat: '责编' } }]);
+
+    // scanSkills 维持严格：无 kind 不接受（0008 契约不变）
+    expect(scanSkills(personasDir)).toEqual([{ name: '润色', description: '串目录的 skill' }]);
+  });
+
+  it('scanSchemes：提取 chat/rewrite/review 三键为通道映射，缺省键省略', () => {
+    const dir = makeTmpDir();
+    writeTree(dir, {
+      'a.md': '---\nkind: scheme\nname: 结构对抗型\ndescription: d\nchat: 责编\nreview: 责编\n---\n备注正文',
+    });
+    expect(scanSchemes(dir)).toEqual([
+      { name: '结构对抗型', description: 'd', channels: { chat: '责编', review: '责编' } },
+    ]);
+    // rewrite 缺失 → 通道里不出现
+    const onlyChat = makeTmpDir();
+    writeTree(onlyChat, { 'a.md': '---\nkind: scheme\nname: x\ndescription: d\nchat: 小白读者\n---\n备注' });
+    expect(scanSchemes(onlyChat)).toEqual([{ name: 'x', description: 'd', channels: { chat: '小白读者' } }]);
+  });
+
+  it('缺 frontmatter kind 的书级手写 persona/scheme 也接受（目录语境即类型，与 domain 口径对齐）', () => {
+    const dir = makeTmpDir();
+    writeTree(dir, {
+      'a.md': '---\nname: 手写责编\ndescription: 无 kind\n---\n正文',
+      'b.md': '---\nname: 手写方案\nchat: 责编\n---\n备注',
+      'c.md': '---\nkind: skill\nname: 误放的技能\n---\n串目录跳过',
+    });
+    expect(scanPersonas(dir)).toEqual([
+      { name: '手写责编', description: '无 kind' },
+      { name: '手写方案', description: '' }, // 目录语境即类型：无 kind 文件两个扫描器都收，正常用法目录分离
+    ]);
+    expect(scanSchemes(dir)).toEqual([
+      { name: '手写责编', description: '无 kind', channels: {} },
+      { name: '手写方案', description: '', channels: { chat: '责编' } },
+    ]);
+  });
+
+  it('collectPersonas：书级同名遮蔽 app 级，书级独有追加在后', () => {
+    const app = makeTmpDir();
+    const work = makeTmpDir();
+    writeTree(app, {
+      'personas/a.md': '---\nkind: persona\nname: 责编\ndescription: app 责编\n---\na',
+      'personas/b.md': '---\nkind: persona\nname: 毒舌书评人\ndescription: app 毒舌\n---\na',
+    });
+    writeTree(work, {
+      '.novel/personas/a.md': '---\nkind: persona\nname: 责编\ndescription: 书级责编\n---\nb',
+      '.novel/personas/c.md': '---\nkind: persona\nname: 小白读者\ndescription: 书级小白\n---\nb',
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(collectPersonas(app, work)).toEqual([
+      { name: '责编', description: '书级责编' },
+      { name: '毒舌书评人', description: 'app 毒舌' },
+      { name: '小白读者', description: '书级小白' },
+    ]);
+  });
+
+  it('collectSchemes：书级同名遮蔽 app 级', () => {
+    const app = makeTmpDir();
+    const work = makeTmpDir();
+    writeTree(app, { 'schemes/a.md': '---\nkind: scheme\nname: 结构对抗型\ndescription: app\n---\na' });
+    writeTree(work, {
+      '.novel/schemes/a.md': '---\nkind: scheme\nname: 结构对抗型\ndescription: 书级\nchat: 小白读者\n---\nb',
+    });
+    expect(collectSchemes(app, work)).toEqual([
+      { name: '结构对抗型', description: '书级', channels: { chat: '小白读者' } },
+    ]);
+  });
+
+  it('readActiveScheme：缺文件返回 null，正常读单行 trim，空内容返回 null', () => {
+    const work = makeTmpDir();
+    expect(readActiveScheme(work)).toBeNull();
+    writeTree(work, { '.novel/active-scheme': '  结构对抗型\n' });
+    expect(readActiveScheme(work)).toBe('结构对抗型');
+    const empty = makeTmpDir();
+    writeTree(empty, { '.novel/active-scheme': '   \n\n' });
+    expect(readActiveScheme(empty)).toBeNull();
+  });
+
+  it('loadPersona：按名取正文（去 frontmatter），书级遮蔽；找不到返回 null 并 warn', () => {
+    // app 级（真实 core/prompts/personas）预置「责编」存在
+    expect(loadPersona('责编')).toContain('有据');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(loadPersona('不存在的角色')).toBeNull();
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+
+    // 书级同名遮蔽 app 级
+    const work = makeTmpDir();
+    writeTree(work, { '.novel/personas/责编.md': '---\nkind: persona\nname: 责编\ndescription: 书级\n---\n书级责编正文。' });
+    expect(loadPersona('责编', work)).toBe('书级责编正文。');
+
+    // 书级手写无 kind 也能按名解析（与 scanPersonas 宽容口径一致）
+    const work2 = makeTmpDir();
+    writeTree(work2, { '.novel/personas/手写角色.md': '---\nname: 手写角色\n---\n手写正文。' });
+    expect(loadPersona('手写角色', work2)).toBe('手写正文。');
+  });
+
+  it('releasePrompts 缺则拷：子目录 persona/scheme 预置一并释放；有则不覆盖', () => {
+    const source = makeTmpDir();
+    const target = makeTmpDir();
+    writeTree(source, {
+      'chat.md': '随包聊天提示',
+      'personas/责编.md': '---\nkind: persona\nname: 责编\n---\n正文',
+      'schemes/结构对抗型.md': '---\nkind: scheme\nname: 结构对抗型\n---\n备注',
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    releasePrompts(target, source);
+    expect(fs.readFileSync(path.join(target, 'chat.md'), 'utf8')).toBe('随包聊天提示');
+    expect(fs.readFileSync(path.join(target, 'personas', '责编.md'), 'utf8')).toContain('正文');
+    expect(fs.readFileSync(path.join(target, 'schemes', '结构对抗型.md'), 'utf8')).toContain('备注');
+
+    // 有则不覆盖：目标子目录已有用户改动保持不变
+    const target2 = makeTmpDir();
+    writeTree(target2, { 'personas/责编.md': '用户改过的' });
+    releasePrompts(target2, source);
+    expect(fs.readFileSync(path.join(target2, 'personas', '责编.md'), 'utf8')).toBe('用户改过的');
   });
 });
 

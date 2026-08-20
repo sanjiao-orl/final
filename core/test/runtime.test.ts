@@ -36,7 +36,7 @@ describe('进程握手（D2）', () => {
     writeRuntimeFile(filePath, SAMPLE);
     const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as RuntimeInfo;
     expect(parsed).toEqual(SAMPLE);
-    expect(parsed.protocol).toBe(1);
+    expect(parsed.protocol).toBe(PROTOCOL_VERSION);
     expect(typeof parsed.commit).toBe('string');
     expect(typeof parsed.version).toBe('string');
   });

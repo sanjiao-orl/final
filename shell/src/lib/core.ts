@@ -31,6 +31,28 @@ export interface RewriteStreamHandlers {
   onError?: (err: Error) => void;
 }
 
+/** GET /v1/posture 的角色条目（契约镜像，决策 0010）。 */
+export interface PosturePersona {
+  name: string;
+  description: string;
+  source: 'app' | 'work';
+}
+
+/** GET /v1/posture 的方案条目（契约镜像，决策 0010）；channels 为三通道 → 角色名映射。 */
+export interface PostureScheme {
+  name: string;
+  description: string;
+  channels: { chat?: string; rewrite?: string; review?: string };
+  source: 'app' | 'work';
+}
+
+/** GET /v1/posture 响应（契约镜像，决策 0010）。 */
+export interface PostureView {
+  personas: PosturePersona[];
+  schemes: PostureScheme[];
+  activeScheme: string | null;
+}
+
 /** POST /v1/review 的贵档审阅发现（契约镜像）。 */
 export interface ReviewFinding {
   severity: 'BLOCKER' | 'MAJOR' | 'MODERATE';
@@ -114,16 +136,24 @@ export class CoreClient {
     });
   }
 
-  /** 贵档冷读审阅当前章（一次性 JSON，非 SSE）；persisted.ids 与 findings 同序（落盘后的 CR id）。 */
+  /** 贵档冷读审阅当前章（一次性 JSON，非 SSE）；persisted.ids 与 findings 同序（落盘后的 CR id）。
+   *  persona 可选（决策 0010）：激活方案的审阅通道角色名，无激活传 undefined 即不带。 */
   review(
     workDir: string,
     chapterRelPath: string,
+    persona?: string,
   ): Promise<{ findings: ReviewFinding[]; persisted?: { appended: number; ids: string[] } }> {
     return this.request(`${API_PREFIX}/review`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workDir, chapterRelPath }),
+      body: JSON.stringify({ workDir, chapterRelPath, ...(persona ? { persona } : {}) }),
     });
+  }
+
+  /** 角色与方案（GET /v1/posture，决策 0010）：personas/schemes/activeScheme；workDir 省略时不筛。 */
+  getPosture(workDir?: string): Promise<PostureView> {
+    const q = workDir ? `?workDir=${encodeURIComponent(workDir)}` : '';
+    return this.request(`${API_PREFIX}/posture${q}`);
   }
 
   /** 会话列表；scope 传入时按归属过滤（''=无归属讨论，章 relPath=章节内讨论）。 */
@@ -180,6 +210,8 @@ export class CoreClient {
       tier?: 'writing' | 'background';
       /** 章节挂载（scope=ch:…）时携带的当前章 relPath。 */
       chapter?: string;
+      /** 激活方案的角色名（决策 0010）；无激活不带。 */
+      persona?: string;
     },
     handlers: ChatStreamHandlers,
     signal?: AbortSignal,
@@ -208,7 +240,7 @@ export class CoreClient {
 
   /** POST /v1/rewrite 的 SSE 流：纯改写（无工具、不落库），done 带完整改写文本。 */
   async rewriteStream(
-    body: { workDir?: string; original: string; instruction: string },
+    body: { workDir?: string; original: string; instruction: string; persona?: string },
     handlers: RewriteStreamHandlers,
     signal?: AbortSignal,
   ): Promise<void> {

@@ -5,6 +5,7 @@
 import type { CoreClient } from './core.js';
 import type { Candidate } from './types.js';
 import { snapshot } from './snapshot.svelte.js';
+import { scheme } from './scheme.svelte.js';
 import { work } from './work.svelte.js';
 import { ISSUE_LOG_DEFAULT } from './paths.js';
 
@@ -133,8 +134,10 @@ export class CandidatesStore {
     const ac = new AbortController();
     this.generateAbort = ac;
     try {
+      // 决策 0010：激活方案映射到 rewrite 通道的 persona（改写/整改共用）。
+      const persona = scheme.channelPersona('rewrite');
       await this.client.rewriteStream(
-        { original, instruction, ...(work.workDir ? { workDir: work.workDir } : {}) },
+        { original, instruction, ...(work.workDir ? { workDir: work.workDir } : {}), ...(persona ? { persona } : {}) },
         {
           onDelta: (d) => {
             text += d;
@@ -177,8 +180,9 @@ export class CandidatesStore {
     let text = '';
     const failure: { err: Error | null } = { err: null }; // 闭包赋值，TS 收窄不跨闭包，用对象持有
     try {
+      const persona = scheme.channelPersona('rewrite');
       await this.client.rewriteStream(
-        { original, instruction, ...(workDir ? { workDir } : {}) },
+        { original, instruction, ...(workDir ? { workDir } : {}), ...(persona ? { persona } : {}) },
         {
           onDelta: (d) => {
             text += d;
@@ -336,11 +340,12 @@ export class CandidatesStore {
     if (targets.length === 0 || this.busy) return;
     this.busy = true;
     try {
+      const persona = scheme.channelPersona('rewrite');
       for (const [n, c] of targets.entries()) {
         let text = '';
         const failure: { err: Error | null } = { err: null };
         await this.client.rewriteStream(
-          { original: c.original, instruction: `上一版改写：\n${c.proposed}\n\n整改要求：${ask}`, ...(work.workDir ? { workDir: work.workDir } : {}) },
+          { original: c.original, instruction: `上一版改写：\n${c.proposed}\n\n整改要求：${ask}`, ...(work.workDir ? { workDir: work.workDir } : {}), ...(persona ? { persona } : {}) },
           {
             onDelta: (d) => {
               text += d;

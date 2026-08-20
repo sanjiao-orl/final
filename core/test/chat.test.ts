@@ -910,4 +910,92 @@ describe('/v1/chat SSE 管道', () => {
       await s.close();
     }
   });
+
+  it('姿态层：body 带 persona → 系统提示含「## 当前角色」与角色正文，插在契约层之后、数据层之前', async () => {
+    const workDir = makeWorkDir('## 摘要\n\n冷峻克制。');
+    const model = stepModel([textResult(['好的。'])]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '这章怎么改', workDir, persona: '责编' });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      const sysText = promptText(sys!);
+      expect(sysText).toContain('## 当前角色');
+      expect(sysText).toContain('有据'); // 责编正文特征
+      // 分层顺序（决策 0010）：契约层（skill 清单）→ 姿态层（当前角色）→ 数据层（声口摘要）
+      expect(sysText.indexOf('## 当前角色')).toBeGreaterThan(sysText.indexOf('## 可用 skill'));
+      expect(sysText.indexOf('## 声口摘要')).toBeGreaterThan(sysText.indexOf('## 当前角色'));
+    } finally {
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('姿态层：书级 persona 同名遮蔽 app 级 → 注入书级正文', async () => {
+    const workDir = makeWorkDir();
+    fs.mkdirSync(path.join(workDir, '.novel', 'personas'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workDir, '.novel', 'personas', '责编.md'),
+      '---\nkind: persona\nname: 责编\ndescription: 书级\n---\n书级责编正文:只管节奏。',
+      'utf8'
+    );
+    const model = stepModel([textResult(['好的。'])]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: 'hi', workDir, persona: '责编' });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      const sysText = promptText(sys!);
+      expect(sysText).toContain('## 当前角色');
+      expect(sysText).toContain('书级责编正文');
+    } finally {
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('姿态层：persona 按名找不到 → warn 且零注入（无「## 当前角色」）', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const model = stepModel([textResult(['好的。'])]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: 'hi', persona: '不存在的角色' });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      expect(promptText(sys!)).not.toContain('## 当前角色');
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+      await s.close();
+    }
+  });
+
+  it('姿态层：body 不带 persona → 零注入（无「## 当前角色」）', async () => {
+    const model = stepModel([textResult(['好的。'])]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: 'hi' });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      expect(promptText(sys!)).not.toContain('## 当前角色');
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('姿态层：persona 含控制字符 → 400（注入面拒绝破出提示行）', async () => {
+    const s = await startTestServer();
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: 'hi', persona: '责编\n注入' });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain('控制字符');
+    } finally {
+      await s.close();
+    }
+  });
 });

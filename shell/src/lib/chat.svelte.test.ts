@@ -7,6 +7,7 @@ import { approval } from './approval.svelte.js';
 import { candidates } from './candidates.svelte.js';
 import { settings } from './settings.svelte.js';
 import { snapshot } from './snapshot.svelte.js';
+import { scheme } from './scheme.svelte.js';
 import { work } from './work.svelte.js';
 
 beforeEach(() => {
@@ -21,6 +22,10 @@ beforeEach(() => {
   // approval 是模块单例：清挂起卡，避免跨用例泄漏
   approval.pending = [];
   approval.active = null;
+  // scheme 是模块单例：清方案态，避免 persona 跨用例泄漏
+  scheme.personas = [];
+  scheme.schemes = [];
+  scheme.activeScheme = null;
 });
 
 function streamClient(overrides: Record<string, unknown> = {}): CoreClient {
@@ -100,6 +105,78 @@ describe('ChatStore', () => {
     );
     chat.setTier('writing');
     expect(chat.tier).toBe('writing');
+  });
+
+  it('send：激活方案映射 chat persona → 请求体带 persona（决策 0010）', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_body: unknown, h: ChatStreamHandlers) => {
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const getPosture = vi.fn().mockResolvedValue({
+      personas: [],
+      schemes: [
+        { name: 'S', description: '', channels: { chat: '外婆', rewrite: '童稚', review: '刺猬' }, source: 'work' },
+      ],
+      activeScheme: 'S',
+    });
+    const client = streamClient({ chatStream, getPosture });
+    const chat = new ChatStore();
+    chat.init(client);
+    scheme.init(client);
+    work.workDir = 'C:/works/demo';
+    await scheme.load(); // activeScheme='S' → chat 通道 persona='外婆'
+    await chat.send('帮我看看');
+    expect(chatStream).toHaveBeenCalledWith(
+      { text: '帮我看看', workDir: 'C:/works/demo', scope: '', tier: 'writing', persona: '外婆' },
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('send：已有会话 + 激活方案 → 请求体同样带 persona', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_body: unknown, h: ChatStreamHandlers) => {
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const getPosture = vi.fn().mockResolvedValue({
+      personas: [],
+      schemes: [{ name: 'S', description: '', channels: { chat: '外婆' }, source: 'work' }],
+      activeScheme: 'S',
+    });
+    const client = streamClient({ chatStream, getPosture });
+    const chat = new ChatStore();
+    chat.init(client);
+    scheme.init(client);
+    work.workDir = 'C:/works/demo';
+    await scheme.load();
+    chat.sessionId = 's1';
+    await chat.send('继续');
+    expect(chatStream).toHaveBeenCalledWith(
+      { sessionId: 's1', text: '继续', workDir: 'C:/works/demo', tier: 'writing', persona: '外婆' },
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('send：方案无 chat 通道映射 → 请求体不带 persona', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_body: unknown, h: ChatStreamHandlers) => {
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const getPosture = vi.fn().mockResolvedValue({
+      personas: [],
+      schemes: [{ name: 'S', description: '', channels: { review: '刺猬' }, source: 'work' }],
+      activeScheme: 'S',
+    });
+    const client = streamClient({ chatStream, getPosture });
+    const chat = new ChatStore();
+    chat.init(client);
+    scheme.init(client);
+    work.workDir = 'C:/works/demo';
+    await scheme.load(); // 激活方案无 chat 映射 → 不带 persona
+    await chat.send('帮我看看');
+    expect(chatStream).toHaveBeenCalledWith(
+      { text: '帮我看看', workDir: 'C:/works/demo', scope: '', tier: 'writing' },
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
   it('send：空文本或流式进行中不发请求', async () => {

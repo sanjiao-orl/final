@@ -16,7 +16,7 @@ import type { MessageRow, SessionRow, SessionStore } from './session-store.js';
 import { getLlmTimeoutSeconds, type Tier } from './config.js';
 import { EventPump } from './event-pump.js';
 import { toPublicErrorMessage, writeJson } from './http.js';
-import { listSkills, loadPrompt, loadStyleSummary } from './prompts.js';
+import { listSkills, loadPersona, loadPrompt, loadStyleSummary } from './prompts.js';
 import { normalizeWorkDir } from './workdir.js';
 
 export const chatBodySchema = z.object({
@@ -45,6 +45,16 @@ export const chatBodySchema = z.object({
     .max(500)
     .refine((s) => !/[\x00-\x1f\x7f]/.test(s), '不能包含控制字符')
     .optional(),
+  /**
+   * 姿态层角色名（决策 0010）：按名从角色库解析正文，拼系统提示「## 当前角色」段（契约层之后、数据层之前）。
+   * 上限 100 字符并拒绝控制字符——口径同 workDir；无 persona 或按名找不到 = 零注入。
+   */
+  persona: z
+    .string()
+    .min(1)
+    .max(100)
+    .refine((s) => !/[\x00-\x1f\x7f]/.test(s), '不能包含控制字符')
+    .optional(),
 });
 export type ChatBody = z.infer<typeof chatBodySchema>;
 
@@ -71,14 +81,15 @@ interface ChapterSlice {
 
 /**
  * 组装系统提示：按决策 0010 注入面分层——契约层（prompt md + workDir 行 + skill 清单，现有不动）→
- * 姿态层（批三-4 角色注入占位，本批无）→ 数据层（声口摘要 + 本章账本切片，缺则静默跳过）。
+ * 姿态层（角色，request 带 persona 且按名能找到才注，无则零注入）→ 数据层（声口摘要 + 本章账本切片，缺则静默跳过）。
  * 数据层账本切片需要调 domain 工具，故为 async（可挂 abortSignal，超时/断连可中止）。
  */
 async function systemPrompt(
   workDir: string | undefined,
   chapter: string | undefined,
   tools: ToolSet | undefined,
-  abortSignal: AbortSignal
+  abortSignal: AbortSignal,
+  persona?: string
 ): Promise<string> {
   // 每次请求现取 prompt（mtime 感知热重载，改文件即生效），不再用模块级常量缓存。
   // 契约层：提示词文件 + workDir 行 + skill 清单（现有不动）
@@ -91,7 +102,13 @@ async function systemPrompt(
       prompt += `\n\n## 可用 skill\n${lines}\n需要时调用领域工具 skill_read 传入 name 获取该 skill 正文并按其执行。`;
     }
   }
-  // 姿态层（批三-4 角色注入占位，本批无）
+  // 姿态层：角色注入（决策 0010）——request 带 persona 且按名能找到才注正文段；找不到/无 persona = 零注入
+  if (persona) {
+    const personaBody = loadPersona(persona, workDir);
+    if (personaBody) {
+      prompt += `\n\n## 当前角色\n${personaBody}`;
+    }
+  }
 
   // 数据层 a：声口摘要（style.md 有摘要才注，缺则静默跳过）
   if (workDir) {
@@ -461,8 +478,8 @@ export async function handleChatRequest(
     });
     const options: Parameters<typeof streamText>[0] = {
       model,
-      // 分层组装：契约层 + 姿态层（占位）+ 数据层（声口摘要/本章账本切片，见 systemPrompt）。
-      system: await systemPrompt(workDir, parsed.data.chapter, deps.tools, combinedSignal),
+      // 分层组装：契约层 + 姿态层（角色）+ 数据层（声口摘要/本章账本切片，见 systemPrompt）。
+      system: await systemPrompt(workDir, parsed.data.chapter, deps.tools, combinedSignal, parsed.data.persona),
       messages: buildReplayMessages(deps.store.listMessages(sessionId)),
       stopWhen: stepCountIs(MAX_STEPS),
       abortSignal: combinedSignal,

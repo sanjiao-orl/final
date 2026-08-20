@@ -1,6 +1,6 @@
 /**
- * server.ts —— MCP stdio server 装配：注册二十六个工具并连接 stdio transport。
- * 双侧合并口径：基础工具 8 个 + WS-9 scan_quality + A 组 8 工具 + WS-17 账本 4 工具 + 0008 skill_read 1 工具 + 0009 问题日志 2 工具（issue_append/issue_set_status）。
+ * server.ts —— MCP stdio server 装配：注册二十七个工具并连接 stdio transport。
+ * 双侧合并口径：基础工具 8 个 + WS-9 scan_quality + A 组 8 工具 + WS-17 账本 4 工具 + 0008 skill_read 1 工具 + 0009 问题日志 2 工具（issue_append/issue_set_status）+ scheme_set_active 1 工具（激活/取消激活方案指针）。
  * 批三-3 新增 2 工具：ledger_chapter_slice（按章过滤的账本视图，只读）+ write_meta（书级元数据写入，不写账本/不写正文）。
  * 被 core 包经 MCP stdio spawn 调用；工具实现见 tools.ts。
  */
@@ -41,7 +41,7 @@ import {
   type IssueFinding,
   type LedgerOp,
 } from './ledger.js';
-import { readSkillBody } from './prompts.js';
+import { readSkillBody, schemeSetActive } from './prompts.js';
 import domainPkg from '../package.json' with { type: 'json' };
 
 const server = new McpServer({
@@ -382,6 +382,21 @@ server.registerTool(
     },
   },
   async ({ workDir, relPath, content }) => jsonResult(writeMeta(workDir, relPath, content)),
+);
+
+// 26→27：激活/取消激活方案指针（纯加法；可用集 = app 预置 <promptRoot>/schemes 与书级 .novel/schemes 的 frontmatter name 并集）
+server.registerTool(
+  'scheme_set_active',
+  {
+    title: '激活/取消激活写作方案',
+    description:
+      '把「激活方案」指针原子写入作品目录（.novel/active-scheme，单行=方案 frontmatter name），供读写正文前按方案选聘写作角色：name 非空时校验其属于可用方案集——app 预置 core/prompts/schemes/*.md 与书级 .novel/schemes/*.md 的 frontmatter name 并集（同名书级遮蔽 app 级），命中则原子写指针、未命中报错并列可用方案名；name 为空串则删除指针文件（不存在也幂等成功），回到默认不激活。路径固定 .novel/active-scheme，不接受任何路径参数，不做历史快照。返回 { ok, active }（active=激活的方案 name，未激活为 null）。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      name: z.string().describe('方案 frontmatter name；空串=删除激活指针、回到默认不激活'),
+    },
+  },
+  async ({ workDir, name }) => jsonResult(schemeSetActive(workDir, name)),
 );
 
 server.registerTool(

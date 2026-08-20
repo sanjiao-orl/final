@@ -1,5 +1,6 @@
 // 测试：HTTP 服务层——鉴权 401、/v1/health 200、CORS 预检、/v1/dev 免鉴权、会话路由、旧路径 404。
 import { describe, expect, it } from 'vitest';
+import { PROTOCOL_VERSION } from '../src/runtime.js';
 import { readSse, startTestServer } from './helpers.js';
 
 describe('core HTTP 服务', () => {
@@ -11,7 +12,7 @@ describe('core HTTP 服务', () => {
       const body = (await res.json()) as { ok: boolean; version: string; protocol: number; commit: string };
       expect(body.ok).toBe(true);
       expect(body.version).toBe('test');
-      expect(body.protocol).toBe(1);
+      expect(body.protocol).toBe(PROTOCOL_VERSION);
       expect(typeof body.commit).toBe('string');
       expect(body.commit.length).toBeGreaterThan(0);
     } finally {

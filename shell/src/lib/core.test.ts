@@ -155,3 +155,38 @@ describe('CoreClient.rewriteStream（workDir 透传）', () => {
     expect(body).toMatchObject({ workDir: 'C:/works/demo', original: '旧文', instruction: '润色' });
   });
 });
+
+describe('CoreClient.posture / review persona（决策 0010）', () => {
+  it('getPosture：带 workDir 的 GET 请求，解析 personas/schemes/activeScheme', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      jsonResponse({
+        personas: [],
+        schemes: [{ name: 'S', description: '', channels: { chat: '外婆' }, source: 'work' }],
+        activeScheme: 'S',
+      }),
+    );
+    const c = new CoreClient('http://127.0.0.1:1', 't');
+    const r = await c.getPosture('C:/works/demo');
+    expect(r.activeScheme).toBe('S');
+    expect(r.schemes[0]!.channels.chat).toBe('外婆');
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      'http://127.0.0.1:1/v1/posture?workDir=C%3A%2Fworks%2Fdemo',
+      expect.objectContaining({ headers: expect.objectContaining({ Authorization: 'Bearer t' }) }),
+    );
+  });
+
+  it('review：persona 传入时进请求体；缺省不带', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({ findings: [] }));
+    const c = new CoreClient('http://127.0.0.1:1', 't');
+    await c.review('C:/works/demo', 'manuscript/a.md', '刺猬');
+    const callArgs = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as RequestInit | undefined;
+    const body = JSON.parse(String(callArgs?.body)) as Record<string, unknown>;
+    expect(body).toMatchObject({ workDir: 'C:/works/demo', chapterRelPath: 'manuscript/a.md', persona: '刺猬' });
+
+    await c.review('C:/works/demo', 'manuscript/a.md');
+    const body2 = JSON.parse(
+      String((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[1]?.[1]?.body),
+    ) as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(body2, 'persona')).toBe(false);
+  });
+});

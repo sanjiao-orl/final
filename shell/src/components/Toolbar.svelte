@@ -8,6 +8,7 @@
   import { settings } from '../lib/settings.svelte.js';
   import { dialog } from '../lib/dialog.svelte.js';
   import { review } from '../lib/review.svelte.js';
+  import { scheme } from '../lib/scheme.svelte.js';
   import { ui } from '../lib/ui.svelte.js';
   import { work } from '../lib/work.svelte.js';
   import WorkMenu from './WorkMenu.svelte';
@@ -119,6 +120,17 @@
   function closeSnapshotBrowser(): void {
     snapshotBrowserOpen = false;
   }
+
+  /** 方案下拉（决策 0010）：复刻 WorkMenu 的 overlay+menu 两件套，状态持有模式照 menuOpen。 */
+  let schemeOpen = $state(false);
+  function toggleSchemeMenu(): void {
+    schemeOpen = !schemeOpen;
+  }
+  /** 选择方案：默认（null）清除激活；成功（含清除）后收起下拉。 */
+  async function pickScheme(name: string | null): Promise<void> {
+    const ok = await scheme.activate(name);
+    if (ok) schemeOpen = false;
+  }
 </script>
 
 <header data-ai-zone>
@@ -165,6 +177,29 @@
   <button class="tb-mode" title="当前审批模式(B6) — 点击打开设置栏" onclick={() => ui.toggleCol('settings')}>
     <i class="dot"></i>{settings.approvalMode} 模式
   </button>
+  <span class="tb-scheme-anchor">
+    <button class="tb-mode" class:on={schemeOpen} onclick={toggleSchemeMenu} title="角色与方案(0010) — 三通道（chat/rewrite/review）请求携带当前方案的 persona">
+      <i class="dot"></i>方案：{scheme.activeScheme ?? '默认'}
+    </button>
+    {#if schemeOpen}
+      <!-- 决策 0010 方案下拉：复刻 WorkMenu 的 overlay+menu 两件套（样式同款，含义另注） -->
+      <button class="scheme-menu-overlay" onclick={() => (schemeOpen = false)} aria-label="关闭方案菜单"></button>
+      <div class="scheme-menu" role="menu">
+        <button class="work-item" class:current={scheme.activeScheme === null} role="menuitem" onclick={() => void pickScheme(null)}>
+          <span class="check">{scheme.activeScheme === null ? '✓' : ''}</span>
+          <span class="name">默认</span>
+        </button>
+        {#each scheme.schemes as s}
+          <button class="work-item" class:current={scheme.activeScheme === s.name} role="menuitem" onclick={() => void pickScheme(s.name)}>
+            <span class="check">{scheme.activeScheme === s.name ? '✓' : ''}</span>
+            <span class="name">{s.name}</span>
+          </button>
+        {:else}
+          <div class="work-empty">还没有方案（可在作品 .novel/schemes/ 下新增）</div>
+        {/each}
+      </div>
+    {/if}
+  </span>
   <button class="tb-btn" class:on={review.open} disabled={review.running} onclick={() => void review.toggle()} title="审阅：全书去AI味扫描 + 账本确定性诊断（零 LLM 成本）；BLOCKER 未清零时徽标常显">
     {@html iconSvg('search', 15)}
     {review.running ? '扫描中…' : '审阅'}{#if review.blockerTotal > 0}<i class="tb-badge danger" title="BLOCKER 未清零">{review.blockerTotal}</i>{/if}
@@ -332,5 +367,81 @@
     height: 5px;
     border-radius: 50%;
     background: var(--status-draft);
+  }
+  .tb-mode.on {
+    border-color: var(--accent-line);
+    color: var(--accent);
+  }
+  /* 决策 0010 方案下拉：包裹 pill 锚定（撑满 header 高度 → top:100% 即落到 header 下方，right:0 对齐 pill 右缘） */
+  .tb-scheme-anchor {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    height: 100%;
+    flex: none;
+  }
+  .scheme-menu-overlay {
+    position: fixed;
+    inset: 0;
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: default;
+    z-index: 40;
+  }
+  .scheme-menu {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    z-index: 41;
+    min-width: 240px;
+    max-width: 320px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+    padding: 5px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .work-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    width: 100%;
+    height: 28px;
+    padding: 0 8px;
+    border-radius: 6px;
+    font-size: 12.5px;
+    color: var(--ink);
+    text-align: left;
+    cursor: pointer;
+    transition: background var(--t-hover);
+    white-space: nowrap;
+    background: none;
+    border: none;
+  }
+  .work-item:hover {
+    background: color-mix(in srgb, var(--muted) 10%, transparent);
+  }
+  .work-item .check {
+    width: 14px;
+    flex: none;
+    color: var(--accent);
+    font-weight: 700;
+  }
+  .work-item.current .name {
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .work-item .name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .work-empty {
+    padding: 6px 8px;
+    font-size: 11.5px;
+    color: var(--muted);
   }
 </style>

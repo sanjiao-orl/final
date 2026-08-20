@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { getLlmTimeoutSeconds } from './config.js';
 import { EventPump } from './event-pump.js';
 import { toPublicErrorMessage, writeJson } from './http.js';
-import { loadPrompt, loadStyleSummary } from './prompts.js';
+import { loadPersona, loadPrompt, loadStyleSummary } from './prompts.js';
 import { normalizeWorkDir } from './workdir.js';
 
 export const rewriteBodySchema = z.object({
@@ -22,6 +22,16 @@ export const rewriteBodySchema = z.object({
     .string()
     .min(1)
     .max(500)
+    .refine((s) => !/[\x00-\x1f\x7f]/.test(s), '不能包含控制字符')
+    .optional(),
+  /**
+   * 姿态层角色名（决策 0010）：按名解析角色正文，拼系统提示「## 当前角色」段（rewrite 契约之后、声口摘要之前）。
+   * 上限 100 字符并拒绝控制字符；无 persona 或按名找不到 = 零注入。
+   */
+  persona: z
+    .string()
+    .min(1)
+    .max(100)
     .refine((s) => !/[\x00-\x1f\x7f]/.test(s), '不能包含控制字符')
     .optional(),
 });
@@ -68,6 +78,13 @@ export async function handleRewriteRequest(
   try {
     // 每次请求现取（mtime 感知热重载，改文件即生效）；有 workDir 时末尾拼声口摘要段（style.md 无摘要则不拼）。
     let system = loadPrompt('rewrite'); // rewrite.md 契约不动
+    // 姿态层：角色注入（决策 0010）——rewrite 契约之后、声口摘要（数据层）之前。
+    if (parsed.data.persona) {
+      const personaBody = loadPersona(parsed.data.persona, workDir);
+      if (personaBody) {
+        system += `\n\n## 当前角色\n${personaBody}`;
+      }
+    }
     if (workDir) {
       const summary = loadStyleSummary(workDir);
       if (summary) {

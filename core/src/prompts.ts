@@ -17,8 +17,19 @@ export const PROMPT_FILENAMES: Record<PromptKind, string> = {
 /** 规范预置 skill 文件名（随包释放时与 prompt 一起补缺）。 */
 export const SKILL_FILENAMES = ['skill-deai-polish.md', 'skill-chapter-checkup.md'] as const;
 
-/** 随包/仓库里需要释放到 app 数据目录的全部规范文件。 */
-const CANONICAL_FILES = [...Object.values(PROMPT_FILENAMES), ...SKILL_FILENAMES];
+/** 规范预置角色文件名（决策 0010/0013：app 级 persona 库，随包释放；书级同名遮蔽）。 */
+export const PERSONA_FILENAMES = ['责编.md', '讨论陪练.md', '毒舌书评人.md', '小白读者.md'] as const;
+
+/** 规范预置方案文件名（决策 0013：app 级 scheme 库，随包释放；书级同名遮蔽）。 */
+export const SCHEME_FILENAMES = ['结构对抗型.md', '体验优先型.md'] as const;
+
+/** 随包/仓库里需要释放到 app 数据目录的全部规范文件（支持 personas/x.md 这类子目录相对路径）。 */
+const CANONICAL_FILES = [
+  ...Object.values(PROMPT_FILENAMES),
+  ...SKILL_FILENAMES,
+  ...PERSONA_FILENAMES.map((f) => `personas/${f}`),
+  ...SCHEME_FILENAMES.map((f) => `schemes/${f}`),
+];
 
 /** 文件缺失/损坏时的一行兜底提示（正本在 core/prompts/）。 */
 const PROMPT_FALLBACKS: Record<PromptKind, string> = {
@@ -88,6 +99,8 @@ export function releasePrompts(targetDir: string, sourceDir: string = bundledPro
       continue;
     }
     try {
+      // 子目录预置（personas/、schemes/）目标父目录可能尚不存在，先补建。
+      fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.copyFileSync(source, target);
     } catch (err) {
       console.warn(`[prompts] 释放提示词失败: ${source} -> ${target}（${String(err)}）`);
@@ -149,15 +162,53 @@ export interface SkillInfo {
   description: string;
 }
 
-/** 扫描一个目录（flat）下所有 kind:skill 的 md；无目录/不可读返回空，坏文件跳过并 warn。 */
-export function scanSkills(dir: string): SkillInfo[] {
+/** 角色清单条目（决策 0010）。 */
+export interface PersonaInfo {
+  name: string;
+  description: string;
+}
+
+/** 方案绑定的通道→角色映射（chat/rewrite/review 均可缺；决策 0013「角色×通道」分配表）。 */
+export interface SchemeChannels {
+  chat?: string;
+  rewrite?: string;
+  review?: string;
+}
+
+/** 方案清单条目（决策 0013：正文为人读备注，永不注入）。 */
+export interface SchemeInfo {
+  name: string;
+  description: string;
+  channels: SchemeChannels;
+}
+
+/** 姿态清单条目（/v1/posture 端点用；source 标注来源，遮蔽时只露书级）。 */
+export interface PosturePersona extends PersonaInfo {
+  source: 'app' | 'work';
+}
+export interface PostureScheme extends SchemeInfo {
+  source: 'app' | 'work';
+}
+
+/** 扫描单发条目：带上完整 frontmatter，供 scheme 提取 chat/rewrite/review 通道。 */
+export interface ScannedPromptEntry {
+  name: string;
+  description: string;
+  frontmatter: Record<string, string>;
+}
+
+/** 扫描一个目录（flat）下所有 kind 匹配的 md；无目录/不可读返回空，坏文件跳过并 warn。
+ *  kindOptional=true（persona/scheme 用）时 frontmatter 缺 kind 也接受——目录语境即类型，
+ *  对齐 domain 侧 scanSchemeFiles 只看 name 的口径（书级手写 md 常不带 kind，防止激活成功却不进清单的静默失效）；
+ *  kind 存在且不匹配仍跳过（防 skill/persona/scheme 串目录）。 */
+export function scanFiles(dir: string, kind: string, opts?: { kindOptional?: boolean }): ScannedPromptEntry[] {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
   } catch {
     return [];
   }
-  const out: SkillInfo[] = [];
+  const out: ScannedPromptEntry[] = [];
   for (const e of entries
     .filter((x) => x.isFile() && x.name.toLowerCase().endsWith('.md'))
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
@@ -169,19 +220,70 @@ export function scanSkills(dir: string): SkillInfo[] {
       continue;
     }
     const parsed = parsePromptFile(content);
-    if (!parsed.hasFrontmatter || !parsed.frontmatter.kind) {
-      console.warn(`[prompts] 无 frontmatter 或缺 kind，跳过: ${file}`);
+    if (!parsed.hasFrontmatter) {
+      console.warn(`[prompts] 无 frontmatter，跳过: ${file}`);
       continue;
     }
-    if (parsed.frontmatter.kind !== 'skill') continue;
+    if (parsed.frontmatter.kind) {
+      if (parsed.frontmatter.kind !== kind) continue;
+    } else if (!opts?.kindOptional) {
+      console.warn(`[prompts] 缺 frontmatter kind，跳过: ${file}`);
+      continue;
+    }
     const name = parsed.frontmatter.name?.trim();
     if (!name) {
-      console.warn(`[prompts] skill 缺少 name，跳过: ${file}`);
+      console.warn(`[prompts] ${kind} 缺少 name，跳过: ${file}`);
       continue;
     }
-    out.push({ name, description: parsed.frontmatter.description ?? '' });
+    out.push({ name, description: parsed.frontmatter.description ?? '', frontmatter: parsed.frontmatter });
   }
   return out;
+}
+
+/** 扫描一个目录（flat）下所有 kind:skill 的 md（决策 0008）。 */
+export function scanSkills(dir: string): SkillInfo[] {
+  return scanFiles(dir, 'skill').map(({ name, description }) => ({ name, description }));
+}
+
+/** 扫描一个目录（flat）下所有 kind:persona 的 md（决策 0010 角色库；书级同名遮蔽）。
+ *  缺 kind 的书级手写文件也接受（目录语境即类型，与 domain 口径对齐）。 */
+export function scanPersonas(dir: string): PersonaInfo[] {
+  return scanFiles(dir, 'persona', { kindOptional: true }).map(({ name, description }) => ({ name, description }));
+}
+
+/** 扫描一个目录（flat）下所有 kind:scheme 的 md；提取 chat/rewrite/review 三键为通道映射（决策 0013）。
+ *  缺 kind 同样接受（同 scanPersonas 口径）。 */
+export function scanSchemes(dir: string): SchemeInfo[] {
+  return scanFiles(dir, 'scheme', { kindOptional: true }).map(({ name, description, frontmatter }) => {
+    const channels: SchemeChannels = {};
+    for (const key of ['chat', 'rewrite', 'review'] as const) {
+      const v = frontmatter[key]?.trim();
+      if (v) channels[key] = v;
+    }
+    return { name, description, channels };
+  });
+}
+
+/** 合并 app 级与书级角色清单；app 目录 = promptRoot/personas，书级 = workDir/.novel/personas，同名遮蔽。 */
+export function collectPersonas(appDir: string, workDir?: string): PersonaInfo[] {
+  const byName = new Map<string, PersonaInfo>();
+  for (const p of scanPersonas(path.join(appDir, 'personas'))) byName.set(p.name, p);
+  if (workDir) {
+    const bookDir = path.join(workDir, '.novel', 'personas');
+    for (const p of scanPersonas(bookDir)) byName.set(p.name, p);
+  }
+  return [...byName.values()];
+}
+
+/** 合并 app 级与书级方案清单；app 目录 = promptRoot/schemes，书级 = workDir/.novel/schemes，同名遮蔽。 */
+export function collectSchemes(appDir: string, workDir?: string): SchemeInfo[] {
+  const byName = new Map<string, SchemeInfo>();
+  for (const s of scanSchemes(path.join(appDir, 'schemes'))) byName.set(s.name, s);
+  if (workDir) {
+    const bookDir = path.join(workDir, '.novel', 'schemes');
+    for (const s of scanSchemes(bookDir)) byName.set(s.name, s);
+  }
+  return [...byName.values()];
 }
 
 /** 合并 app 级与书级 skill 清单；书级（workDir/.novel/skills/）同名（frontmatter name）遮蔽 app 级。 */
@@ -201,6 +303,99 @@ export function collectSkills(appDir: string, workDir?: string): SkillInfo[] {
  */
 export function listSkills(workDir?: string): SkillInfo[] {
   return collectSkills(activePromptRoot, workDir);
+}
+
+/**
+ * 读书级激活方案指针 <workDir>/.novel/active-scheme（单行方案名，决策 0010）。
+ * 写入由 domain 小工具负责（原子写 + 校验方案名在清单内），core 只读；缺文件/空内容返回 null。
+ */
+export function readActiveScheme(workDir: string): string | null {
+  let content: string;
+  try {
+    content = fs.readFileSync(path.join(workDir, '.novel', 'active-scheme'), 'utf8');
+  } catch {
+    return null;
+  }
+  const name = content.split(/\r?\n/, 1)[0]?.trim() ?? '';
+  return name === '' ? null : name;
+}
+
+/** 查看角色库（app 级 + 可选书级，同名遮蔽）；每次现扫不缓存（同 skill 口径）。 */
+export function listPersonas(workDir?: string): PersonaInfo[] {
+  return collectPersonas(activePromptRoot, workDir);
+}
+
+/** 查看方案库（app 级 + 可选书级，同名遮蔽）；方案正文为人读备注永不注入。 */
+export function listSchemes(workDir?: string): SchemeInfo[] {
+  return collectSchemes(activePromptRoot, workDir);
+}
+
+/**
+ * /v1/posture 姿态清单（决策 0010/0013）：app 级 + 可选书级（遮蔽时只露书级），并读激活方案名。
+ * workDir 省略时只回 app 级、activeScheme=null。
+ */
+export function listPosture(workDir?: string): {
+  personas: PosturePersona[];
+  schemes: PostureScheme[];
+  activeScheme: string | null;
+} {
+  const personas = new Map<string, PosturePersona>();
+  for (const p of scanPersonas(path.join(activePromptRoot, 'personas'))) personas.set(p.name, { ...p, source: 'app' });
+  const schemes = new Map<string, PostureScheme>();
+  for (const s of scanSchemes(path.join(activePromptRoot, 'schemes'))) schemes.set(s.name, { ...s, source: 'app' });
+  let activeScheme: string | null = null;
+  if (workDir) {
+    for (const p of scanPersonas(path.join(workDir, '.novel', 'personas'))) {
+      personas.set(p.name, { ...p, source: 'work' });
+    }
+    for (const s of scanSchemes(path.join(workDir, '.novel', 'schemes'))) {
+      schemes.set(s.name, { ...s, source: 'work' });
+    }
+    activeScheme = readActiveScheme(workDir);
+  }
+  return { personas: [...personas.values()], schemes: [...schemes.values()], activeScheme };
+}
+
+/**
+ * 按名解析角色正文（决策 0010 姿态层注入素材，注入格式 `## 当前角色\n{正文}`）：
+ * app 级 + 可选书级库，同名书级遮蔽。找不到（或正文为空）返回 null——调用方零注入，并 warn 对账。
+ */
+export function loadPersona(name: string, workDir?: string): string | null {
+  const bookFile = workDir ? findPersonaFile(path.join(workDir, '.novel', 'personas'), name) : null;
+  const file = bookFile ?? findPersonaFile(path.join(activePromptRoot, 'personas'), name);
+  if (!file) {
+    console.warn(`[prompts] 未找到名为「${name}」的角色，跳过姿态注入`);
+    return null;
+  }
+  try {
+    const body = parsePromptFile(fs.readFileSync(file, 'utf8')).body.trim();
+    return body === '' ? null : body;
+  } catch {
+    console.warn(`[prompts] 读取角色文件失败，跳过姿态注入: ${file}`);
+    return null;
+  }
+}
+
+/** 在目录中按 frontmatter name 找角色文件；无目录/不可读/按名找不到返回 null。
+ *  kind 缺失接受、存在则必须 = persona（与 scanPersonas 同口径，防串目录）。 */
+function findPersonaFile(dir: string, name: string): string | null {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  for (const e of entries.filter((x) => x.isFile() && x.name.toLowerCase().endsWith('.md'))) {
+    const file = path.join(dir, e.name);
+    try {
+      const parsed = parsePromptFile(fs.readFileSync(file, 'utf8'));
+      const kind = parsed.frontmatter.kind;
+      if ((!kind || kind === 'persona') && parsed.frontmatter.name?.trim() === name) return file;
+    } catch {
+      continue;
+    }
+  }
+  return null;
 }
 
 /** 声口摘要正文最大字符数：远超上下文无益且挤占对话预算，超长截断并加省略标注。 */

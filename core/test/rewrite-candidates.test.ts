@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { readSse, startTestServer, stepModel, textResult } from './helpers.js';
 
 function postRewrite(baseUrl: string, token: string, body: unknown): Promise<Response> {
@@ -176,6 +176,53 @@ describe('/v1/rewrite SSE 改写管道', () => {
       const content = sys?.content;
       const sysText = typeof content === 'string' ? content : JSON.stringify(content);
       expect(sysText).not.toContain('## 声口摘要');
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('姿态层：body 带 persona → 「## 当前角色」注入在 rewrite 契约之后、声口摘要之前', async () => {
+    const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'core-rewrite-persona-'));
+    fs.mkdirSync(path.join(workDir, '.novel'), { recursive: true });
+    fs.writeFileSync(path.join(workDir, '.novel', 'style.md'), '## 摘要\n\n冷峻克制。', 'utf8');
+    const model = stepModel([textResult(['改后。'])]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const res = await postRewrite(s.baseUrl, s.token, { original: '原。', instruction: '', workDir, persona: '责编' });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      const content = sys?.content;
+      const sysText = typeof content === 'string' ? content : JSON.stringify(content);
+      expect(sysText).toContain('## 当前角色');
+      expect(sysText).toContain('有据'); // 责编正文特征
+      // rewrite 契约（正文在 `你有` 结构之后）→ 姿态层 → 数据层（声口摘要）
+      expect(sysText.indexOf('## 当前角色')).toBeLessThan(sysText.indexOf('## 声口摘要'));
+    } finally {
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('姿态层：persona 找不到 → 零注入；含控制字符 → 400', async () => {
+    const model = stepModel([textResult(['改后。'])]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const notFound = await postRewrite(s.baseUrl, s.token, { original: '原。', instruction: '', persona: '不存在的角色' });
+      expect(notFound.status).toBe(200);
+      await readSse(notFound);
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      const content = sys?.content;
+      const sysText = typeof content === 'string' ? content : JSON.stringify(content);
+      expect(sysText).not.toContain('## 当前角色');
+      expect(warn).toHaveBeenCalled();
+      warn.mockRestore();
+
+      const bad = await postRewrite(s.baseUrl, s.token, { original: '原。', instruction: '', persona: '责编\n注入' });
+      expect(bad.status).toBe(400);
+      const body = (await bad.json()) as { error: string };
+      expect(body.error).toContain('控制字符');
     } finally {
       await s.close();
     }

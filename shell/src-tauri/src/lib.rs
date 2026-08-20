@@ -11,7 +11,7 @@ use tauri::Manager;
 use tauri_plugin_updater::UpdaterExt;
 
 /// 协议契约版本（core 侧自报，docs/decisions/0007）。壳只认这个版本，不匹配即拒接。
-const EXPECTED_PROTOCOL: u64 = 1;
+const EXPECTED_PROTOCOL: u64 = 2;
 
 /// 应用配置文件（app_config_dir 下）。字段可空：空=回落环境变量/缺省。
 const CONFIG_FILE: &str = "config.json";
@@ -889,10 +889,10 @@ mod tests {
   /// 握手校验：协议版本不匹配或缺失必须拒接（快速失败，防新旧壳/core 混接）。
   #[test]
   fn handshake_validates_protocol() {
-    assert!(validate_protocol(Some(1)).is_ok(), "期望协议 v1 通过");
+    assert!(validate_protocol(Some(2)).is_ok(), "期望协议 v2 通过（决策 0010）");
     assert!(
-      validate_protocol(Some(2)).is_err(),
-      "协议 v2 与壳期望不符必须拒绝"
+      validate_protocol(Some(3)).is_err(),
+      "协议 v3 与壳期望不符必须拒绝"
     );
     assert!(validate_protocol(None).is_err(), "缺 protocol 字段必须拒绝");
   }

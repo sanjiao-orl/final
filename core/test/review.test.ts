@@ -229,4 +229,24 @@ describe('POST /v1/review 贵档审阅', () => {
       await s.close();
     }
   });
+
+  it('姿态层：body 带 persona → 系统提示在 review 契约后注入「## 当前角色」，输出契约不变', async () => {
+    const model = generateModel([JSON.stringify({ elements: GOOD_FINDINGS })]);
+    const s = await startTestServer({
+      modelForTier: () => model,
+      tools: ledgerSliceTools('slice'),
+    });
+    try {
+      const res = await postReview(s.baseUrl, s.token, { ...GOOD_BODY, persona: '责编' });
+      expect(res.status).toBe(200);
+      // review 输出契约封存不动：findings 结构照旧
+      expect(await res.json()).toEqual({ findings: GOOD_FINDINGS });
+      const system = model.doGenerateCalls[0]!.prompt.find((m) => m.role === 'system');
+      const sysText = JSON.stringify(system?.content);
+      expect(sysText).toContain('## 当前角色');
+      expect(sysText).toContain('有据'); // 责编正文特征
+    } finally {
+      await s.close();
+    }
+  });
 });

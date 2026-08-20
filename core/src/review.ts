@@ -17,11 +17,21 @@ import {
 import { z } from 'zod';
 import { getLlmTimeoutSeconds, type Tier } from './config.js';
 import { HttpError, writeJson } from './http.js';
-import { loadPrompt } from './prompts.js';
+import { loadPersona, loadPrompt } from './prompts.js';
 
 export const reviewBodySchema = z.object({
   workDir: z.string().min(1),
   chapterRelPath: z.string().min(1),
+  /**
+   * 姿态层角色名（决策 0010）：按名解析角色正文，拼系统提示「## 当前角色」段。
+   * review 输出契约封存不动（role 只影响评判姿态）；无 persona 或按名找不到 = 零注入。
+   */
+  persona: z
+    .string()
+    .min(1)
+    .max(100)
+    .refine((s) => !/[\x00-\x1f\x7f]/.test(s), '不能包含控制字符')
+    .optional(),
 });
 export type ReviewBody = z.infer<typeof reviewBodySchema>;
 
@@ -75,9 +85,17 @@ export async function handleReviewRequest(
     // 第二步：main 档模型一次性结构化输出。generateText + Output.array 由 SDK 按 responseFormat
     // 约束模型输出 { elements: [...] } 并解析 + zod 校验，result.output 即 ReviewFinding[]（无围栏容错）。
     // system 每次请求现取（mtime 感知热重载，改文件即生效）。
+    let system = loadPrompt('review');
+    // 姿态层：角色注入（决策 0010）——只影响评判姿态，输出契约（findings JSON）不动。
+    if (parsed.data.persona) {
+      const personaBody = loadPersona(parsed.data.persona, workDir);
+      if (personaBody) {
+        system += `\n\n## 当前角色\n${personaBody}`;
+      }
+    }
     const result = await generateText({
       model: deps.modelForTier('review'),
-      system: loadPrompt('review'),
+      system,
       prompt: slice,
       output: Output.array({ element: reviewFindingSchema }),
       abortSignal: AbortSignal.any([abort.signal, timeoutSignal]),

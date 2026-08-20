@@ -9,6 +9,8 @@ import { devPage } from './dev.js';
 import { corsHeadersFor, HttpError, readJsonBody, toPublicErrorMessage, writeJson } from './http.js';
 import { handleReviewRequest } from './review.js';
 import { handleRewriteRequest, type RewriteDeps } from './rewrite.js';
+import { listPosture } from './prompts.js';
+import { normalizeWorkDir } from './workdir.js';
 import { PROTOCOL_VERSION } from './runtime.js';
 import type { CandidateStore, CandidateStatus } from './candidate-store.js';
 import type { SessionStore } from './session-store.js';
@@ -127,6 +129,15 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
     }
     const messages = deps.store.listMessages(id);
     writeJson(res, 200, { sessionId: id, messages }, req.headers.origin);
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/v1/posture') {
+    // 姿态清单（决策 0010/0013）：app 级 + 可选书级（遮蔽只露书级）+ 激活方案名。
+    // workDir 省略只回 app 级；传了则过存在性/目录校验（同 chat/rewrite 口径，非法 400）。
+    const raw = url.searchParams.get('workDir');
+    const workDir = raw ? normalizeWorkDir(raw) : undefined;
+    writeJson(res, 200, listPosture(workDir), req.headers.origin);
     return;
   }
 

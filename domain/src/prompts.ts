@@ -1,11 +1,12 @@
 /**
  * domain/src/prompts.ts —— 提示词/skill 文件的最小加载器，与 core/src/prompts.ts 互为镜像（口径一致）：
  * frontmatter 格式、目录解析顺序（NOVEL_PROMPT_DIR > 随包/仓库 core/prompts）、坏文件跳过并 warn。
- * domain 侧只消费两份事实源：cold-read.md（冷读契约，见 ledger.ts）与 kind:skill 文件（skill_read 按需拉正文）。
+ * domain 侧消费的提示词事实源：cold-read.md（冷读契约，见 ledger.ts）、kind:skill 文件（skill_read 按需拉正文）
+ * 与写作方案文件（scheme_set_active 校验/写入激活指针）。
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { assertWorkDir, resolveInside } from './fsutil.js';
+import { assertWorkDir, atomicWrite, resolveInside } from './fsutil.js';
 
 export type PromptKind = 'cold_read';
 
@@ -151,4 +152,89 @@ export function readSkillBody(workDir: string, name: string, appPromptDir: strin
   const app = findSkillByName(appPromptDir, name);
   if (app) return app.body;
   throw new Error(`skill_read 找不到 skill: ${name}`);
+}
+
+// ---------- 写作方案（scheme_set_active 的可用集扫描与激活指针） ----------
+
+export interface SchemeInfo {
+  name: string;
+  description: string;
+}
+
+export interface SchemeFile extends SchemeInfo {
+  /** 文件绝对路径。 */
+  file: string;
+  body: string;
+}
+
+/** 扫描目录下所有带 frontmatter name 的方案 md（flat）；无目录返回空，缺 name/坏文件跳过并 warn。 */
+export function scanSchemeFiles(dir: string): SchemeFile[] {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out: SchemeFile[] = [];
+  for (const e of entries
+    .filter((x) => x.isFile() && x.name.toLowerCase().endsWith('.md'))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+    const file = path.join(dir, e.name);
+    let content: string;
+    try {
+      content = fs.readFileSync(file, 'utf8');
+    } catch {
+      continue;
+    }
+    const parsed = parsePromptFile(content);
+    const name = parsed.frontmatter.name?.trim();
+    if (!name) {
+      console.warn(`[domain prompts] 方案 md 缺少 frontmatter name，跳过: ${file}`);
+      continue;
+    }
+    out.push({ file, name, description: parsed.frontmatter.description ?? '', body: parsed.body });
+  }
+  return out;
+}
+
+/** 「激活方案」指针固定路径（相对 workDir），单行文本=方案 frontmatter name；无文件=默认不激活。 */
+export const ACTIVE_SCHEME_REL = '.novel/active-scheme';
+
+/**
+ * scheme_set_active 业务实现：把「激活方案」指针写入作品目录。
+ * - name 非空 → 校验其属于可用方案集（app 预置 <promptRoot>/schemes 与书级 .novel/schemes 的 frontmatter name 并集，
+ *   同名书级遮蔽 app 级），命中则原子写 .novel/active-scheme（内容=name 单行+结尾换行）；
+ *   未命中抛中文错并列可用方案名。
+ * - name 为空串 → 删除指针文件（不存在则幂等成功），回到默认（不激活）。
+ * 路径固定 .novel/active-scheme，不接受任何路径参数；不做历史快照。
+ * 返回 { ok: true, active: string | null }。
+ */
+export function schemeSetActive(
+  workDir: string,
+  name: string,
+  appPromptDir: string = resolvePromptRoot(),
+): { ok: true; active: string | null } {
+  const wd = assertWorkDir(workDir);
+  const pointer = resolveInside(wd, ACTIVE_SCHEME_REL);
+  const trimmed = name?.trim() ?? '';
+  if (trimmed === '') {
+    fs.rmSync(pointer, { force: true }); // 无 .novel/ 目录或指针不存在同样幂等成功
+    return { ok: true, active: null };
+  }
+  const bookDir = resolveInside(wd, '.novel/schemes');
+  const available = [
+    ...new Set<string>([
+      ...scanSchemeFiles(bookDir).map((s) => s.name),
+      ...scanSchemeFiles(path.join(appPromptDir, 'schemes')).map((s) => s.name),
+    ]),
+  ].sort();
+  if (!available.includes(trimmed)) {
+    const list =
+      available.length > 0
+        ? available.join('、')
+        : '（暂无可用方案，可在 .novel/schemes/ 放置带 frontmatter name 的方案 md）';
+    throw new Error(`scheme_set_active 找不到方案「${trimmed}」，可用方案：${list}`);
+  }
+  atomicWrite(pointer, `${trimmed}\n`);
+  return { ok: true, active: trimmed };
 }

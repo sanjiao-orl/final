@@ -27,7 +27,7 @@ node core/scripts/e2e-workflow.mjs   # 写作闭环剧本:起草→暂存→采�
 - `domain/` — MCP 领域服务:结构树(卷/章/场,标题派生)、章节读写(原子写)、搜索、字数统计、章/卷生产与组织(新建/重命名/卷内重排)、历史快照读取
 - `shell/` — Tauri 2 + Svelte 5 + TipTap 壳(v5 布局:48px AI 窄条 + 会话/对话/工具/上下文/设置五栏,点击切换;左侧结构树 + 作者笔记(AI 物理不可见);多候选浮层 B1、工具卡 B3/B10、快照浏览器、目标字数 B5、ask/auto/yolo 审批 B6、会话多级挂载 B7、采纳留痕 B8、树搜索/场大纲/拖拽 B9、设置面板;自动保存间隔可配)
 - `.demo-work/` — 演示作品(测试文本,随时可删)
-- `docs/` — 需求基线(01-产品定义)、现状与计划(现状.md)、决策记录(decisions/0001-0011);历史文档(诊断 00/roadmap/壳重设计系列/审核手册/生态调研/路线偏移与最新进展等)在 `docs/archive/`(逐件索引见 archive/README.md)
+- `docs/` — 需求基线(01-产品定义)、现状与计划(现状.md)、决策记录(decisions/0001-0013);历史文档(诊断 00/roadmap/壳重设计系列/审核手册/生态调研/路线偏移与最新进展等)在 `docs/archive/`(逐件索引见 archive/README.md)
 - `scripts/check-env.ps1` — 检查 LLM_* 环境变量是否配置
 
 ## 下一轮流程（动工前必读）
@@ -45,7 +45,7 @@ node core/scripts/e2e-workflow.mjs   # 写作闭环剧本:起草→暂存→采�
   脚本 `scripts/release.mjs` 先工作树预检(有未提交改动即拦截)→ 同步五处版本号(`shell/src-tauri/tauri.conf.json`、`shell/package.json`、`shell/src-tauri/Cargo.toml`、`core/package.json`、`domain/package.json`;写完由 `scripts/check-versions.mjs` 自检,不一致即中止)→ 带签名私钥跑 `npx tauri build --ci` → 收集 NSIS/MSI 与 `.sig` → 生成 `latest.json` → 版本落账(自动 `chore(release): bump vX.Y.Z` + tag + push,幂等)→ 建草稿 release 逐文件 `gh release upload --clobber` 上传(gh 走 rustls,根治 curl/schannel 大文件上传卡死;失败重试,断网修复后重跑同一命令续传)→ 全部传完才发布。
 - 签名密钥在仓外 `%USERPROFILE%\.tauri\novel-ws.key`(本仓为空密码;pubkey 已写入 tauri.conf.json,私钥绝不入库)。可用 `TAURI_SIGNING_PRIVATE_KEY_PATH` 覆盖路径,或 `TAURI_SIGNING_PRIVATE_KEY` 直接给密钥内容;密码用 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。
 - 版本号改动由脚本自动落账(commit/tag/push),无需手动提交;工作树不干净时脚本会直接拦截。
-- 发布记录:v0.1.0 首发(真实更新通道基线);v0.1.1 升级通道闭环验证;v0.1.x 壳 v4 与真实使用反馈修复;v0.2.0 壳 v5;v0.2.1 批一安全修复 + prompt/skill 文件机制;v0.2.2 审计收口 + 批三-1/-2/-3 + 更新体验修复(当前最新,实机 0.2.1→0.2.2 自动升级验证通过)。
+- 发布记录:v0.1.0 首发(真实更新通道基线);v0.1.1 升级通道闭环验证;v0.1.x 壳 v4 与真实使用反馈修复;v0.2.0 壳 v5;v0.2.1 批一安全修复 + prompt/skill 文件机制;v0.2.2 审计收口 + 批三-1/-2/-3 + 更新体验修复(实机 0.2.1→0.2.2 自动升级验证通过);v0.2.3 铁律回归批(chat 正文一律经 stage_chapter_proposal 进暂存区、设定路由防 manuscript 污染,决策 0012,当前最新)。
 
 ## production 打包（sidecar 随安装包分发）
 
@@ -55,7 +55,7 @@ node core/scripts/e2e-workflow.mjs   # 写作闭环剧本:起草→暂存→采�
 
 ## 验收口径
 
-- `npm run check` / `npm test`(570 用例:core 140 + domain 235 + shell 195;另 cargo test 16;写作闭环 e2e-workflow 7 步,真实 LLM key 在场才跑)
+- `npm run check` / `npm test`(623 用例:core 167 + domain 240 + shell 216;另 cargo test 16;写作闭环 e2e-workflow 7 步,真实 LLM key 在场才跑)
 - 每周出口 = 作者用本仓真实写作;不以测试绿为验收
 
 ## 已知现象

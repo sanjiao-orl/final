@@ -11,12 +11,17 @@ import {
   type WorkDiagnostics,
   type WorkScanResult,
 } from './review.svelte.js';
+import { scheme } from './scheme.svelte.js';
 import { work } from './work.svelte.js';
 import { ISSUE_LOG_DEFAULT } from './paths.js';
 
 beforeEach(() => {
   work.error = null;
   work.notice = null;
+  // scheme 是模块单例：清方案态，避免 review persona 跨用例泄漏
+  scheme.personas = [];
+  scheme.schemes = [];
+  scheme.activeScheme = null;
 });
 
 function mockClient(callTool: ReturnType<typeof vi.fn>, review?: ReturnType<typeof vi.fn>): CoreClient {
@@ -249,6 +254,24 @@ describe('ReviewStore', () => {
     expect(row.premium[0]!.severity).toBe('BLOCKER');
     expect(s.blockerTotal).toBe(before + 1);
     expect(s.running).toBe(false);
+  });
+
+  it('runPremium：激活方案映射 review persona → 调 client.review 带 persona（决策 0010）', async () => {
+    const getPosture = vi.fn().mockResolvedValue({
+      personas: [],
+      schemes: [
+        { name: 'S', description: '', channels: { chat: '外婆', rewrite: '童稚', review: '刺猬' }, source: 'work' },
+      ],
+      activeScheme: 'S',
+    });
+    const review = vi.fn().mockResolvedValue({ findings: [] });
+    const s = new ReviewStore();
+    s.init(mockClient(vi.fn(), review), 'C:/works/demo');
+    scheme.init({ callTool: vi.fn(), review: vi.fn(), getPosture } as unknown as CoreClient);
+    work.workDir = 'C:/works/demo';
+    await scheme.load(); // activeScheme='S' → review 通道 persona='刺猬'
+    await s.runPremium('manuscript/卷一/第1章.md');
+    expect(review).toHaveBeenCalledWith('C:/works/demo', 'manuscript/卷一/第1章.md', '刺猬');
   });
 
   it('runPremium：不先跑便宜档也能单独展示贵档结果', async () => {

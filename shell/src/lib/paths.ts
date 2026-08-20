@@ -11,6 +11,12 @@ export const NOVEL_DIR = '.novel/';
 export const ISSUE_LOG_DEFAULT = 'editorial_notes/issues.md';
 /** 软删回收站目录（相对 workDir）。 */
 export const TRASH_DIR = `${NOVEL_DIR}trash/`;
+/** 当前激活方案名（相对 workDir，决策 0010）。 */
+export const ACTIVE_SCHEME_PATH = `${NOVEL_DIR}active-scheme`;
+/** 角色目录（相对 workDir，决策 0010）。 */
+export const PERSONAS_DIR = `${NOVEL_DIR}personas/`;
+/** 方案目录（相对 workDir，决策 0010）。 */
+export const SCHEMES_DIR = `${NOVEL_DIR}schemes/`;
 
 /** 危险工具放行去重键前缀（approval 门与工具卡共用，必须同源）。 */
 export const WRITE_KEY_PREFIX = 'write:';

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CoreClient, RewriteStreamHandlers } from './core.js';
 import type { Candidate } from './types.js';
 import { CandidatesStore } from './candidates.svelte.js';
+import { scheme } from './scheme.svelte.js';
 import { snapshot } from './snapshot.svelte.js';
 import { work } from './work.svelte.js';
 
@@ -47,6 +48,10 @@ beforeEach(() => {
   work.dirty = false;
   work.saving = false;
   work.registerEditor(null);
+  // scheme 是模块单例：清方案态，避免 rewrite persona 跨用例泄漏
+  scheme.personas = [];
+  scheme.schemes = [];
+  scheme.activeScheme = null;
 });
 
 describe('CandidatesStore', () => {
@@ -124,6 +129,78 @@ describe('CandidatesStore', () => {
     expect(work.error).toContain('AI 改写失败');
     expect(createCandidate).not.toHaveBeenCalled();
     expect(store.items).toEqual([]);
+  });
+
+  it('createFromSelection / rewriteText：激活方案映射 rewrite persona → 请求体带 persona（决策 0010）', async () => {
+    const getPosture = vi.fn().mockResolvedValue({
+      personas: [],
+      schemes: [
+        { name: 'S', description: '', channels: { chat: '外婆', rewrite: '童稚', review: '刺猬' }, source: 'work' },
+      ],
+      activeScheme: 'S',
+    });
+    const rewriteStream = vi.fn((_b: unknown, h: RewriteStreamHandlers) => {
+      h.onDelta?.('改写X');
+      h.onDone?.({ text: '改写X' });
+    });
+    const createCandidate = vi.fn().mockResolvedValue({ candidate: CAND });
+    const client = clientOf({ rewriteStream, createCandidate, getPosture });
+    const store = new CandidatesStore();
+    store.init(client);
+    scheme.init(client);
+    work.workDir = 'C:/works/demo';
+    await scheme.load(); // activeScheme='S' → rewrite 通道 persona='童稚'
+    await store.createFromSelection('章节A.md', '原文X', '润色');
+    const body = (rewriteStream as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(body).toMatchObject({ original: '原文X', instruction: '润色', workDir: 'C:/works/demo', persona: '童稚' });
+    store.clearSelection();
+    // 就地浮层改写同样带 persona
+    await store.rewriteText('原文X', '润色', undefined, 'C:/works/demo');
+    const body2 = (rewriteStream as ReturnType<typeof vi.fn>).mock.calls[1]?.[0] as Record<string, unknown>;
+    expect(body2).toMatchObject({ original: '原文X', instruction: '润色', workDir: 'C:/works/demo', persona: '童稚' });
+  });
+
+  it('rectifySelected：激活方案映射 rewrite persona → 整改请求体带 persona', async () => {
+    const getPosture = vi.fn().mockResolvedValue({
+      personas: [],
+      schemes: [
+        { name: 'S', description: '', channels: { chat: '外婆', rewrite: '童稚', review: '刺猬' }, source: 'work' },
+      ],
+      activeScheme: 'S',
+    });
+    const rewriteStream = vi.fn((_b: unknown, h: RewriteStreamHandlers) => {
+      h.onDelta?.('整改后文本');
+      h.onDone?.({ text: '整改后文本' });
+    });
+    const patchCandidate = vi.fn().mockResolvedValue({ candidate: CAND });
+    const client = clientOf({ rewriteStream, patchCandidate, getPosture });
+    const store = new CandidatesStore();
+    store.init(client);
+    scheme.init(client);
+    work.workDir = 'C:/works/demo';
+    await scheme.load();
+    store.items = [CAND];
+    store.toggleSelect('c1');
+    await store.rectifySelected('换成爽文节奏');
+    const body = (rewriteStream as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(body).toMatchObject({ workDir: 'C:/works/demo', persona: '童稚' });
+    expect(String(body.instruction)).toContain('整改要求：换成爽文节奏');
+  });
+
+  it('无激活方案：改写请求体不带 persona（决策 0010）', async () => {
+    const rewriteStream = vi.fn((_b: unknown, h: RewriteStreamHandlers) => {
+      h.onDelta?.('改写X');
+      h.onDone?.({ text: '改写X' });
+    });
+    const createCandidate = vi.fn().mockResolvedValue({ candidate: CAND });
+    const client = clientOf({ rewriteStream, createCandidate });
+    const store = new CandidatesStore();
+    store.init(client);
+    work.workDir = 'C:/works/demo';
+    await store.createFromSelection('章节A.md', '原文X', '润色');
+    const body = (rewriteStream as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(body).toMatchObject({ original: '原文X', instruction: '润色', workDir: 'C:/works/demo' });
+    expect(Object.prototype.hasOwnProperty.call(body, 'persona')).toBe(false);
   });
 
   it('adoptSelected：同章逐条替换 → adopted 落库 → 保存 → 清选择', async () => {

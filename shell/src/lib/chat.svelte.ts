@@ -13,6 +13,7 @@ import { approval } from './approval.svelte.js';
 import { candidates } from './candidates.svelte.js';
 import { settings } from './settings.svelte.js';
 import { snapshot } from './snapshot.svelte.js';
+import { scheme } from './scheme.svelte.js';
 import { work } from './work.svelte.js';
 
 export type ToolState = 'running' | 'done' | 'pending' | 'rejected';
@@ -370,9 +371,11 @@ export class ChatStore {
     try {
       // 批三-3：章节挂载（scope=ch:…）时把当前章 relPath 带给 core（账本切片/章上下文用）；解析不到不带。
       const chapterNode = this.chapterNodeForScope();
+      // 决策 0010：激活方案映射到 chat 通道的 persona，无激活/无映射不带。
+      const persona = scheme.channelPersona('chat');
       const body = this.sessionId
-        ? { sessionId: this.sessionId, text: trimmed, workDir: work.workDir, tier: this.tier, ...(chapterNode ? { chapter: chapterNode.relPath } : {}) }
-        : { text: trimmed, workDir: work.workDir, scope: this.scope, tier: this.tier, ...(chapterNode ? { chapter: chapterNode.relPath } : {}) };
+        ? { sessionId: this.sessionId, text: trimmed, workDir: work.workDir, tier: this.tier, ...(chapterNode ? { chapter: chapterNode.relPath } : {}), ...(persona ? { persona } : {}) }
+        : { text: trimmed, workDir: work.workDir, scope: this.scope, tier: this.tier, ...(chapterNode ? { chapter: chapterNode.relPath } : {}), ...(persona ? { persona } : {}) };
       await this.client.chatStream(body, {
         onDelta: (t) => {
           const m = this.messages[idx];

@@ -10,6 +10,7 @@
   import { settings } from './lib/settings.svelte.js';
   import { snapshot } from './lib/snapshot.svelte.js';
   import { review } from './lib/review.svelte.js';
+  import { scheme } from './lib/scheme.svelte.js';
   import { ui } from './lib/ui.svelte.js';
   import { mdToHtml } from './lib/markdown.js';
   import { approval } from './lib/approval.svelte.js';
@@ -26,8 +27,8 @@
   import ReviewPanel from './components/review/ReviewPanel.svelte';
   import DialogHost from './components/DialogHost.svelte';
 
-  /** 协议契约版本（与 shell/src-tauri/src/lib.rs 的 EXPECTED_PROTOCOL 对齐，docs/decisions/0007）。 */
-  const EXPECTED_PROTOCOL = 1;
+  /** 协议契约版本（与 shell/src-tauri/src/lib.rs 的 EXPECTED_PROTOCOL 对齐，docs/decisions/0007）。决策 0010 升 v2。 */
+  const EXPECTED_PROTOCOL = 2;
 
   let booted = $state(false);
   let bootError = $state<string | null>(null);
@@ -42,8 +43,9 @@
     candidates.init(client);
     snapshot.init(client, workDir);
     review.init(client, workDir);
+    scheme.init(client); // work.init 已就位 workDir，load 直接按新作品拉 posture
     // 启动握手（D2，对齐 shell/src-tauri/src/lib.rs 的 validate_protocol）：
-    // /v1/health 自报 protocol 字段，期望 v1，不匹配或缺字段直接红条拒接。
+    // /v1/health 自报 protocol 字段，期望 v2，不匹配或缺字段直接红条拒接。
     const health = await client.health();
     if (typeof health.protocol === 'number' && health.protocol !== EXPECTED_PROTOCOL) {
       throw new Error(
@@ -56,6 +58,7 @@
     await work.loadStructure();
     await chat.setScope(''); // 默认无归属讨论
     await candidates.load();
+    await scheme.load(); // 角色与方案（决策 0010）；失败静默降级为空态，不挡 boot/换书
   }
 
   onMount(async () => {
