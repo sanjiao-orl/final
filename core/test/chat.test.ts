@@ -341,14 +341,14 @@ describe('/v1/chat SSE 管道', () => {
     }
   });
 
-  it('回放字符预算：历史超 25k 字符只回放最近片段，截断后从 user 开始', async () => {
+  it('回放字符预算：历史超 40k 字符只回放最近片段，截断后从 user 开始', async () => {
     const model = stepModel([textResult(['好'])]);
     const s = await startTestServer({ modelForTier: () => model });
     try {
       const sid = s.store.createSession('预算').id;
-      s.store.addMessage(sid, { role: 'user', content: 'A'.repeat(20_000) });
-      s.store.addMessage(sid, { role: 'assistant', content: 'B'.repeat(20_000) });
-      // 从最新往回：assistant 20k ≤ 25k 保留；user 20k 会超预算被截；回放 [assistant, user] 首条 assistant 被裁
+      s.store.addMessage(sid, { role: 'user', content: 'A'.repeat(30_000) });
+      s.store.addMessage(sid, { role: 'assistant', content: 'B'.repeat(30_000) });
+      // 从最新往回：assistant 30k ≤ 40k 保留；user 30k 会超预算被截；回放 [assistant, user] 首条 assistant 被裁
       const res = await postChat(s.baseUrl, s.token, { sessionId: sid, text: '最新问题' });
       const evs = await readSse(res);
       expect(evs.at(-1)!.event).toBe('done');
@@ -493,16 +493,16 @@ describe('/v1/chat SSE 管道', () => {
     }
   });
 
-  it('工具结果落库截断：单条结果最多存 500 字符', async () => {
+  it('工具结果落库：长结果原样落库（不再 500 截断），超 20k 才截断并加省略标注', async () => {
     const model = stepModel([
       toolCallResult('tc-1', 'long_result', {}),
       textResult(['完成']),
     ]);
     const longResultTools: ToolSet = {
       long_result: tool({
-        description: '返回超长结果',
+        description: '返回长结果',
         inputSchema: z.object({}),
-        execute: async () => 'L'.repeat(800),
+        execute: async () => 'L'.repeat(5_000),
       }),
     };
     const s = await startTestServer({ modelForTier: () => model, tools: longResultTools });
@@ -513,8 +513,42 @@ describe('/v1/chat SSE 管道', () => {
 
       const sessionId = events.at(-1)!.data.sessionId as string;
       const assistant = s.store.listMessages(sessionId).at(-1)!;
+      // 5000 字符全量落库，无截断标注
       expect(assistant.toolCalls).toEqual([
-        { id: 'tc-1', name: 'long_result', args: {}, result: 'L'.repeat(500) },
+        { id: 'tc-1', name: 'long_result', args: {}, result: 'L'.repeat(5_000) },
+      ]);
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('工具结果落库防爆：单条结果超 20k 截断并加省略标注', async () => {
+    const model = stepModel([
+      toolCallResult('tc-1', 'long_result', {}),
+      textResult(['完成']),
+    ]);
+    const longResultTools: ToolSet = {
+      long_result: tool({
+        description: '返回超长结果',
+        inputSchema: z.object({}),
+        execute: async () => 'L'.repeat(25_000),
+      }),
+    };
+    const s = await startTestServer({ modelForTier: () => model, tools: longResultTools });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '执行超长结果工具' });
+      const events = await readSse(res);
+      expect(events.at(-1)!.event).toBe('done');
+
+      const sessionId = events.at(-1)!.data.sessionId as string;
+      const assistant = s.store.listMessages(sessionId).at(-1)!;
+      expect(assistant.toolCalls).toEqual([
+        {
+          id: 'tc-1',
+          name: 'long_result',
+          args: {},
+          result: 'L'.repeat(20_000) + '\n…（已截断，可再调工具取全量）',
+        },
       ]);
     } finally {
       await s.close();
@@ -586,7 +620,7 @@ describe('/v1/chat SSE 管道', () => {
     }
   });
 
-  it('回放工具结果截断：单条结果最多回放 500 字符(与落库同值)', async () => {
+  it('回放工具结果截断分档：非内容类工具最多回放 500 字符并加省略标注', async () => {
     const model = stepModel([textResult(['好'])]);
     const s = await startTestServer({ modelForTier: () => model });
     try {
@@ -611,7 +645,7 @@ describe('/v1/chat SSE 管道', () => {
           type: 'tool-result',
           toolCallId: 'tc-1',
           toolName: 'read_file',
-          output: { type: 'text', value: 'R'.repeat(500) },
+          output: { type: 'text', value: 'R'.repeat(500) + '\n…（已截断，可再调工具取全量）' },
         },
       ]);
     } finally {
@@ -619,7 +653,39 @@ describe('/v1/chat SSE 管道', () => {
     }
   });
 
-  it('回放结果计入字符预算：正文+结果超 25k 时整组裁掉，不留孤儿工具消息', async () => {
+  it('回放工具结果截断分档：内容类工具(read_chapter)回放 3000 字符并加省略标注', async () => {
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const sid = s.store.createSession('内容档截断').id;
+      s.store.addMessage(sid, { role: 'user', content: '第一问' });
+      s.store.addMessage(sid, {
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'tc-1', name: 'read_chapter', args: { relPath: 'ch01.md' }, result: 'R'.repeat(10_000) }],
+      });
+      s.store.addMessage(sid, { role: 'user', content: '追问' });
+
+      const res = await postChat(s.baseUrl, s.token, { sessionId: sid, text: '最新问题' });
+      const evs = await readSse(res);
+      expect(evs.at(-1)!.event).toBe('done');
+
+      const prompt = model.doStreamCalls[0]!.prompt.filter((m) => m.role !== 'system');
+      const toolMsg = prompt.find((m) => m.role === 'tool')!;
+      expect(toolMsg.content).toEqual([
+        {
+          type: 'tool-result',
+          toolCallId: 'tc-1',
+          toolName: 'read_chapter',
+          output: { type: 'text', value: 'R'.repeat(3_000) + '\n…（已截断，可再调工具取全量）' },
+        },
+      ]);
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('回放结果计入字符预算：正文+结果超 40k 时整组裁掉，不留孤儿工具消息', async () => {
     const model = stepModel([textResult(['好'])]);
     const s = await startTestServer({ modelForTier: () => model });
     try {
@@ -627,7 +693,7 @@ describe('/v1/chat SSE 管道', () => {
       s.store.addMessage(sid, { role: 'user', content: '第一问' });
       s.store.addMessage(sid, {
         role: 'assistant',
-        content: 'B'.repeat(24_700),
+        content: 'B'.repeat(39_700),
         toolCalls: [{ id: 'tc-1', name: 'word_count', args: {}, result: 'R'.repeat(400) }],
       });
       s.store.addMessage(sid, { role: 'user', content: '追问' });

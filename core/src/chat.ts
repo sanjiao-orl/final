@@ -213,15 +213,35 @@ const MAX_STEPS = 8;
 const MAX_REPLAY_MESSAGES = 20;
 
 /** 跨对话记忆：回放历史的总字符预算（正文+工具结果），超限从最旧处截断。 */
-const MAX_REPLAY_CHARS = 25_000;
+const MAX_REPLAY_CHARS = 40_000;
 
 /**
- * 工具结果截断单值：落库与回放同用一个上限 500——存什么回放什么，不做二次截断。
- * 落库：单条结果最多存 500 字符，仍放在 tool_calls JSON blob 元素的 result 字段。
- * 取舍实录(v5 验收实测):300 时 read_chapter 整章正文在开篇处被截，模型公开抱怨"只读到开头",
- * 对最高频内容工具偏紧;500 仍受 MAX_REPLAY_CHARS 总预算兜底(整组裁,不留孤儿),语义更直白。
+ * 工具结果落库上限：单条结果最多存 20_000 字符（防爆兜底，整章正文也够放），
+ * 仍放在 tool_calls JSON blob 元素的 result 字段。落库与回放分离：存尽量全量，
+ * 回放再按工具分档截断——存得全才给得起；截断时末尾追加省略标注。
  */
-const TOOL_RESULT_MAX_CHARS = 500;
+const TOOL_RESULT_STORE_MAX_CHARS = 20_000;
+
+/** 工具结果回放默认档：状态/计数类小结果 500 足够。 */
+const TOOL_RESULT_REPLAY_DEFAULT_CHARS = 500;
+
+/**
+ * 工具结果回放内容档：返回正文/长文本的工具给 3000。
+ * 取舍实录(v5 验收实测):500 时 read_chapter 整章正文在开篇处被截,模型公开抱怨"只读到开头";
+ * 仍受 MAX_REPLAY_CHARS 总预算兜底(整组裁,不留孤儿)。
+ */
+const TOOL_RESULT_REPLAY_CONTENT_CHARS = 3_000;
+
+/** 内容类工具（返回正文/长文本）清单：回放用内容档，其余工具走默认档。 */
+const CONTENT_REPLAY_TOOLS = new Set([
+  'read_chapter',
+  'read_snapshot',
+  'ledger_read',
+  'ledger_slice',
+  'ledger_chapter_slice',
+  'search_content',
+  'skill_read',
+]);
 
 /**
  * 跨对话记忆：把会话历史回放成 AI SDK v7 ModelMessage[]。
@@ -265,8 +285,16 @@ function toolResultToText(output: unknown): string {
   return String(output);
 }
 
-function truncateText(text: string, max: number): string {
-  return text.length > max ? text.slice(0, max) : text;
+/** 工具结果截断：超限截到 max 并追加省略标注，提示模型可再调工具取全量。 */
+function truncateToolResult(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}\n…（已截断，可再调工具取全量）` : text;
+}
+
+/** 回放截断按工具分档：内容类工具给内容档，其余给默认档。 */
+function replayLimitFor(toolName: string): number {
+  return CONTENT_REPLAY_TOOLS.has(toolName)
+    ? TOOL_RESULT_REPLAY_CONTENT_CHARS
+    : TOOL_RESULT_REPLAY_DEFAULT_CHARS;
 }
 
 interface ParsedToolCall {
@@ -312,7 +340,7 @@ function buildReplayRow(row: MessageRow): { messages: ModelMessage[]; chars: num
       type: 'tool-result',
       toolCallId: c.id,
       toolName: c.name,
-      output: { type: 'text', value: truncateText(c.result, TOOL_RESULT_MAX_CHARS) },
+      output: { type: 'text', value: truncateToolResult(c.result, replayLimitFor(c.name)) },
     }));
     const assistantMessage: ModelMessage =
       row.content.trim() === ''
@@ -501,7 +529,7 @@ export async function handleChatRequest(
           break;
         }
         case 'tool-result': {
-          const resultText = truncateText(toolResultToText(part.output ?? null), TOOL_RESULT_MAX_CHARS);
+          const resultText = truncateToolResult(toolResultToText(part.output ?? null), TOOL_RESULT_STORE_MAX_CHARS);
           const call = toolCalls.find((c) => c.id === part.toolCallId);
           if (call) call.result = resultText;
           pump.emit('tool-result', { id: part.toolCallId, name: part.toolName, result: part.output ?? null });
