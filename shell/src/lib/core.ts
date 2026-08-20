@@ -9,6 +9,19 @@ import type { Candidate, SessionRow, StoredMessage } from './types.js';
 /** 协议契约前缀（core 全部业务端点）。 */
 const API_PREFIX = '/v1';
 
+/**
+ * 网络层失败（fetch 连不上 / 流中途断连）专用错误：区别于业务 4xx/5xx 响应。
+ * 错误信息自带可行动提示（core 可能已退出），让 chat / work 的错误展示不用逐处拼；
+ * 业务错误（SSE error 事件、HTTP 状态码）走普通 Error，不带这句。
+ */
+export class CoreNetworkError extends Error {
+  constructor(cause: unknown) {
+    const base = cause instanceof Error ? cause.message : String(cause);
+    super(`${base}；core 可能已退出，请到设置页重启 core`);
+    this.name = 'CoreNetworkError';
+  }
+}
+
 export interface CoreInfo {
   port: number;
   token: string;
@@ -109,10 +122,16 @@ export class CoreClient {
   ) {}
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
-    const res = await fetch(this.baseUrl + path, {
-      ...init,
-      headers: { Authorization: `Bearer ${this.token}`, ...init?.headers },
-    });
+    let res: Response;
+    try {
+      res = await fetch(this.baseUrl + path, {
+        ...init,
+        headers: { Authorization: `Bearer ${this.token}`, ...init?.headers },
+      });
+    } catch (err) {
+      // 连不上 / DNS 失败等网络层错误：带可行动提示（core 可能已退出）
+      throw new CoreNetworkError(err);
+    }
     const body: unknown = await res.json().catch(() => ({}));
     if (!res.ok) {
       const msg = (body as { error?: string }).error ?? `${res.status} ${res.statusText}`;
@@ -212,6 +231,8 @@ export class CoreClient {
       chapter?: string;
       /** 激活方案的角色名（决策 0010）；无激活不带。 */
       persona?: string;
+      /** 碰撞模式（批一③）：开启时 core 按 方案/漏洞/反方/裁决 四节输出。 */
+      mode?: 'collide';
     },
     handlers: ChatStreamHandlers,
     signal?: AbortSignal,
@@ -270,7 +291,13 @@ export class CoreClient {
       body: JSON.stringify(body),
     };
     if (signal) init.signal = signal;
-    const res = await fetch(`${this.baseUrl}${path}`, init);
+    let res: Response;
+    try {
+      res = await fetch(`${this.baseUrl}${path}`, init);
+    } catch (err) {
+      // 连不上 / DNS 失败等网络层错误：带可行动提示（core 可能已退出）
+      throw new CoreNetworkError(err);
+    }
     if (!res.ok || !res.body) {
       const j = (await res.json().catch(() => ({}))) as { error?: string };
       throw new Error(j.error ?? `请求失败: ${res.status}`);
@@ -290,7 +317,14 @@ export class CoreClient {
     }
     try {
       for (;;) {
-        const { done, value } = await reader.read();
+        let chunk: Awaited<ReturnType<typeof reader.read>>;
+        try {
+          chunk = await reader.read();
+        } catch (err) {
+          // 流中途断连（网络层）：带可行动提示（core 可能已退出）
+          throw new CoreNetworkError(err);
+        }
+        const { done, value } = chunk;
         if (done) break;
         buf += decoder.decode(value, { stream: true });
         const parsed = parseSseFrames(buf);

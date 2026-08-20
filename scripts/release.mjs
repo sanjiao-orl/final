@@ -1,15 +1,17 @@
 // release.mjs —— 真实发布脚本（零依赖 node）。
-// 职责：工作树预检 → 同步五处版本号（tauri.conf.json、shell/package.json、Cargo.toml、core/package.json、domain/package.json，写完后自检）
+// 职责：工作树预检 → 同步六处版本号（tauri.conf.json、shell/package.json、Cargo.toml、core/package.json、domain/package.json、
+//       package-lock.json 的 core/domain/shell 三段，并顺带同步 Cargo.lock 的 name = "app" 版本，写完后自检）
 //       → 带签名私钥跑 tauri build → 收集 bundle/.sig → 生成 latest.json → 版本落账（自动 commit/tag/push）→ 发布 release。
 // 发布流程（对网络限速/断流友好，幂等续传）：
-//   1) 工作树预检：git status --porcelain 非空则列出脏文件并中止，防止带未提交改动发版；
+//   1) 工作树预检：git status --porcelain 非空则列出脏文件；除版本文件（见 VERSION_FILES）外的任何脏文件
+//      中止，防止带未完成代码发版；仅版本文件脏时放行（那是上次发版半途遗留，续跑会覆盖重算为一致值）；
 //   2) gh release create vX.Y.Z --draft（只带 notes 不带文件；已存在则复用，可幂等续传）；
 //   3) 逐个文件用 gh release upload --clobber 上传（gh 走 rustls，根治 Windows curl/schannel 传大文件
 //      握手即卡死的问题——2026-08-17 v0.2.2 发布实证：curl 代理/直连三步全卡 0 字节，gh 同刻传 26MB/40MB 秒级成功；
 //      断传残留由 --clobber 覆盖；失败默认 3 次、间隔 15s 重试）；
 //   4) 全部资产传完才 gh release edit vX.Y.Z --draft=false 发布；任一文件重试耗尽则中止并保留草稿，
 //      打印续传指引——修复网络后重跑同一命令即可（幂等）。
-// 版本落账自动化：build 后自动 git add 六件（tauri.conf.json、shell/package.json、Cargo.toml、core/package.json、domain/package.json、Cargo.lock）
+// 版本落账自动化：build 后自动 git add 七件（tauri.conf.json、shell/package.json、Cargo.toml、core/package.json、domain/package.json、Cargo.lock、package-lock.json）
 //      并 commit -m "chore(release): bump vX.Y.Z"、git tag vX.Y.Z、git push origin HEAD 与 vX.Y.Z；
 //      先推 tag 再传资产，gh release create 复用远端已存在的 tag（指向含版本号的提交）。每步幂等：
 //      无 staged 差异跳过 commit、本地 tag 已存在跳过打标、push 已同步照常通过，重跑续传不炸。
@@ -17,7 +19,7 @@
 //   npm run release -- 0.1.1            # 指定版本
 //   npm run release -- patch            # patch/minor/major 自增
 //   npm run release -- 0.1.1 --notes "..." --skip-build
-// 注意：发版要求工作树干净（有未提交改动会直接拦截）；版本号改动由脚本自动落账，无需手动 commit/tag/push。
+// 注意：发版要求工作树干净（除版本文件外有未提交改动会直接拦截）；版本号改动由脚本自动落账，无需手动 commit/tag/push。
 // 签名私钥：默认 <用户目录>/.tauri/novel-ws.key；可用 TAURI_SIGNING_PRIVATE_KEY_PATH 覆盖路径，
 // 或 TAURI_SIGNING_PRIVATE_KEY 直接给密钥内容；密码用 TAURI_SIGNING_PRIVATE_KEY_PASSWORD（本仓密钥为空密码）。
 import { spawnSync } from 'node:child_process';
@@ -31,6 +33,8 @@ const shellDir = path.join(root, 'shell');
 const tauriConfPath = path.join(shellDir, 'src-tauri', 'tauri.conf.json');
 const shellPkgPath = path.join(shellDir, 'package.json');
 const cargoTomlPath = path.join(shellDir, 'src-tauri', 'Cargo.toml');
+const cargoLockPath = path.join(shellDir, 'src-tauri', 'Cargo.lock');
+const rootLockPath = path.join(root, 'package-lock.json');
 const bundleDir = path.join(shellDir, 'src-tauri', 'target', 'release', 'bundle');
 
 function fail(msg) {
@@ -118,6 +122,25 @@ function setCargoPackageVersion(text, version) {
   return text.replace(re, `$1${version}$2`);
 }
 
+// 同步 Cargo.lock 里 name = "app" 段的 version（L-1：--skip-build 不重算 Cargo.lock，但落账仍固定提交它）。
+// name 与 version 之间恒相邻（Cargo.lock 输出顺序固定），正则定位该段、只改 version 一个字段，最小替换。
+function setCargoLockAppVersion(text, version) {
+  const re = /(name = "app"\nversion = ")[^"]*(")/;
+  if (!re.test(text)) fail('Cargo.lock 中未找到 name = "app" 段的 version 行');
+  return text.replace(re, `$1${version}$2`);
+}
+
+// 同步 package-lock.json 的第三份 workspace 版本（core/domain/shell）。只改这三个 version 字段，
+// 其余字节不动：JSON.parse → 改三处 → JSON.stringify(obj, null, 2) + '\n'（与 npm 生成的 2 空格缩进一致）。
+function syncLockfile(version) {
+  const lock = readJson(rootLockPath);
+  for (const sub of ['core', 'domain', 'shell']) {
+    if (!lock.packages?.[sub]) fail(`package-lock.json 缺少 packages.${sub} 段，无法同步版本`);
+    lock.packages[sub].version = version;
+  }
+  writeJson(rootLockPath, lock);
+}
+
 function syncVersions(version) {
   const tauriConf = readJson(tauriConfPath);
   tauriConf.version = version;
@@ -137,6 +160,13 @@ function syncVersions(version) {
     pkg.version = version;
     writeJson(pkgPath, pkg);
   }
+
+  // 第六处：package-lock.json 的 workspaces 版本段同步，否则 npm 依赖解析视图与源码漂移。
+  syncLockfile(version);
+
+  // L-1：--skip-build 时不重算 Cargo.lock，这里的同步保证提交的 Cargo.lock 也是当前版本。
+  const cargoLock = readFileSync(cargoLockPath, 'utf8');
+  writeFileSync(cargoLockPath, setCargoLockAppVersion(cargoLock, version));
 }
 
 function defaultKeyPath() {
@@ -170,14 +200,35 @@ function detectRepo() {
   return 'sanjiao-orl/final';
 }
 
-// 工作树预检：带未提交改动发版会把未完成代码带进版本提交/tag，先拦截。
+// 版本文件：发版半途中止（如 build 失败）会在工作树留下这些文件的版本号改动；重跑时 syncVersions 会
+// 覆盖重算为一致值，故允许它们脏。白名单之外的任何脏文件视为"未完成代码"，照旧拦截。
+const VERSION_FILES = new Set([
+  'shell/src-tauri/tauri.conf.json',
+  'shell/src-tauri/Cargo.toml',
+  'shell/src-tauri/Cargo.lock',
+  'core/package.json',
+  'domain/package.json',
+  'shell/package.json',
+  'package-lock.json',
+]);
+
+// 工作树预检：带未提交改动发版会把未完成代码带进版本提交/tag，先拦截（版本文件除外，见上方注释）。
 function assertCleanWorktree() {
   const res = runCapture('git', ['status', '--porcelain'], { cwd: root });
   if (res.status !== 0) fail('git status 执行失败，请确认处于 git 仓库内');
   const dirty = res.stdout.trim();
   if (dirty) {
-    for (const line of dirty.split(/\r?\n/)) console.error(`[release] 未提交改动: ${line}`);
-    fail('工作树有未提交改动，请先提交');
+    for (const line of dirty.split(/\r?\n/)) console.error(`[release] 工作树当前状态: ${line}`);
+    // porcelain 前两字符是状态码，其后为路径（可能含空格；rename 形如 "a -> b" 不会命中白名单）。
+    const offenders = dirty
+      .split(/\r?\n/)
+      .map((l) => l.slice(2).trimStart())
+      .filter((p) => !VERSION_FILES.has(p) && p);
+    if (offenders.length) {
+      for (const o of offenders) console.error(`[release] 非版本文件有未提交改动: ${o}`);
+      fail('工作树有非版本文件的未提交改动，请先提交');
+    }
+    console.error('[release] 脏文件均为版本文件（上次发版半途遗留），续跑将覆盖重算为一致值，继续。');
   }
 }
 
@@ -193,6 +244,7 @@ function commitAndPush(version) {
     'core/package.json',
     'domain/package.json',
     'shell/src-tauri/Cargo.lock',
+    'package-lock.json',
   ];
   if (run('git', ['add', ...files], { cwd: root }) !== 0) fail('git add 失败');
 
@@ -349,7 +401,7 @@ function main() {
   console.log(`[release] ${before} → v${version}（repo: ${repo}）`);
   syncVersions(version);
 
-  // 版本单一事实源自检：五处写入后必须一致，否则中止，防止带着漂移版本发布。
+  // 版本单一事实源自检：六处写入后必须一致，否则中止，防止带着漂移版本发布。
   const checkStatus = run('node', [path.join(root, 'scripts', 'check-versions.mjs')]);
   if (checkStatus !== 0) fail(`版本自检失败：check-versions.mjs 退出码 ${checkStatus}`);
 

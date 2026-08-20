@@ -83,6 +83,8 @@ async function main(): Promise<void> {
     },
   });
 
+  // listen 失败（如端口占用）会走 main().catch 直接 process.exit——而此时 runtime 文件尚未写入
+  //（writeRuntimeFile 只在 listen 成功后、ready 行之前执行，见下方），故无 core-runtime.local.json 残留需清理。
   await listen(server, args.port);
   const port = getPort(server);
 
@@ -108,7 +110,15 @@ async function main(): Promise<void> {
 
   // 孤儿守护：每 5s 探测父进程，不在则退出。
   let orphanTimer: NodeJS.Timeout | undefined;
-  if (args.parentPid) orphanTimer = startOrphanGuard(args.parentPid);
+  if (args.parentPid) {
+    orphanTimer = startOrphanGuard(args.parentPid, () => {
+      // 孤儿退出走完整 shutdown（关 MCP/store/runtime/server）再退出，避免直接 process.exit 泄漏连接或 DB 句柄；
+      // 兜底：shutdown 内部若卡住（如 mcp.close 挂起），3s 后强退，不让孤儿进程常驻。
+      const force = setTimeout(() => process.exit(0), 3_000);
+      force.unref();
+      void shutdown('父进程退出（孤儿守护）');
+    });
+  }
 
   let shuttingDown = false;
   const shutdown = async (reason: string): Promise<void> => {
@@ -152,7 +162,7 @@ function getPort(server: Server): number {
   throw new Error('无法获取监听端口');
 }
 
-function startOrphanGuard(parentPid: number): NodeJS.Timeout {
+function startOrphanGuard(parentPid: number, onOrphan: () => void): NodeJS.Timeout {
   const timer = setInterval(() => {
     try {
       process.kill(parentPid, 0); // 仅探测存在性，不发送信号
@@ -160,7 +170,7 @@ function startOrphanGuard(parentPid: number): NodeJS.Timeout {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'ESRCH') {
         console.warn(`[core] 父进程 ${parentPid} 已退出，孤儿守护触发退出`);
-        flushAndExit(0);
+        onOrphan();
       }
       // EPERM 等：进程仍在（可能权限不同），继续存活
     }

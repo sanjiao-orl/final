@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export type PromptKind = 'chat' | 'review' | 'rewrite' | 'cold_read';
+export type PromptKind = 'chat' | 'review' | 'rewrite' | 'cold_read' | 'collide';
 
 /** 规范文件名契约（flat 布局，文件名 ASCII）。 */
 export const PROMPT_FILENAMES: Record<PromptKind, string> = {
@@ -12,6 +12,7 @@ export const PROMPT_FILENAMES: Record<PromptKind, string> = {
   review: 'review.md',
   rewrite: 'rewrite.md',
   cold_read: 'cold-read.md',
+  collide: 'collide.md',
 };
 
 /** 规范预置 skill 文件名（随包释放时与 prompt 一起补缺）。 */
@@ -37,6 +38,7 @@ const PROMPT_FALLBACKS: Record<PromptKind, string> = {
   review: '你是小说冷读审阅员：按输入内容审阅，只输出 findings JSON 数组。',
   rewrite: '你是小说改写器：只输出改写后的正文。',
   cold_read: '你是小说冷读审阅员。',
+  collide: '你是小说写作工作台的碰撞陪练：按碰撞协议为作者的构想做有据、有对立、有后果的思考碰撞。',
 };
 
 export interface PromptFile {
@@ -108,28 +110,32 @@ export function releasePrompts(targetDir: string, sourceDir: string = bundledPro
   }
 }
 
-/** mtime 感知的 prompt 缓存：改文件即生效（决策 0008「单一事实源是 md 文件」），不要求重启。 */
-const promptCache = new Map<string, { mtimeMs: number; value: string }>();
+/** mtime 感知的 prompt 缓存：改文件即生效（决策 0008「单一事实源是 md 文件」），不要求重启。
+ *  缓存键带 {mtimeMs, size} 双因子：仅 mtime 有可能同值不同内容（如快速重写大小变化而 mtime 未及刷新），size 兜底判变。 */
+const promptCache = new Map<string, { mtimeMs: number; size: number; value: string }>();
 
 /**
  * 读指定 kind 的提示词正文（去 frontmatter）；文件缺失/损坏回退一行兜底提示并 warn，不抛错。
- * mtime 感知热重载：每次调用先 stat，文件 mtimeMs 变化（改内容/替换）、或文件出现/消失（stat 失败按 0 记）
- * 都触发重读并刷新缓存；mtimeMs 相同则直接命中缓存。fallback 逻辑不变。
+ * 热重载：每次调用先 stat，文件 {mtimeMs, size} 任一变化（改内容/替换）、或文件出现/消失（stat 失败按 0 记）
+ * 都触发重读并刷新缓存；两者都相同则直接命中缓存。fallback 逻辑不变。
  */
 export function loadPrompt(kind: PromptKind, rootDir: string = activePromptRoot): string {
   const root = path.resolve(rootDir);
   const key = `${root}\n${kind}`;
   const file = path.join(root, PROMPT_FILENAMES[kind]);
   let mtimeMs = 0;
+  let size = 0;
   try {
-    mtimeMs = fs.statSync(file).mtimeMs;
+    const st = fs.statSync(file);
+    mtimeMs = st.mtimeMs;
+    size = st.size;
   } catch {
-    // 文件缺失/不可读：按 0 记，缓存里的真实 mtime 一旦存在即视为变化 → 重读（走兜底）。
+    // 文件缺失/不可读：按 0 记，缓存里的真实 mtime/size 一旦存在即视为变化 → 重读（走兜底）。
   }
   const cached = promptCache.get(key);
-  if (cached !== undefined && cached.mtimeMs === mtimeMs) return cached.value;
+  if (cached !== undefined && cached.mtimeMs === mtimeMs && cached.size === size) return cached.value;
   const value = readPromptUncached(kind, root);
-  promptCache.set(key, { mtimeMs, value });
+  promptCache.set(key, { mtimeMs, size, value });
   return value;
 }
 
@@ -401,27 +407,30 @@ function findPersonaFile(dir: string, name: string): string | null {
 /** 声口摘要正文最大字符数：远超上下文无益且挤占对话预算，超长截断并加省略标注。 */
 const STYLE_SUMMARY_MAX_CHARS = 1500;
 
-/** 声口档案 style.md 摘要的 mtime 感知缓存（同 loadPrompt 口径：改文件即生效，文件出现/消失触发重读）。 */
-const styleSummaryCache = new Map<string, { mtimeMs: number; value: string | null }>();
+/** 声口档案 style.md 摘要的缓存（{mtimeMs,size} 双因子，同 loadPrompt 口径：改文件即生效，文件出现/消失触发重读）。 */
+const styleSummaryCache = new Map<string, { mtimeMs: number; size: number; value: string | null }>();
 
 /**
  * 读书级声口档案 <workDir>/.novel/style.md 的摘要（决策 0010 数据层注入）。
  * 提取 `## 摘要` 节内容（到下一个 `## ` 标题止）；无该节取正文前 1500 字符；
  * 超 1500 字符截断并加省略标注；文件缺失/不可读返回 null（调用方静默跳过，不阻断）。
- * mtime 感知缓存：每次调用先 stat，文件 mtimeMs 变化/出现/消失都触发重读（同 loadPrompt 机制）。
+ * {mtimeMs,size} 感知缓存：每次调用先 stat，任一变化/出现/消失都触发重读（同 loadPrompt 机制）。
  */
 export function loadStyleSummary(workDir: string): string | null {
   const file = path.join(workDir, '.novel', 'style.md');
   let mtimeMs = 0;
+  let size = 0;
   try {
-    mtimeMs = fs.statSync(file).mtimeMs;
+    const st = fs.statSync(file);
+    mtimeMs = st.mtimeMs;
+    size = st.size;
   } catch {
-    // 文件缺失/不可读：按 0 记，缓存里的真实 mtime 一旦存在即视为变化 → 重读（走 null）。
+    // 文件缺失/不可读：按 0 记，缓存里的真实 mtime/size 一旦存在即视为变化 → 重读（走 null）。
   }
   const cached = styleSummaryCache.get(file);
-  if (cached !== undefined && cached.mtimeMs === mtimeMs) return cached.value;
+  if (cached !== undefined && cached.mtimeMs === mtimeMs && cached.size === size) return cached.value;
   const value = readStyleSummaryUncached(file);
-  styleSummaryCache.set(file, { mtimeMs, value });
+  styleSummaryCache.set(file, { mtimeMs, size, value });
   return value;
 }
 

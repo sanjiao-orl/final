@@ -422,6 +422,7 @@
                 >
                   <span class="grip" title="拖拽改序(A3)：落位后自动从第 1 章起重编号，跨卷不支持">{@html iconSvg('grip', 12)}</span>
                   <i class="status" style:background={statusVar(ch.status)} title={ch.status ?? '无状态'}></i>
+                  {#if ch.blueprint === 'locked'}<i class="bp" class:locked={true} title="blueprint: locked(碰撞已放行)"></i>{:else if ch.blueprint === 'draft'}<i class="bp" class:draft={true} title="blueprint: draft(碰撞进行中)"></i>{/if}
                   {#if renaming?.kind === 'ch' && renaming.key === ch.relPath}
                     <input
                       class="rename-input"
@@ -734,6 +735,25 @@
     border-radius: 50%;
     flex: none;
     margin-left: 2px;
+  }
+  /* 批一③ collision blueprint 徽标：与 status 同款 6px，挂在 status 圆点旁 */
+  .ch-row .bp {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex: none;
+    margin-left: 4px;
+    box-sizing: border-box;
+  }
+  /* locked=实心点（碰撞已放行，accent） */
+  .ch-row .bp.locked {
+    background: var(--accent);
+    border: none;
+  }
+  /* draft=空心圈（碰撞进行中，无填充边框） */
+  .ch-row .bp.draft {
+    background: transparent;
+    border: 1.5px solid var(--accent);
   }
   .ch-row .name {
     font-family: var(--ui-font);

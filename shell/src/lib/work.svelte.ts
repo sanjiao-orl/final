@@ -46,7 +46,11 @@ function loadTrashEntries(workDir: string): TrashEntry[] {
 
 function saveTrashEntries(workDir: string, entries: TrashEntry[]): void {
   if (typeof localStorage === 'undefined') return;
-  localStorage.setItem(trashKey(workDir), JSON.stringify(entries));
+  try {
+    localStorage.setItem(trashKey(workDir), JSON.stringify(entries));
+  } catch {
+    // 隐私模式等：内存态生效即可（回收站列表与 setTier/setCollide 同款）
+  }
 }
 
 function recordTrashEntry(workDir: string, relPath: string, trashPath: string): void {
@@ -97,6 +101,10 @@ export class WorkStore {
   private client!: CoreClient;
   /** 编辑器现场入口（Editor 挂载时注册，卸载时清空）：序列化 md + 候选文本替换。 */
   private editorApi: EditorApi | null = null;
+  /** 开章代际：防竞态——快速连开两章时，先发的 read_chapter 后 resolve 不覆盖后点的章。 */
+  private openSeq = 0;
+  /** 在飞保存 promise（并发 saveCurrent 等在飞的完成再重入，防吞脏保存）；无在飞为 null。 */
+  private savingPromise: Promise<boolean> | null = null;
 
   init(client: CoreClient, workDir: string): void {
     this.client = client;
@@ -183,11 +191,13 @@ export class WorkStore {
     if (this.current?.relPath === ch.relPath && !sceneTitle) return;
     if (this.dirty) await this.saveCurrent();
     if (this.error) return;
+    const seq = ++this.openSeq; // 本次开章代际：并发连开两章，先发的读回落后按代际丢弃
     try {
       const r = await this.client.callTool<ReadChapterResult>('read_chapter', {
         workDir: this.workDir,
         relPath: ch.relPath,
       });
+      if (seq !== this.openSeq) return; // 陈旧读回（有更新的开章请求）：丢弃，不覆盖后点章现场
       const open: OpenChapter = {
         relPath: ch.relPath,
         title: ch.title,
@@ -207,29 +217,50 @@ export class WorkStore {
   }
 
   /**
-   * 保存当前章：md 由编辑器现场序列化（未开编辑器回落 savedMd），拼回 frontmatterRaw 后走 write_chapter。
-   * 失败显式报错并保留脏标记，不吞错。
+   * 保存当前章：进入时对章做快照，全程用该快照的 relPath/frontmatterRaw + 编辑器现场 md 写盘。
+   * 完成后仅当仍是该章（current===快照）才回写 savedMd/清 dirty；若期间已切到别的章，盘照写但不碰新章状态。
+   * 并发互斥：「等在飞保存完成再重入」而非直接 return false，避免吞掉第二次脏保存；无环故不造死锁。
    */
   async saveCurrent(): Promise<boolean> {
-    if (!this.current || this.saving) return false;
-    const md = this.editorApi?.getMd() ?? this.current.savedMd;
+    const cur = this.current;
+    if (!cur) return false;
+    // 有在飞保存：等它结束再按当前章重新执行（此时 current 可能已是别章，照新快照保存）
+    if (this.savingPromise) {
+      await this.savingPromise.catch(() => undefined);
+      return this.saveCurrent();
+    }
+    const md = this.editorApi?.getMd() ?? cur.savedMd;
     this.saving = true;
     this.error = null;
+    const run = (async () => {
+      try {
+        await this.client.callTool('write_chapter', {
+          workDir: this.workDir,
+          relPath: cur.relPath,
+          content: cur.frontmatterRaw + md,
+        });
+        // 仅当仍是当前章才回写 savedMd/清脏；A 保存期间已切到 B 章 → B 的脏标不被 A 误清
+        if (this.current === cur) {
+          cur.savedMd = md;
+          this.dirty = false;
+        }
+        void this.loadStructure().catch(() => undefined); // 字数/场景可能变了，后台刷树（失败红条已在 loadStructure 内）
+        return true;
+      } catch (err) {
+        // 保存失败：仅当仍是原章才报红条 + 保留脏标（已切章则不污染新章状态）
+        if (this.current === cur) {
+          this.error = `保存失败：${err instanceof Error ? err.message : String(err)}`;
+        }
+        return false;
+      } finally {
+        this.saving = false;
+      }
+    })();
+    this.savingPromise = run;
     try {
-      await this.client.callTool('write_chapter', {
-        workDir: this.workDir,
-        relPath: this.current.relPath,
-        content: this.current.frontmatterRaw + md,
-      });
-      this.current.savedMd = md;
-      this.dirty = false;
-      void this.loadStructure().catch(() => undefined); // 字数/场景可能变了，后台刷树（失败红条已在 loadStructure 内）
-      return true;
-    } catch (err) {
-      this.error = `保存失败：${err instanceof Error ? err.message : String(err)}`;
-      return false;
+      return await run;
     } finally {
-      this.saving = false;
+      if (this.savingPromise === run) this.savingPromise = null;
     }
   }
 

@@ -67,6 +67,20 @@ export function writeJson(res: ServerResponse, status: number, data: unknown, or
   res.end(JSON.stringify(data));
 }
 
+/**
+ * 413 响应（请求体超限，P3）：请求体未读完就 reject，keep-alive 连接上残留的 body 字节会被下一请求当请求行/头解析 → 错位。
+ * 故 413 必须带 `Connection: close`，并在响应写完（res.end 回调）后销毁 socket 收尾连接，杜绝脏读。
+ */
+export function writeJson413(req: IncomingMessage, res: ServerResponse, origin: string | undefined, data: unknown): void {
+  if (res.writableEnded || res.destroyed) return;
+  res.writeHead(413, {
+    'Content-Type': 'application/json; charset=utf-8',
+    Connection: 'close',
+    ...corsHeadersFor(origin),
+  });
+  res.end(JSON.stringify(data), () => req.destroy());
+}
+
 /** 进入 SSE 响应头；先写一行注释帧，避免代理/浏览器缓冲。
  * 注意：SSE 帧的写入一律走 event_pump（src/event-pump.ts，D4 单一发射点），
  * 各 handler 不得直接 res.write 帧。 */

@@ -45,6 +45,24 @@ export interface CandidatePatch {
   instruction?: string | undefined;
 }
 
+/** 候选状态机非法迁移错误：业务校验失败，路由层映射为 400（区别于候选不存在/内部错误的 4xx/5xx）。 */
+export class CandidateStateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CandidateStateError';
+  }
+}
+
+/**
+ * 候选状态机允许的迁移（以壳侧实际用法为准，见 shell/src/lib/candidates.svelte.ts 的 patchCandidate 调用）：
+ * pending → adopted（批量/单条采纳）、pending → discarded（批量/单条丢弃）；整改只改 proposed/instruction、状态保持 pending（非迁移）。
+ * adopted/discarded 是终态：决策已落定，不提供回跳（防误操作改判后账目与正文脱节）。
+ */
+const ALLOWED_CANDIDATE_MIGRATIONS: ReadonlySet<string> = new Set([
+  'pending->adopted',
+  'pending->discarded',
+]);
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS candidates (
   id TEXT PRIMARY KEY,
@@ -128,8 +146,18 @@ export class CandidateStore {
     return rows.map(mapCandidate);
   }
 
-  /** 更新并刷新 updated_at；候选不存在返回 undefined。 */
+  /** 更新并刷新 updated_at；候选不存在返回 undefined。迁移校验：非法状态跳转抛 CandidateStateError（路由层映射 400）。 */
   patch(id: string, patch: CandidatePatch): CandidateRow | undefined {
+    const current = this.get(id);
+    if (!current) return undefined;
+    if (patch.status !== undefined && current.status !== patch.status) {
+      const edge = `${current.status}->${patch.status}`;
+      if (!ALLOWED_CANDIDATE_MIGRATIONS.has(edge)) {
+        throw new CandidateStateError(
+          `候选状态不能从「${current.status}」迁移到「${patch.status}」（仅允许 pending→adopted/discarded；已决策候选是终态）`
+        );
+      }
+    }
     const sets: string[] = [];
     const args: (string | null)[] = [];
     if (patch.status !== undefined) {
@@ -144,7 +172,7 @@ export class CandidateStore {
       sets.push('instruction = ?');
       args.push(patch.instruction);
     }
-    if (sets.length === 0) return this.get(id);
+    if (sets.length === 0) return current;
     sets.push('updated_at = ?');
     args.push(new Date().toISOString(), id);
     const res = this.db.prepare(`UPDATE candidates SET ${sets.join(', ')} WHERE id = ?`).run(...args);

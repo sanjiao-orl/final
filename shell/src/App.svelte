@@ -27,8 +27,8 @@
   import ReviewPanel from './components/review/ReviewPanel.svelte';
   import DialogHost from './components/DialogHost.svelte';
 
-  /** 协议契约版本（与 shell/src-tauri/src/lib.rs 的 EXPECTED_PROTOCOL 对齐，docs/decisions/0007）。决策 0010 升 v2。 */
-  const EXPECTED_PROTOCOL = 2;
+  /** 协议契约版本（与 shell/src-tauri/src/lib.rs 的 EXPECTED_PROTOCOL 对齐，docs/decisions/0007）。决策 0010 升 v2，批一③ 碰撞模式升 v3。 */
+  const EXPECTED_PROTOCOL = 3;
 
   let booted = $state(false);
   let bootError = $state<string | null>(null);

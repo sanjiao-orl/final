@@ -6,13 +6,13 @@ import { z } from 'zod';
 import { handleChatRequest, type ChatDeps } from './chat.js';
 import { getGitCommit } from './config.js';
 import { devPage } from './dev.js';
-import { corsHeadersFor, HttpError, readJsonBody, toPublicErrorMessage, writeJson } from './http.js';
+import { corsHeadersFor, HttpError, readJsonBody, toPublicErrorMessage, writeJson, writeJson413 } from './http.js';
 import { handleReviewRequest } from './review.js';
 import { handleRewriteRequest, type RewriteDeps } from './rewrite.js';
 import { listPosture } from './prompts.js';
 import { normalizeWorkDir } from './workdir.js';
 import { PROTOCOL_VERSION } from './runtime.js';
-import type { CandidateStore, CandidateStatus } from './candidate-store.js';
+import { CandidateStore, CandidateStateError, type CandidateStatus } from './candidate-store.js';
 import type { SessionStore } from './session-store.js';
 
 /** esbuild 构建时注入的 git 短 commit（scripts/build-sidecar.mjs 的 define）；tsx 开发运行时未定义则回退到实时 git。 */
@@ -66,8 +66,16 @@ export function createAppServer(deps: ServerDeps): Server {
       const status = err instanceof HttpError ? err.status : 500;
       // 错误脱敏：HttpError 透传业务消息；其余内部错误只回稳定占位，原始细节已写 stderr。
       const message = toPublicErrorMessage(err);
-      if (!res.headersSent) writeJson(res, status, { error: message }, req.headers.origin);
-      else res.end();
+      if (!res.headersSent) {
+        if (status === 413) {
+          // 请求体超限：残留 body 会污染 keep-alive 下一请求，必须关连接（见 writeJson413 注释）。
+          writeJson413(req, res, req.headers.origin, { error: message });
+        } else {
+          writeJson(res, status, { error: message }, req.headers.origin);
+        }
+      } else {
+        res.end();
+      }
     });
   });
 }
@@ -292,7 +300,14 @@ async function routeCandidates(
     if (!parsed.success) {
       throw new HttpError(400, '请求体不合法: ' + parsed.error.issues.map((i) => i.message).join('; '));
     }
-    const candidate = store.patch(id, parsed.data);
+    let candidate;
+    try {
+      candidate = store.patch(id, parsed.data);
+    } catch (err) {
+      // 候选状态机非法迁移（如 adopted→discarded）是业务校验失败：映射 400 透传中文原因，区别于 404/500。
+      if (err instanceof CandidateStateError) throw new HttpError(400, err.message);
+      throw err;
+    }
     if (!candidate) throw new HttpError(404, '候选不存在: ' + id);
     writeJson(res, 200, { candidate }, req.headers.origin);
     return;

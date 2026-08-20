@@ -1,6 +1,7 @@
 // check-versions.mjs —— 版本号单一事实源自检（零依赖 node）。
-// 断言 tauri.conf.json、Cargo.toml、core/domain/shell 三个 package.json 的 version 一致；
-// 不一致时非零退出并列出各处取值。挂在根 package.json 的 check 尾部，也供 release.mjs 写完后自检。
+// 断言 tauri.conf.json、Cargo.toml、core/domain/shell 三个 package.json、以及 package-lock.json 里的
+// core/domain/shell 三份 workspace 版本（第六处）全部一致；不一致时非零退出并列出各处取值。
+// 挂在根 package.json 的 check 尾部，也供 release.mjs 写完后自检。
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,19 +25,29 @@ function fail(msg) {
   process.exit(1);
 }
 
-const entries = [
-  ['shell/src-tauri/tauri.conf.json', readJson(path.join(root, 'shell', 'src-tauri', 'tauri.conf.json')).version],
-  ['shell/src-tauri/Cargo.toml', readCargoVersion(path.join(root, 'shell', 'src-tauri', 'Cargo.toml'))],
-  ['core/package.json', readJson(path.join(root, 'core', 'package.json')).version],
-  ['domain/package.json', readJson(path.join(root, 'domain', 'package.json')).version],
-  ['shell/package.json', readJson(path.join(root, 'shell', 'package.json')).version],
+// 第六处：package-lock.json 的 workspaces 版本段（core/domain/shell 三份，须与各自的 package.json 一致，
+// 否则 npm 依赖解析视图与源代码不一致——实测曾全部漂移到旧版）。只读 JSON 校验，不做正则。
+const lockfile = readJson(path.join(root, 'package-lock.json'));
+const lockPkgs = lockfile.packages;
+if (!lockPkgs || !lockPkgs.core || !lockPkgs.domain || !lockPkgs.shell) {
+  fail('package-lock.json 缺少 packages.core/domain/shell 段，单源契约无法校验');
+}
+
+// 每个版本文件登记其 label 与版本取值（lockfile 一份文件含三份 workspace 子版本，仍算一处）。
+const files = [
+  { label: 'shell/src-tauri/tauri.conf.json', versions: [readJson(path.join(root, 'shell', 'src-tauri', 'tauri.conf.json')).version] },
+  { label: 'shell/src-tauri/Cargo.toml', versions: [readCargoVersion(path.join(root, 'shell', 'src-tauri', 'Cargo.toml'))] },
+  { label: 'core/package.json', versions: [readJson(path.join(root, 'core', 'package.json')).version] },
+  { label: 'domain/package.json', versions: [readJson(path.join(root, 'domain', 'package.json')).version] },
+  { label: 'shell/package.json', versions: [readJson(path.join(root, 'shell', 'package.json')).version] },
+  { label: 'package-lock.json', versions: [lockPkgs.core.version, lockPkgs.domain.version, lockPkgs.shell.version] },
 ];
 
-const unique = new Set(entries.map(([, v]) => v));
-if (unique.size !== 1) {
+const all = files.flatMap((f) => f.versions);
+if (new Set(all).size !== 1) {
   console.error('[check-versions] 版本号不一致：');
-  for (const [label, version] of entries) console.error(`  ${label}: ${version}`);
+  for (const f of files) for (const v of f.versions) console.error(`  ${f.label}: ${v}`);
   process.exit(1);
 }
 
-console.log(`[check-versions] 一致：v${entries[0][1]}（${entries.map(([l]) => l).join('、')}）`);
+console.log(`[check-versions] 六处一致：v${all[0]}（${files.map((f) => f.label).join('、')}）`);

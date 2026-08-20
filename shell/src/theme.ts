@@ -132,6 +132,9 @@ function derivedVars(mode: ThemeMode): Record<string, string> {
     '--sel-hl': 'color-mix(in srgb, var(--accent) 13%, transparent)',
     '--suggest-bg': 'color-mix(in srgb, var(--ok) 8%, transparent)',
     '--suggest-line': 'color-mix(in srgb, var(--ok) 38%, var(--line))',
+    /** 碰撞模式（批一③）节标题/边框色：pro 取 ok（正面：方案/裁决），con 取 danger（反面：漏洞/反方）。 */
+    '--collide-pro': 'color-mix(in srgb, var(--ok) 70%, var(--muted))',
+    '--collide-con': 'color-mix(in srgb, var(--danger) 70%, var(--muted))',
     '--strike': 'color-mix(in srgb, var(--danger) 55%, var(--muted))',
     '--warn-bg': 'color-mix(in srgb, var(--status-draft) 9%, transparent)',
     /** 主行动按钮文字色：恒白/近白，accent 背景上两种主题都保证可读，避免硬编码 #fff。 */
@@ -190,4 +193,14 @@ export function statusVar(status: string | undefined): string {
   if (status === '打磨') return 'var(--status-polish)';
   if (status === '定稿') return 'var(--status-final)';
   return 'var(--muted)';
+}
+
+/**
+ * 碰撞节 → 节色变量（批一③）。方案=pro（正面，ok 系绿）、漏洞/反方=con（反面，danger 系红）、
+ * 裁决=accent（与方案同属正面但用主题强调色区分客观裁决与提议，视觉上更醒目）。
+ */
+export function collideVar(sec: '方案' | '漏洞' | '反方' | '裁决'): string {
+  if (sec === '方案') return 'var(--collide-pro)';
+  if (sec === '裁决') return 'var(--accent)';
+  return 'var(--collide-con)';
 }

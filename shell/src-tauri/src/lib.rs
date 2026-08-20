@@ -7,11 +7,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::Manager;
 use tauri_plugin_updater::UpdaterExt;
 
-/// 协议契约版本（core 侧自报，docs/decisions/0007）。壳只认这个版本，不匹配即拒接。
-const EXPECTED_PROTOCOL: u64 = 2;
+/// 协议契约版本（core 侧自报，docs/decisions/0007）。壳只认这个版本，不匹配即拒接。批一③ 升 v3。
+const EXPECTED_PROTOCOL: u64 = 3;
 
 /// 应用配置文件（app_config_dir 下）。字段可空：空=回落环境变量/缺省。
 const CONFIG_FILE: &str = "config.json";
@@ -114,7 +115,58 @@ enum CoreState {
 
 type Shared = Arc<Mutex<CoreState>>;
 
-/// core 子进程句柄 + 换代计数：restart_core 杀旧起新；watcher 按代判断归属，防旧管道 EOF 误报失败。
+/// 纯函数（可单测）：core 退出（stdout 关闭）时依当前状态决定下一状态。
+/// Starting→启动失败（提前退出）；Ready→进程退出需重启；Failed→保持不动（已有更具体错误不覆盖）。
+fn state_on_core_exit(current: &CoreState) -> Option<CoreState> {
+  match current {
+    CoreState::Starting => Some(CoreState::Failed(
+      "core 进程提前退出（检查 LLM_* 环境变量）".to_string(),
+    )),
+    CoreState::Ready(_) => Some(CoreState::Failed(
+      "core 进程已退出，请重启（core 生命周期）".to_string(),
+    )),
+    CoreState::Failed(_) => None,
+  }
+}
+
+/// 杀 core 进程树（M-3）：Windows 用 taskkill /T /F 连孙进程（domain MCP）一起杀；
+/// 只有单 PID 的 TerminateProcess 会留孤儿空窗。taskkill 命令失败（进程已退出/坏 PID）降级回 child.kill()。
+/// 输出（中文可能乱码）直接丢弃。
+fn kill_core_tree(child: &mut Child) {
+  #[cfg(windows)]
+  {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut cmd = Command::new("taskkill");
+    cmd
+      .arg("/PID")
+      .arg(child.id().to_string())
+      .arg("/T")
+      .arg("/F")
+      .stdout(Stdio::null())
+      .stderr(Stdio::null())
+      .creation_flags(CREATE_NO_WINDOW);
+    if let Ok(mut killer) = cmd.spawn() {
+      let killed = killer.wait().map(|s| s.success()).unwrap_or(false);
+      let _ = child.wait(); // taskkill 已终止进程，顺带收割句柄
+      if killed {
+        return;
+      }
+    }
+  }
+  let _ = child.kill();
+  let _ = child.wait();
+}
+
+/// 按 core.child 句柄杀 core 进程树（共用 M-3 杀树逻辑）：取走句柄杀掉后不归位
+/// ——失败态后再由 restart/spawn 新起覆盖。句柄已不在（已杀/未拉起）则视为已处理。
+fn kill_core_process(core: &CoreProcess) {
+  if let Some(mut child) = core.child.lock().ok().and_then(|mut g| g.take()) {
+    kill_core_tree(&mut child);
+  }
+}
+
+/// core 子进程句柄 + 换代计数：restart_core 杀旧起新；watcher/看门狗按代判断归属，防旧管道 EOF 误报失败。
 struct CoreProcess {
   child: Mutex<Option<Child>>,
   generation: Arc<AtomicU64>,
@@ -616,9 +668,19 @@ fn spawn_core(resource_dir: Option<PathBuf>, work: &Path, prompt_dir: &Path, cfg
 
 /// 读 core stdout：首个 {"event":"ready"} 行给出 port+token；EOF 且未就绪视为启动失败。
 /// generation 换代防串台：restart_core 后旧 watcher 的 EOF/ready 不再写状态（归新 watcher 管）。
-fn watch_core(child: &mut Child, shared: Shared, generation: Arc<AtomicU64>, work_dir: String) {
+/// 失败分支（H-2 拒接）需要杀已拉起的 core，故先取 child 拿走 stdout、句柄放回 core.child 共享给杀树。
+fn watch_core(core: &Arc<CoreProcess>, shared: Shared, work_dir: String) {
+  let my_gen = core.generation.load(Ordering::SeqCst);
+  // 取出 child 拿走 stdout（读线程独占输出管道），句柄放回 core.child 供失败分支/看门狗/restart 共享杀
+  let mut child = core
+    .child
+    .lock()
+    .expect("watch_core 锁定 core.child 失败")
+    .take()
+    .expect("watch_core 无 core child 句柄");
   let stdout = child.stdout.take().expect("core stdout 已 pipe");
-  let my_gen = generation.load(Ordering::SeqCst);
+  *core.child.lock().expect("watch_core 锁 core.child 失败") = Some(child);
+  let core_thread = Arc::clone(core);
   std::thread::spawn(move || {
     for line in BufReader::new(stdout).lines() {
       let Ok(line) = line else { break };
@@ -638,7 +700,10 @@ fn watch_core(child: &mut Child, shared: Shared, generation: Arc<AtomicU64>, wor
             log::info!("[core] ready port={port} token=***");
             if let Err(e) = validate_protocol(protocol) {
               log::error!("[shell] 握手校验失败: {e}");
-              if generation.load(Ordering::SeqCst) == my_gen {
+              // H-2：拒接时必须杀掉已拉起的 core，否则它继续在 127.0.0.1 监听泄漏端口；
+              // 换代后不得误杀新代（核心仍走 EOF 分支的状态转移语义，这里只显式杀树+置失败）。
+              if core_thread.generation.load(Ordering::SeqCst) == my_gen {
+                kill_core_process(&core_thread);
                 if let Ok(mut guard) = shared.lock() {
                   *guard = CoreState::Failed(e);
                 }
@@ -659,23 +724,25 @@ fn watch_core(child: &mut Child, shared: Shared, generation: Arc<AtomicU64>, wor
               info.commit,
               info.protocol
             );
-            if generation.load(Ordering::SeqCst) == my_gen {
+            if core_thread.generation.load(Ordering::SeqCst) == my_gen {
               if let Ok(mut guard) = shared.lock() {
                 *guard = CoreState::Ready(info);
               }
             }
           } else {
+            // M-4 畸形 ready（缺 port/token）由就绪看门狗兜底：60s 内未进入 Ready 则杀树+置失败
             log::warn!("[core] ready 行缺 port/token，不打原始日志");
           }
         }
         Err(e) => log::warn!("[shell] 解析 core ready 行失败: {e}"),
       }
     }
-    // stdout 关闭（core 退出或管道断裂）：仅当仍是当前代且未就绪时置失败（重启换代防旧 watcher 误报）
-    if generation.load(Ordering::SeqCst) == my_gen {
+    // H-1：stdout 关闭（core 退出/管道断裂）时按当前态转移——Starting 与 Ready 都转 Failed，
+    // 不再让僵尸 Ready 挂着壳持续分发已死的 port/token；Failed 保持原有更具体错误。换代防旧 watcher 误报。
+    if core_thread.generation.load(Ordering::SeqCst) == my_gen {
       if let Ok(mut guard) = shared.lock() {
-        if matches!(*guard, CoreState::Starting) {
-          *guard = CoreState::Failed("core 进程提前退出（检查 LLM_* 环境变量）".to_string());
+        if let Some(next) = state_on_core_exit(&guard) {
+          *guard = next;
         }
       }
     }
@@ -683,7 +750,7 @@ fn watch_core(child: &mut Child, shared: Shared, generation: Arc<AtomicU64>, wor
 }
 
 /// 读配置 → 解析作品目录/资源目录 → spawn core → watch → 收句柄。setup 与 restart_core 共用。
-fn spawn_and_watch(app: &tauri::AppHandle, core: &CoreProcess, shared: &Shared) -> Result<(), String> {
+fn spawn_and_watch(app: &tauri::AppHandle, core: &Arc<CoreProcess>, shared: &Shared) -> Result<(), String> {
   let outcome = (|| -> Result<(Child, PathBuf), String> {
     let cfg = read_config_at(&config_file(app)?)?;
     let (work, resource_dir) = resolve_startup_paths(app, &cfg)?;
@@ -697,11 +764,27 @@ fn spawn_and_watch(app: &tauri::AppHandle, core: &CoreProcess, shared: &Shared) 
     Ok((spawn_core(resource_dir, &work, &prompt_dir, &cfg)?, work))
   })();
   match outcome {
-    Ok((mut child, work)) => {
-      let gen = Arc::clone(&core.generation);
-      watch_core(&mut child, Arc::clone(shared), gen, work.to_string_lossy().to_string());
-      // Child 不随 drop 被杀；壳退出后由 core 孤儿守护（--parent-pid）收尾
+    Ok((child, work)) => {
+      // 先落 core.child 句柄：watch_core 拿走 stdout 后放回，失败分支/看门狗/restart 据此共享杀。
+      // Child 不随 drop 被杀；壳退出后由 core 孤儿守护（--parent-pid）收尾。
       *core.child.lock().map_err(|e| e.to_string())? = Some(child);
+      watch_core(core, Arc::clone(shared), work.to_string_lossy().to_string());
+      // M-4 就绪看门狗：spawn 后 60s 仍未进入 Ready（仍 Starting）则视为启动失败，杀树+置 Failed。
+      // 换代防误杀新代：restart 已推进 generation 时旧看门狗直接放弃。
+      let wd_core = Arc::clone(core);
+      let wd_shared = Arc::clone(shared);
+      let wd_gen = core.generation.load(Ordering::SeqCst);
+      std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(60));
+        if wd_core.generation.load(Ordering::SeqCst) == wd_gen {
+          if let Ok(mut guard) = wd_shared.lock() {
+            if matches!(*guard, CoreState::Starting) {
+              kill_core_process(&wd_core);
+              *guard = CoreState::Failed("core 就绪超时（60s）".to_string());
+            }
+          }
+        }
+      });
       Ok(())
     }
     Err(e) => {
@@ -722,18 +805,12 @@ fn restart_core(
   state: tauri::State<'_, Shared>,
   core: tauri::State<'_, Arc<CoreProcess>>,
 ) -> Result<(), String> {
-  {
-    let mut child_guard = core.child.lock().map_err(|e| e.to_string())?;
-    if let Some(mut child) = child_guard.take() {
-      let _ = child.kill();
-      let _ = child.wait();
-    }
-  }
+  kill_core_process(core.inner()); // 杀旧 core 进程树（M-3 taskkill 连孙进程）
   core.generation.fetch_add(1, Ordering::SeqCst); // 旧 stdout watcher 作废，防旧管道 EOF 误报失败
   if let Ok(mut guard) = state.lock() {
     *guard = CoreState::Starting;
   }
-  spawn_and_watch(&app, &core, state.inner())
+  spawn_and_watch(&app, core.inner(), state.inner())
 }
 
 /// Tauri updater 启动后台检查：真实端点（GitHub Releases latest.json）；
@@ -798,15 +875,10 @@ fn check_updates(app: &tauri::AppHandle) {
       }
     };
 
-    // 杀 sidecar 并等其退出(口径同 restart_core),再换代作废旧 stdout watcher 防 EOF 误报。
+    // 杀 sidecar 进程树并等其退出(口径同 restart_core, M-3 taskkill 连 domain 孙进程),再换代作废旧 stdout watcher 防 EOF 误报。
     let core = handle.state::<Arc<CoreProcess>>().inner().clone();
     {
-      if let Ok(mut child_guard) = core.child.lock() {
-        if let Some(mut child) = child_guard.take() {
-          let _ = child.kill();
-          let _ = child.wait();
-        }
-      }
+      kill_core_process(&core);
       core.generation.fetch_add(1, Ordering::SeqCst);
     }
     log::info!("[updater] core sidecar 已停止，启动安装器（passive）");
@@ -889,12 +961,46 @@ mod tests {
   /// 握手校验：协议版本不匹配或缺失必须拒接（快速失败，防新旧壳/core 混接）。
   #[test]
   fn handshake_validates_protocol() {
-    assert!(validate_protocol(Some(2)).is_ok(), "期望协议 v2 通过（决策 0010）");
+    assert!(validate_protocol(Some(3)).is_ok(), "期望协议 v3 通过（批一③ 碰撞模式升 v3）");
     assert!(
-      validate_protocol(Some(3)).is_err(),
-      "协议 v3 与壳期望不符必须拒绝"
+      validate_protocol(Some(2)).is_err(),
+      "协议 v2 与壳期望不符必须拒绝"
     );
     assert!(validate_protocol(None).is_err(), "缺 protocol 字段必须拒绝");
+  }
+
+  /// H-1 状态转移：core 退出时 Starting/Ready 都转 Failed（不再留僵尸 Ready），Failed 保持不动（不覆盖更具体错误）。
+  #[test]
+  fn state_on_core_exit_transitions_starting_and_ready_to_failed() {
+    // Starting→Failed（提前退出）
+    assert!(
+      matches!(
+        state_on_core_exit(&CoreState::Starting),
+        Some(CoreState::Failed(ref m)) if m.contains("提前退出")
+      ),
+      "Starting 退出应转 Failed(提前退出)"
+    );
+    // Ready→Failed（进程退出需重启，不再僵尸 Ready）
+    let info = CoreInfo {
+      port: 12345,
+      token: "t".to_string(),
+      work_dir: "w".to_string(),
+      version: "v".to_string(),
+      commit: "c".to_string(),
+      protocol: 3,
+    };
+    assert!(
+      matches!(
+        state_on_core_exit(&CoreState::Ready(info)),
+        Some(CoreState::Failed(ref m)) if m.contains("请重启")
+      ),
+      "Ready 退出应转 Failed(请重启)"
+    );
+    // Failed→None（保持既有更具体错误，不被覆盖）
+    assert!(
+      state_on_core_exit(&CoreState::Failed("更具体错误".to_string())).is_none(),
+      "Failed 态退出不应覆盖原错误"
+    );
   }
 
   /// 作品目录优先级：配置 > 环境变量 > 缺省；空白配置视为未设置。

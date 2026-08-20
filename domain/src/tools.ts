@@ -16,6 +16,7 @@ import {
   compareNames,
   numOf,
   resolveInside,
+  resolveInsidePosix,
   toPosix,
   type MdFile,
 } from './fsutil.js';
@@ -57,6 +58,8 @@ export interface ChapterNode {
   id?: string;
   /** frontmatter 里的目标字数（有才出现）。 */
   goal?: number;
+  /** frontmatter 里的蓝图碰撞模式（none/draft/locked；有才出现）。 */
+  blueprint?: string;
   wordCount: number;
   scenes: SceneNode[];
 }
@@ -169,6 +172,7 @@ function buildChapter(f: MdFile): ChapterNode {
   if (fm.status) chapter.status = fm.status;
   if (fm.id) chapter.id = fm.id;
   if (fm.goal !== undefined) chapter.goal = fm.goal;
+  if (fm.blueprint) chapter.blueprint = fm.blueprint;
   return chapter;
 }
 
@@ -187,8 +191,7 @@ export interface ReadChapterResult {
 /** read_chapter：读取 manuscript/ 内的 .md 章文件原文并解析 frontmatter；文件缺失抛错。
  *  例外放开 .novel/trash/ 内的 .md（软删副本），供「拒绝 AI 删章」补偿找回原文用。 */
 export function readChapter(workDir: string, relPath: string): ReadChapterResult {
-  const abs = resolveInside(workDir, relPath); // 越界在此抛错
-  const posix = toPosix(path.relative(assertWorkDir(workDir), abs));
+  const { abs, posix } = resolveInsidePosix(workDir, relPath); // 越界与 symlink 逃逸在此抛错
   const isChapter = posix.startsWith('manuscript/');
   const isTrashCopy = posix.startsWith('.novel/trash/');
   if ((!isChapter && !isTrashCopy) || !posix.toLowerCase().endsWith('.md')) {
@@ -211,8 +214,7 @@ export function writeChapter(
   relPath: string,
   content: string,
 ): { ok: true; bytes: number } {
-  const abs = resolveInside(workDir, relPath); // 越界在此抛错
-  const posix = toPosix(path.relative(assertWorkDir(workDir), abs));
+  const { abs, posix } = resolveInsidePosix(workDir, relPath); // 越界与 symlink 逃逸在此抛错
   if (!posix.startsWith('manuscript/')) {
     throw new Error(`write_chapter 只允许 manuscript/ 内的 .md 文件: ${relPath}`);
   }
@@ -291,7 +293,11 @@ export interface WordCountResult {
 /** word_count：给 relPath 只算该章；否则全 manuscript 汇总（含每章明细）。 */
 export function wordCount(workDir: string, relPath?: string): WordCountResult {
   if (relPath !== undefined) {
-    const abs = resolveInside(workDir, relPath);
+    // 带 relPath 时只允许 manuscript/ 内的 .md（与读写章同口径：先归一化再判前缀，防 manuscript/../ 绕过）
+    const { abs, posix } = resolveInsidePosix(workDir, relPath);
+    if (!posix.startsWith('manuscript/') || !posix.toLowerCase().endsWith('.md')) {
+      throw new Error(`word_count 的 relPath 只允许 manuscript/ 内的 .md 文件: ${relPath}`);
+    }
     const content = fs.readFileSync(abs, 'utf8');
     return { total: countWords(content.slice(frontmatterEnd(content))) };
   }
@@ -369,11 +375,10 @@ export interface DeleteChapterResult {
  * 永不物理删除；只允许 manuscript/ 内的 .md，拒绝删 .novel 内部与其他文件。
  */
 export function deleteChapter(workDir: string, relPath: string): DeleteChapterResult {
-  const posix = toPosix(relPath);
+  const { abs, posix } = resolveInsidePosix(workDir, relPath); // 越界与 symlink 逃逸在此抛错
   if (!posix.startsWith('manuscript/') || !posix.toLowerCase().endsWith('.md')) {
     throw new Error(`delete_chapter 只允许 manuscript/ 内的 .md 文件: ${relPath}`);
   }
-  const abs = resolveInside(workDir, relPath); // 越界在此抛错
   const stampName = `${flattenRel(posix)}-${stamp()}.md`;
   const target = path.join(novelSubDir(workDir, 'trash'), stampName);
   fs.renameSync(abs, target); // 文件不存在时抛错；同卷 rename 原子移动
@@ -391,11 +396,10 @@ export interface DeleteVolumeResult {
  * （时间戳防重名），永不物理删除；拒绝删 manuscript 本身、非 manuscript/ 前缀与非目录路径。
  */
 export function deleteVolume(workDir: string, volumePath: string): DeleteVolumeResult {
-  const posix = toPosix(volumePath);
+  const { abs, posix } = resolveInsidePosix(workDir, volumePath); // 越界与 symlink 逃逸在此抛错
   if (posix === 'manuscript' || posix === 'manuscript/' || !posix.startsWith('manuscript/')) {
     throw new Error(`delete_volume 只允许 manuscript/ 下的卷目录: ${volumePath}`);
   }
-  const abs = resolveInside(workDir, volumePath); // 越界在此抛错
   if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) {
     throw new Error(`delete_volume 卷目录不存在: ${volumePath}`);
   }
@@ -458,6 +462,65 @@ function setFrontmatterTitle(content: string, newTitle: string): string {
   const replaced = head.replace(/^title:[^\n]*$/m, `title: ${newTitle}`);
   if (replaced !== head) return replaced + rest;
   return head.replace(/^---\r?\n/, `---\ntitle: ${newTitle}\n`) + rest;
+}
+
+/**
+ * 在 fm 块内改/增/删 blueprint 行（最小侵入：其余字段与正文字节级保留）。
+ * - 已有 blueprint 行则只改值；没有则在开栏 `---` 后追加一行（与 setFrontmatterTitle 同款插入位置）；
+ * - value='none' 表示删除 blueprint 行（缺省即 none，不留垃圾键；删后 fm 块若有其他键原样保留）。
+ * 返回处理后的完整内容（含 rest 由调用方拼回）。
+ */
+function setFrontmatterBlueprint(head: string, value: 'none' | 'draft' | 'locked'): string {
+  if (value === 'none') {
+    // 删除 blueprint 行（连同其行尾换行）；行不存在则原样返回
+    return head.replace(/^blueprint:[^\n]*\r?\n?/m, '');
+  }
+  const replaced = head.replace(/^blueprint:[^\n]*$/m, `blueprint: ${value}`);
+  if (replaced !== head) return replaced; // 已有行：只改值
+  return head.replace(/^---\r?\n/, `---\nblueprint: ${value}\n`); // 无行：开栏后追加
+}
+
+/**
+ * chapter_set_blueprint：设置（或删除）章 frontmatter 的 blueprint（蓝图碰撞模式 none/draft/locked）。
+ * - 章路径白名单与 write_chapter 同口径：manuscript/ 内 .md；越界/非 manuscript/不存在一律抛中文错；
+ * - 有 fm：存在 blueprint 行则改值、不存在则 fm 块内追加一行；无 fm：新建仅含 title/blueprint 的最小块（不造 id/status 等键）再拼原正文；
+ * - value='none' = 删除 blueprint 行（缺省即 none）；正文与其余字段字节级保留，覆盖写前旧内容滚入 .novel/history/。
+ */
+export function chapterSetBlueprint(
+  workDir: string,
+  relPath: string,
+  value: 'none' | 'draft' | 'locked',
+): { relPath: string; blueprint: string } {
+  const { abs, posix } = resolveInsidePosix(workDir, relPath); // 越界与 symlink 逃逸在此抛错
+  if (!posix.startsWith('manuscript/') || !posix.toLowerCase().endsWith('.md')) {
+    throw new Error(`chapter_set_blueprint 只允许 manuscript/ 内的 .md 文件: ${relPath}`);
+  }
+  let content: string;
+  try {
+    content = fs.readFileSync(abs, 'utf8');
+  } catch {
+    throw new Error(`chapter_set_blueprint 章文件不存在: ${relPath}`);
+  }
+  const fmEnd = frontmatterEnd(content);
+  let next: string;
+  if (fmEnd === 0) {
+    // 无 fm：新建仅 title/blueprint 的最小 fm 块（不造其他键），正文原样接后
+    if (value === 'none') {
+      next = content; // 无 fm 且删除 → 本就缺省 none，文件不变
+    } else {
+      const name = path.basename(abs, '.md'); // 文件名去后缀作 title
+      next = `---\ntitle: ${name}\nblueprint: ${value}\n---\n\n${content}`;
+    }
+  } else {
+    const head = content.slice(0, fmEnd); // fm 块（含闭合行）
+    const rest = content.slice(fmEnd); // 正文
+    next = setFrontmatterBlueprint(head, value) + rest;
+  }
+  if (next !== content) {
+    snapshotBeforeWrite(workDir, relPath, abs, next); // 覆盖旧版前滚动快照（安全阀）
+    atomicWrite(abs, next);
+  }
+  return { relPath, blueprint: value };
 }
 
 /** 目录内直接子 .md 文件（按文件名排序），取匹配章名模式的最大编号；无则 0。 */
@@ -569,12 +632,11 @@ export function renameChapter(
   relPath: string,
   title: string,
 ): { ok: true; relPath: string } {
-  const posix = toPosix(relPath);
+  const { abs, posix } = resolveInsidePosix(workDir, relPath); // 越界与 symlink 逃逸在此抛错
   if (!posix.startsWith('manuscript/') || !posix.toLowerCase().endsWith('.md')) {
     throw new Error(`rename_chapter 只允许 manuscript/ 内的 .md 文件: ${relPath}`);
   }
   const t = assertUserTitle('章', title);
-  const abs = resolveInside(workDir, relPath);
   const dir = path.dirname(abs);
   const base = path.basename(abs, '.md');
   const m = CHAPTER_NAME_RE.exec(base);
@@ -600,12 +662,11 @@ export function renameVolume(
   volumePath: string,
   title: string,
 ): { ok: true; volumePath: string } {
-  const posix = toPosix(volumePath);
+  const { abs, posix } = resolveInsidePosix(workDir, volumePath); // 越界与 symlink 逃逸在此抛错
   if (posix === 'manuscript' || posix === 'manuscript/' || !posix.startsWith('manuscript/')) {
     throw new Error(`rename_volume 只允许 manuscript/ 下的目录: ${volumePath}`);
   }
   const t = assertUserTitle('卷', title);
-  const abs = resolveInside(workDir, volumePath);
   if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) {
     throw new Error(`rename_volume 卷目录不存在: ${volumePath}`);
   }
@@ -703,14 +764,13 @@ export function moveChapter(
   relPath: string,
   toIndex: number,
 ): { ok: true; renumbered: RenumberedChapter[] } {
-  const posix = toPosix(relPath);
+  const { abs, posix } = resolveInsidePosix(workDir, relPath); // 越界与 symlink 逃逸在此抛错
   if (!posix.startsWith('manuscript/') || !posix.toLowerCase().endsWith('.md')) {
     throw new Error(`move_chapter 只允许 manuscript/ 内的 .md 文件: ${relPath}`);
   }
   if (!Number.isInteger(toIndex) || toIndex < 0) {
     throw new Error(`move_chapter toIndex 必须是非负整数: ${toIndex}`);
   }
-  const abs = resolveInside(workDir, relPath);
   const dir = path.dirname(abs);
   const base = path.basename(abs);
   let entries: fs.Dirent[];
@@ -764,7 +824,7 @@ export function moveVolume(
   volumePath: string,
   toIndex: number,
 ): { ok: true; renumbered: RenumberedVolume[] } {
-  const posix = toPosix(volumePath);
+  const { abs, posix } = resolveInsidePosix(workDir, volumePath); // 越界与 symlink 逃逸在此抛错
   if (posix === 'manuscript' || posix === 'manuscript/' || !posix.startsWith('manuscript/')) {
     throw new Error(`move_volume 只允许 manuscript/ 下的目录: ${volumePath}`);
   }
@@ -772,7 +832,6 @@ export function moveVolume(
     throw new Error(`move_volume toIndex 必须是非负整数: ${toIndex}`);
   }
   const msDir = path.join(assertWorkDir(workDir), 'manuscript');
-  const abs = resolveInside(workDir, volumePath);
   if (path.dirname(abs) !== msDir) {
     throw new Error(`move_volume 只支持对 manuscript 直接子目录（卷）排序: ${volumePath}`);
   }
@@ -884,13 +943,12 @@ export function listSnapshots(
  * snapshotPath 必须解析后仍在 workDir 内、以 .md 结尾且位于 .novel/history/ 下（防止任意文件读取）。
  */
 export function readSnapshot(workDir: string, snapshotPath: string): { ok: true; content: string } {
-  const posix = toPosix(snapshotPath);
+  const { abs, posix } = resolveInsidePosix(workDir, snapshotPath); // 越界与 symlink 逃逸在此抛错
   if (!posix.toLowerCase().endsWith('.md')) {
     throw new Error(`read_snapshot 只允许 .md 快照文件: ${snapshotPath}`);
   }
   if (!posix.startsWith('.novel/history/')) {
     throw new Error(`read_snapshot 只允许读取 .novel/history/ 内的快照: ${snapshotPath}`);
   }
-  const abs = resolveInside(workDir, snapshotPath); // 越界在此抛错
   return { ok: true, content: fs.readFileSync(abs, 'utf8') };
 }

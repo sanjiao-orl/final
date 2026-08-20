@@ -79,6 +79,19 @@ describe('core prompt 加载器', () => {
     expect(loadPrompt('chat', dir)).toBe('你是改版后的聊天助手。');
   });
 
+  it('热重载：同 mtime 但 size 变化仍刷新（缓存 {mtimeMs,size} 双因子，防同 mtime 陈旧）', () => {
+    const dir = makeTmpDir();
+    const file = path.join(dir, 'chat.md');
+    writeTree(dir, { 'chat.md': VALID_CHAT });
+    expect(loadPrompt('chat', dir)).toBe('你是测试聊天助手。');
+
+    // 改内容（size 变长）后把 mtime 拨回与旧值完全相同——只有 size 能区分新旧，需重读而非命中陈旧缓存。
+    const before = fs.statSync(file).mtime;
+    fs.writeFileSync(file, '---\nkind: prompt\napplies_to: chat\n---\n你是改版后长了更多字的聊天助手。', 'utf8');
+    fs.utimesSync(file, before, before);
+    expect(loadPrompt('chat', dir)).toBe('你是改版后长了更多字的聊天助手。');
+  });
+
   it('热重载：文件被删后 loadPrompt 回退兜底（文件消失即失效，不用陈旧缓存）', () => {
     const dir = makeTmpDir();
     const file = path.join(dir, 'chat.md');
@@ -357,6 +370,18 @@ describe('loadStyleSummary 声口摘要', () => {
     const bumped = new Date(Date.now() + 5_000);
     fs.utimesSync(file, bumped, bumped);
     expect(loadStyleSummary(dir)).toBe('第二版。');
+  });
+
+  it('同 mtime 但 size 变化仍刷新（styleSummary 缓存 {mtimeMs,size} 双因子）', () => {
+    const dir = makeTmpDir();
+    const file = path.join(dir, '.novel', 'style.md');
+    writeTree(dir, { '.novel/style.md': '## 摘要\n\n第一版。' });
+    expect(loadStyleSummary(dir)).toBe('第一版。');
+
+    const before = fs.statSync(file).mtime;
+    fs.writeFileSync(file, '## 摘要\n\n第,二版——内容更长一些。', 'utf8');
+    fs.utimesSync(file, before, before);
+    expect(loadStyleSummary(dir)).toBe('第,二版——内容更长一些。');
   });
 
   it('热重载：文件被删后 → null（文件消失即失效，不用陈旧缓存）', () => {

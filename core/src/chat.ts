@@ -15,7 +15,7 @@ import type { CandidateStore } from './candidate-store.js';
 import type { MessageRow, SessionRow, SessionStore } from './session-store.js';
 import { getLlmTimeoutSeconds, type Tier } from './config.js';
 import { EventPump } from './event-pump.js';
-import { toPublicErrorMessage, writeJson } from './http.js';
+import { HttpError, toPublicErrorMessage, writeJson } from './http.js';
 import { listSkills, loadPersona, loadPrompt, loadStyleSummary } from './prompts.js';
 import { normalizeWorkDir } from './workdir.js';
 
@@ -55,6 +55,11 @@ export const chatBodySchema = z.object({
     .max(100)
     .refine((s) => !/[\x00-\x1f\x7f]/.test(s), '不能包含控制字符')
     .optional(),
+  /**
+   * 碰撞模式（决策 0013）：mode=collide 时契约层加「## 碰撞协议」、数据层加「## 讨论沉淀」。
+   * 不传 = 现状全不变（零注入、零工具调用）。当前仅 collide 一个值，后续模式按需扩枚举。
+   */
+  mode: z.enum(['collide']).optional(),
 });
 export type ChatBody = z.infer<typeof chatBodySchema>;
 
@@ -73,26 +78,39 @@ export interface ChatDeps {
 /** ledger_chapter_slice 工具名：core 侧数据层注入契约（domain 并行开发的账本按章切片工具）。 */
 const LEDGER_CHAPTER_SLICE_TOOL = 'ledger_chapter_slice';
 
+/** decision_tail 工具名：core 侧碰撞模式讨论沉淀注入契约（domain 并行开发的裁决检索摘要工具）。 */
+const DECISION_TAIL_TOOL = 'decision_tail';
+
+/** 讨论沉淀注入字符预算（决策 0013：裁决全量不进上下文，只进检索摘要）。 */
+const DECISION_INJECT_MAX_CHARS = 1500;
+
 interface ChapterSlice {
   found: boolean;
   slice: string;
   chapterTitle: string | null;
 }
 
+/** decision_tail 结果结构：total=裁决总数，lines=摘要行（按工具返回序）。 */
+interface DecisionTail {
+  total: number;
+  lines: string[];
+}
+
 /**
- * 组装系统提示：按决策 0010 注入面分层——契约层（prompt md + workDir 行 + skill 清单，现有不动）→
- * 姿态层（角色，request 带 persona 且按名能找到才注，无则零注入）→ 数据层（声口摘要 + 本章账本切片，缺则静默跳过）。
- * 数据层账本切片需要调 domain 工具，故为 async（可挂 abortSignal，超时/断连可中止）。
+ * 组装系统提示：按决策 0010 注入面分层——契约层（prompt md + workDir 行 + skill 清单 + 碰撞协议(模式 collide 时)）→
+ * 姿态层（角色，request 带 persona 且按名能找到才注，无则零注入）→ 数据层（声口摘要 + 本章账本切片 + 讨论沉淀（模式 collide 时），缺则静默跳过）。
+ * 数据层账本切片与讨论沉淀需要调 domain 工具，故为 async（可挂 abortSignal，超时/断连可中止）。
  */
 async function systemPrompt(
   workDir: string | undefined,
   chapter: string | undefined,
   tools: ToolSet | undefined,
   abortSignal: AbortSignal,
-  persona?: string
+  persona?: string,
+  collide?: boolean
 ): Promise<string> {
   // 每次请求现取 prompt（mtime 感知热重载，改文件即生效），不再用模块级常量缓存。
-  // 契约层：提示词文件 + workDir 行 + skill 清单（现有不动）
+  // 契约层：提示词文件 + workDir 行 + skill 清单 + 碰撞协议（现有不动）
   let prompt = loadPrompt('chat');
   if (workDir) {
     prompt += `\n当前打开的作品文件夹：${workDir}。调用领域工具时 workDir 参数一律使用这个路径。`;
@@ -100,6 +118,10 @@ async function systemPrompt(
     if (skills.length > 0) {
       const lines = skills.map((s) => `- ${s.name}:${s.description}`).join('\n');
       prompt += `\n\n## 可用 skill\n${lines}\n需要时调用领域工具 skill_read 传入 name 获取该 skill 正文并按其执行。`;
+    }
+    // 碰撞模式：契约层加「## 碰撞协议」（决策 0013）——skill 清单之后、姿态层之前，为姿态层角色提供碰撞流程与格式契约
+    if (collide) {
+      prompt += `\n\n## 碰撞协议\n${loadPrompt('collide')}`;
     }
   }
   // 姿态层：角色注入（决策 0010）——request 带 persona 且按名能找到才注正文段；找不到/无 persona = 零注入
@@ -122,6 +144,13 @@ async function systemPrompt(
     const sliceResult = await fetchChapterSlice(workDir, chapter, tools, abortSignal);
     if (sliceResult?.found && sliceResult.slice) {
       prompt += `\n\n## 本章账本切片(${sliceResult.chapterTitle ?? chapter})\n仅含与当前章相关的账本条目，非全书。\n\n${sliceResult.slice}`;
+    }
+  }
+  // 数据层 c：讨论沉淀（最近裁决）——碰撞模式才注（mode=collide 且有 workDir 且工具可用）；缺/报错/超时 warn 降级，decisions.md 无记录则零注入
+  if (collide && workDir && tools) {
+    const tail = await fetchDecisionTail(workDir, chapter, tools, abortSignal);
+    if (tail && tail.lines.length > 0) {
+      prompt += buildDecisionTailSection(tail);
     }
   }
   return prompt;
@@ -204,6 +233,92 @@ function extractChapterSlice(result: unknown): ChapterSlice | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * 数据层讨论沉淀：碰撞模式才注（mode=collide 且有 workDir）。仿 fetchChapterSlice 调 decision_tail 取最近裁决摘要。
+ * 入参 { workDir, limit: 20 }，挂载章（chapter）缺省不传；工具缺失/调用失败（含超时）→ console.warn 并返回 undefined（跳过注入，不阻断聊天）。
+ */
+async function fetchDecisionTail(
+  workDir: string,
+  chapter: string | undefined,
+  tools: ToolSet,
+  abortSignal: AbortSignal
+): Promise<DecisionTail | undefined> {
+  const tool = tools[DECISION_TAIL_TOOL];
+  if (!tool?.execute) {
+    console.warn('[chat] decision_tail 工具不可用（domain MCP 未连接或工具不存在），跳过讨论沉淀注入');
+    return undefined;
+  }
+  try {
+    const input: Record<string, unknown> = { workDir, limit: 20 };
+    if (chapter) input.chapter = chapter;
+    const result: unknown = await tool.execute(input as never, {
+      toolCallId: 'chat-decision-tail',
+      messages: [],
+      context: undefined,
+      abortSignal,
+    });
+    return extractDecisionTail(result);
+  } catch (err) {
+    console.warn(
+      '[chat] decision_tail 调用失败，跳过讨论沉淀注入：',
+      err instanceof Error ? err.message : err
+    );
+    return undefined;
+  }
+}
+
+/** 从 decision_tail 结果提取 {total, lines}：兼容 structuredContent / 直接返回对象 / content text JSON 三态（extractChapterSlice 同口径）；格式不识别返回 undefined（降级跳过）。 */
+function extractDecisionTail(result: unknown): DecisionTail | undefined {
+  if (!result || typeof result !== 'object') return undefined;
+  const r = result as {
+    isError?: unknown;
+    structuredContent?: unknown;
+    total?: unknown;
+    lines?: unknown;
+    content?: Array<{ type?: string; text?: string }>;
+  };
+  const text = r.content?.find((c) => c && c.type === 'text' && typeof c.text === 'string')?.text;
+  if (r.isError) {
+    console.warn(`[chat] decision_tail 执行失败：${text ?? '未知错误'}`);
+    return undefined;
+  }
+
+  const candidates: unknown[] = [];
+  if (r.structuredContent !== undefined) candidates.push(r.structuredContent);
+  if (r.total !== undefined || r.lines !== undefined) candidates.push(r);
+  if (text !== undefined) {
+    try {
+      candidates.push(JSON.parse(text));
+    } catch {
+      candidates.push(text);
+    }
+  }
+  for (const candidate of candidates) {
+    if (candidate && typeof candidate === 'object') {
+      const c = candidate as { total?: unknown; lines?: unknown };
+      if (Array.isArray(c.lines) && c.lines.every((l) => typeof l === 'string')) {
+        return {
+          total: typeof c.total === 'number' && Number.isFinite(c.total) ? c.total : (c.lines as string[]).length,
+          lines: c.lines as string[],
+        };
+      }
+    }
+  }
+  return undefined;
+}
+
+/** 组装「## 讨论沉淀（最近裁决）」节：lines 合并超预算截断并加省略标注；total > lines.length（有摘要折叠）时在节末尾追加条数说明。 */
+function buildDecisionTailSection(tail: DecisionTail): string {
+  let content = tail.lines.join('\n');
+  if (content.length > DECISION_INJECT_MAX_CHARS) {
+    content = content.slice(0, DECISION_INJECT_MAX_CHARS) + '\n…（已截断，完整记录见 editorial_notes/decisions.md）';
+  }
+  if (tail.total > tail.lines.length) {
+    content += `\n（共 ${tail.total} 条，以上为摘要）`;
+  }
+  return `\n\n## 讨论沉淀（最近裁决）\n${content}`;
 }
 
 /** 多轮工具调用的步数上限。 */
@@ -404,6 +519,13 @@ function buildReplayMessages(rows: MessageRow[]): ModelMessage[] {
 }
 
 /**
+ * per-session 在飞锁：同 session 并发 /v1/chat 会互见对方未答问题、消息序错乱（回放交叉污染，P2）。
+ * 壳层 UI 拦了双击，HTTP 层这里补内存级互斥——同 sessionId 已在飞时第二个请求 409 拒绝，
+ * 等第一个完成或停止后再发；不同 sessionId 互不影响。键是请求落库后的实际 session.id（新建会话天然不撞）。
+ */
+const inFlightSessions = new Set<string>();
+
+/**
  * 处理一次 /v1/chat 请求。校验、会话解析、用户消息落库在 SSE 之前完成（失败返回 JSON 错误）；
  * 之后进入 SSE 流，经 event_pump（单一发射点、按会话保序）逐条转发 AI SDK 事件，done 前落库完整 assistant 消息。
  */
@@ -437,8 +559,15 @@ export async function handleChatRequest(
   // 两个分支后 session 必非空
   const sessionId = session.id;
 
-  // 用户消息先落库：即使客户端中途断连也不丢。
-  deps.store.addMessage(sessionId, { role: 'user', content: text });
+  // 在飞锁：拿锁在落库之前（409 时不给该会话附加任何副作用），释放放在最外层 finally——
+  // 无论正常完成/断连/超时/抛错哪条出口，锁都归还，下一请求才可再发。
+  if (inFlightSessions.has(sessionId)) {
+    throw new HttpError(409, '该会话有正在进行的对话，请先等待其完成或停止');
+  }
+  inFlightSessions.add(sessionId);
+  try {
+    // 用户消息先落库：即使客户端中途断连也不丢。
+    deps.store.addMessage(sessionId, { role: 'user', content: text });
 
   // 断连中止：只挂 res.on('close')——请求体在进入本函数前已被路由层读完，
   // 此刻再注册 req.on('close') 已无意义（request 侧事件早已完成），只会误导排查。
@@ -506,8 +635,15 @@ export async function handleChatRequest(
     });
     const options: Parameters<typeof streamText>[0] = {
       model,
-      // 分层组装：契约层 + 姿态层（角色）+ 数据层（声口摘要/本章账本切片，见 systemPrompt）。
-      system: await systemPrompt(workDir, parsed.data.chapter, deps.tools, combinedSignal, parsed.data.persona),
+      // 分层组装：契约层 + 姿态层（角色）+ 数据层（声口摘要/本章账本切片/讨论沉淀，见 systemPrompt；mode=collide 时加碰撞协议与讨论沉淀）。
+      system: await systemPrompt(
+        workDir,
+        parsed.data.chapter,
+        deps.tools,
+        combinedSignal,
+        parsed.data.persona,
+        parsed.data.mode === 'collide'
+      ),
       messages: buildReplayMessages(deps.store.listMessages(sessionId)),
       stopWhen: stepCountIs(MAX_STEPS),
       abortSignal: combinedSignal,
@@ -580,5 +716,10 @@ export async function handleChatRequest(
     pump.end();
   } finally {
     res.off('close', onClose);
+  }
+  } finally {
+    // 在飞锁归还：内层 try/catch/finally 的每条出口（正常/断连/超时/抛错）都走到这里释放，
+    // 保证同会话下一个请求能立即再发；若内层抛错被这里吞掉，则连同上面 try 一起交由路由层 catch。
+    inFlightSessions.delete(sessionId);
   }
 }

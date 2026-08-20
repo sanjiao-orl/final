@@ -19,6 +19,8 @@ export interface ChapterNode {
   id?: string;
   /** frontmatter goal（目标字数，B5；可缺省）。 */
   goal?: number;
+  /** frontmatter blueprint（批一③ 碰撞放行标记）：'locked'=已放行、'draft'=碰撞进行中；其余不渲染徽标。 */
+  blueprint?: string;
 }
 
 export interface VolumeNode {

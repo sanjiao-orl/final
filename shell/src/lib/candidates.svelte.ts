@@ -231,6 +231,8 @@ export class CandidatesStore {
 
       const failures: string[] = [];
       let adoptedAny = false;
+      let patchFailures = 0;
+      let firstPatchErrMsg: string | null = null;
       for (const [chapter, group] of byChapter) {
         if (work.current?.relPath !== chapter) {
           const node = work.findChapter(chapter);
@@ -277,22 +279,36 @@ export class CandidatesStore {
         adoptedAny = true;
 
         // 采纳是作者决策：替换成功即落状态；保存失败另有红条+脏标记兜底
-        for (const id of applied) await this.client.patchCandidate(id, { status: 'adopted' });
+        // 逐条落库：单条 patch 失败收集计数继续，不中断其余已应用候选（成功的照常 adopted，不整批回滚）
+        for (const id of applied) {
+          try {
+            await this.client.patchCandidate(id, { status: 'adopted' });
+          } catch (err) {
+            patchFailures++;
+            if (!firstPatchErrMsg) firstPatchErrMsg = err instanceof Error ? err.message : String(err);
+          }
+        }
         await work.saveCurrent(); // 失败红条在 work.error，状态已按决策落库
       }
 
-      if (failures.length > 0) {
-        work.error = `部分候选未能采纳：${failures.join('；')}`;
+      // 汇总失败（锚点/编辑器未就绪 + 落库失败）：部分失败才报红条，全成则不打扰
+      const errs: string[] = [...failures];
+      if (patchFailures > 0) {
+        errs.push(`落库失败 ${patchFailures} 条${firstPatchErrMsg ? `：${firstPatchErrMsg}` : ''}`);
+      }
+      if (errs.length > 0) {
+        work.error = `部分候选未能采纳：${errs.join('；')}`;
       }
       // 批三-3：采纳落定（PATCH 完成、保存触发）后机械层自动跑账本诊断；有发现弹轻提示，无发现/失败静默。
       // 单一收口点在这里：StagingDrawer / StagingOverview / Editor 内联 ✓ 三个入口全部走 adopt()。
       if (adoptedAny) void this.notifyDiagnosticsAfterAdopt();
-      await this.load();
-      if (this.overviewOpen) void this.loadAll();
-      this.clearSelection();
     } catch (err) {
       work.error = `采纳失败：${err instanceof Error ? err.message : String(err)}`;
     } finally {
+      // 总是重拉列表（部分失败也要刷新，避免抽屉仍把已 adopted 的显示为 pending）+ 清选择 + 复位 busy
+      await this.load();
+      if (this.overviewOpen) void this.loadAll();
+      this.clearSelection();
       this.busy = false;
     }
   }

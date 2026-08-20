@@ -1,13 +1,15 @@
 /**
- * server.ts —— MCP stdio server 装配：注册二十七个工具并连接 stdio transport。
+ * server.ts —— MCP stdio server 装配：注册三十个工具并连接 stdio transport。
  * 双侧合并口径：基础工具 8 个 + WS-9 scan_quality + A 组 8 工具 + WS-17 账本 4 工具 + 0008 skill_read 1 工具 + 0009 问题日志 2 工具（issue_append/issue_set_status）+ scheme_set_active 1 工具（激活/取消激活方案指针）。
  * 批三-3 新增 2 工具：ledger_chapter_slice（按章过滤的账本视图，只读）+ write_meta（书级元数据写入，不写账本/不写正文）。
- * 被 core 包经 MCP stdio spawn 调用；工具实现见 tools.ts。
+ * 批一③ 碰撞模式 新增 3 工具：decision_append（裁决留痕追加）/ decision_tail（裁决留痕尾部只读）/ chapter_set_blueprint（章蓝图模式设置），并在 frontmatter 透出 blueprint、buildChapter 透传。
+ * 被 core 包经 MCP stdio spawn 调用；工具实现见 tools.ts / ledger.ts。
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import {
+  chapterSetBlueprint,
   createChapter,
   createVolume,
   deleteChapter,
@@ -29,6 +31,9 @@ import {
   writeChapter,
 } from './tools.js';
 import {
+  DECISION_TAIL_DEFAULT_LIMIT,
+  decisionAppend,
+  decisionTail,
   diagnosticsForWork,
   ISSUE_LOG_TAIL_LINES,
   issueAppend,
@@ -444,6 +449,75 @@ server.registerTool(
   },
   async ({ workDir, issueLogPath, id, status }) =>
     jsonResult(issueSetStatus(workDir, id, status as 'open' | 'done' | 'known', issueLogPath)),
+);
+
+// 批一③ 碰撞模式：裁决留痕追加（第 28 个工具；一行一条留痕，追加式）
+server.registerTool(
+  'decision_append',
+  {
+    title: '追加裁决留痕',
+    description:
+      '把一条裁决追加进 workDir/editorial_notes/decisions.md（可选 path 覆盖，但必须是 editorial_notes/ 下的 .md）。编号 D-NNN 扫现有 D-(\\d+) 最大 +1 续号（3 位零填充），日期由服务端取当天；行格式 `- D-NNN | 日期 | 议题 | 立场 | 裁决 | 理由 | 章1,章2`，chapters 缺省/空数组输出 `-`。字段内 | 与换行统一替换为空格；topic/stance/reason 非空校验、ruling 用枚举校验（采纳/驳回/搁置）。返回 { appended, id, path }。追加式留痕：推翻旧裁决请新增条目并引用原 D 编号，不改旧行。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      topic: z.string().describe('议题：决定要裁决的事项'),
+      stance: z.string().describe('立场：本次裁决的倾向/论据'),
+      ruling: z.enum(['采纳', '驳回', '搁置']).describe('裁决结论：采纳/驳回/搁置'),
+      reason: z.string().describe('理由：作出该裁决的原因'),
+      chapters: z.array(z.string()).optional().describe('可选：涉及的章（章名如「第三章」或 relPath），缺省/空数组输出 -'),
+      path: z.string().optional().describe('可选：裁决留痕相对 workDir 路径，必须 editorial_notes/ 下的 .md，默认 editorial_notes/decisions.md'),
+    },
+  },
+  async ({ workDir, topic, stance, ruling, reason, chapters, path }) =>
+    jsonResult(
+      decisionAppend(workDir, {
+        topic,
+        stance,
+        ruling,
+        reason,
+        ...(chapters !== undefined ? { chapters } : {}),
+        ...(path !== undefined ? { path } : {}),
+      }),
+    ),
+);
+
+// 批一③ 碰撞模式：裁决留痕尾部只读（第 29 个工具）
+server.registerTool(
+  'decision_tail',
+  {
+    title: '读取裁决留痕尾部',
+    description:
+      `只读 workDir/editorial_notes/decisions.md（path 固定，不开放）里所有「以 - D- 开头」的行：total = 总行数，默认取尾部 ${DECISION_TAIL_DEFAULT_LIMIT} 行（上限 100）。给 chapter 时先取含该子串的行（保持原顺序），不足 limit 从尾部（最新）往前补齐不重复的行，超过 limit 截断；返回的 lines 按文件原顺序（旧的在前）。文件不存在返回 { total: 0, lines: [] }，不抛错。`,
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      chapter: z.string().optional().describe('可选：过滤子串（章名如「第三章」或 relPath），只保留含该子串的行'),
+      limit: z
+        .number()
+        .int()
+        .positive()
+        .max(100)
+        .default(DECISION_TAIL_DEFAULT_LIMIT)
+        .describe(`最多返回行数，默认 ${DECISION_TAIL_DEFAULT_LIMIT}，上限 100`),
+    },
+  },
+  async ({ workDir, chapter, limit }) => jsonResult(decisionTail(workDir, chapter, limit)),
+);
+
+// 批一③ 碰撞模式：章蓝图模式设置（第 30 个工具）
+server.registerTool(
+  'chapter_set_blueprint',
+  {
+    title: '设置章蓝图碰撞模式',
+    description:
+      '设置（或删除）manuscript/ 内 .md 章 frontmatter 的 blueprint（蓝图碰撞模式 none/draft/locked）：有 fm 则改已有行、没有则在 fm 块内追加；无 fm 新建仅 title（文件名去后缀）/blueprint 的最小块再拼原正文；value=none 删除 blueprint 行（缺省即 none）。正文与其余字段字节级保留，覆盖写前旧内容滚入 .novel/history/。返回 { relPath, blueprint }。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      relPath: z.string().describe('相对 workDir 的章文件路径，必须是 manuscript/ 内的 .md，如 manuscript/卷一/第一章.md'),
+      value: z.enum(['none', 'draft', 'locked']).describe('目标蓝图模式：none 删除（缺省）/ draft 草稿碰撞 / locked 锁定'),
+    },
+  },
+  async ({ workDir, relPath, value }) =>
+    jsonResult(chapterSetBlueprint(workDir, relPath, value as 'none' | 'draft' | 'locked')),
 );
 
 server.registerTool(

@@ -26,6 +26,15 @@ function postChat(baseUrl: string, token: string, body: unknown): Promise<Respon
   });
 }
 
+/** 轮询等待条件成立（弹锁/落库异步时序用），超时抛错。 */
+async function waitFor(cond: () => boolean, timeoutMs = 3_000): Promise<void> {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) throw new Error('waitFor 超时');
+    await new Promise((r) => setTimeout(r, 15));
+  }
+}
+
 /** mock 模型收到的 prompt 消息 content 可能是 string 或 AI SDK 规范化的 content-part 数组，统一取文本。 */
 function promptText(m: { content: unknown }): string {
   if (typeof m.content === 'string') return m.content;
@@ -1060,6 +1069,225 @@ describe('/v1/chat SSE 管道', () => {
       expect(res.status).toBe(400);
       const body = (await res.json()) as { error: string };
       expect(body.error).toContain('控制字符');
+    } finally {
+      await s.close();
+    }
+  });
+
+  /** 含 decision_tail 的领域工具集（碰撞模式讨论沉淀注入；execute 缺省直接返回 tail）。 */
+  function decisionTailTools(
+    tail: { total: number; lines: string[] },
+    execute?: (input: unknown) => Promise<unknown>
+  ): ToolSet {
+    const tools: Record<string, unknown> = {
+      decision_tail: {
+        description: '检索最近裁决摘要',
+        inputSchema: z.object({ workDir: z.string(), chapter: z.string().optional(), limit: z.number().optional() }),
+        execute:
+          execute ??
+          (async () => tail),
+      },
+    };
+    return tools as unknown as ToolSet;
+  }
+
+  it('碰撞模式：mode=collide → 系统提示含「## 碰撞协议」与四标题契约字样', async () => {
+    const workDir = makeWorkDir();
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '这个设定互相打架吗', workDir, mode: 'collide' });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      const sysText = promptText(sys!);
+      expect(sysText).toContain('## 碰撞协议');
+      expect(sysText).toContain('## 方案');
+      expect(sysText).toContain('## 漏洞');
+      expect(sysText).toContain('## 反方');
+      expect(sysText).toContain('## 裁决');
+    } finally {
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('碰撞模式：不传 mode → 系统提示不含「碰撞协议」', async () => {
+    const workDir = makeWorkDir();
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '这段怎么改', workDir }); // 不传 mode
+      await readSse(res);
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      expect(promptText(sys!)).not.toContain('## 碰撞协议');
+      expect(promptText(sys!)).not.toContain('## 讨论沉淀');
+    } finally {
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('碰撞模式沉淀：decision_tail 返回 3 条 → 系统提示含「## 讨论沉淀」与三行内容', async () => {
+    const workDir = makeWorkDir();
+    const lines = ['D-001|放行|节奏前置|理由A|第1章', 'D-002|驳回|反派动机|理由B|第2章', 'D-003|搁置|伏笔密度|理由C|第3章'];
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model, tools: decisionTailTools({ total: 3, lines }) });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '碰撞', workDir, mode: 'collide' });
+      await readSse(res);
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      const sysText = promptText(sys!);
+      expect(sysText).toContain('## 讨论沉淀（最近裁决）');
+      expect(sysText).toContain('D-001');
+      expect(sysText).toContain('D-002');
+      expect(sysText).toContain('D-003');
+    } finally {
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('碰撞模式沉淀：decision_tail 工具缺失 → warn 降级零注入，不阻断聊天', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const workDir = makeWorkDir();
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model, tools: {} }); // 空工具集：无 decision_tail
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '碰撞', workDir, mode: 'collide' });
+      expect(res.status).toBe(200);
+      const events = await readSse(res);
+      expect(events.at(-1)!.event).toBe('done');
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      expect(promptText(sys!)).not.toContain('## 讨论沉淀');
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('碰撞模式沉淀：decision_tail 返回 total:0/lines:[] → 零注入', async () => {
+    const workDir = makeWorkDir();
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model, tools: decisionTailTools({ total: 0, lines: [] }) });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '碰撞', workDir, mode: 'collide' });
+      await readSse(res);
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      expect(promptText(sys!)).not.toContain('## 讨论沉淀');
+    } finally {
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('碰撞模式沉淀：非 collide 即使 decision_tail 在场也零注入，且 execute 未被调用', async () => {
+    const execute = vi.fn(async () => ({ total: 3, lines: ['D-001|放行'] }));
+    const workDir = makeWorkDir();
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model, tools: decisionTailTools({ total: 3, lines: ['D-001|放行'] }, execute) });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '这段怎么改', workDir }); // 不传 mode
+      await readSse(res);
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      expect(promptText(sys!)).not.toContain('## 讨论沉淀');
+      expect(execute).not.toHaveBeenCalled();
+    } finally {
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('碰撞模式沉淀：传 chapter → decision_tail execute 入参含 chapter', async () => {
+    const execute = vi.fn(async () => ({ total: 2, lines: ['D-001|放行'] }));
+    const workDir = makeWorkDir();
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model, tools: decisionTailTools({ total: 2, lines: ['D-001|放行'] }, execute) });
+    try {
+      const res = await postChat(s.baseUrl, s.token, {
+        text: '碰撞',
+        workDir,
+        mode: 'collide',
+        chapter: 'manuscript/第1章.md',
+      });
+      await readSse(res);
+      expect(execute).toHaveBeenCalledWith(
+        { workDir, limit: 20, chapter: 'manuscript/第1章.md' },
+        expect.objectContaining({ toolCallId: 'chat-decision-tail' })
+      );
+    } finally {
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('碰撞模式沉淀：lines 合并超 1500 → 截断加标注，正文不超预算上限；total>lines 末尾挂条数说明', async () => {
+    const workDir = makeWorkDir();
+    const lines = ['长'.repeat(800), '长'.repeat(800)]; // join 1601 > 1500
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model, tools: decisionTailTools({ total: 100, lines }) });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '碰撞', workDir, mode: 'collide' });
+      await readSse(res);
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      const sysText = promptText(sys!);
+      expect(sysText).toContain('…（已截断，完整记录见 editorial_notes/decisions.md）');
+      // 截断后注入正文不超预算上限：lines 全部由「长」组成，统计出现次数即正文长度
+      const longCount = (sysText.match(/长/g) ?? []).length;
+      expect(longCount).toBeLessThanOrEqual(1500);
+      // total > lines.length → 节末尾追加条数摘要
+      expect(sysText).toContain('（共 100 条，以上为摘要）');
+    } finally {
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('同 session 并发：第二个 409；第一个完成后同会话可再发；不同 session 并发互不影响（P2 在飞锁）', async () => {
+    let aborted = 0;
+    const s = await startTestServer({ modelForTier: () => hangingModel(() => aborted++) });
+    try {
+      const sid = s.store.createSession('并发').id;
+      const sid2 = s.store.createSession('并发B').id;
+      const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${s.token}` };
+      const post = (id: string, text: string, signal?: AbortSignal) => {
+        const init: RequestInit = { method: 'POST', headers: auth, body: JSON.stringify({ sessionId: id, text }) };
+        if (signal) init.signal = signal;
+        return fetch(`${s.baseUrl}/v1/chat`, init);
+      };
+
+      // 第一发：hangingModel 永不主动结束，挂住在飞持有锁。落库用户消息在加锁之后，消息出现即锁已持。
+      const ctrl1 = new AbortController();
+      const p1 = post(sid, '第一发', ctrl1.signal);
+      await waitFor(() => s.store.listMessages(sid).some((m) => m.role === 'user'));
+
+      // 同 session 第二个并发 → 409，且被拒请求没往会话写消息（409 在落库前拦截）
+      const res2 = await postChat(s.baseUrl, s.token, { sessionId: sid, text: '第二发' });
+      expect(res2.status).toBe(409);
+      expect(((await res2.json()) as { error: string }).error).toContain('正在进行的对话');
+      expect(s.store.listMessages(sid).filter((m) => m.role === 'user')).toHaveLength(1);
+
+      // 不同 session 并发互不影响：第二个会话不被 409 拦，能落库（拿到 200 与锁）
+      const ctrl2 = new AbortController();
+      const pB = post(sid2, '并发B', ctrl2.signal);
+      await waitFor(() => s.store.listMessages(sid2).some((m) => m.role === 'user'));
+      ctrl2.abort();
+      await pB.catch(() => {});
+
+      // 停止第一个（客户端断连触发服务端中止模型）→ 锁在 finally 释放
+      ctrl1.abort();
+      await p1.catch(() => {});
+      await waitFor(() => aborted >= 1); // 服务端已处理中止
+      await new Promise((r) => setTimeout(r, 150));
+
+      // 第一个完成后同会话可再发：第三发不再 409，能落库（再次拿锁并挂住）
+      const ctrl3 = new AbortController();
+      const p3 = post(sid, '第三发', ctrl3.signal);
+      await waitFor(() => s.store.listMessages(sid).filter((m) => m.role === 'user').length >= 2);
+      ctrl3.abort();
+      await p3.catch(() => {});
     } finally {
       await s.close();
     }

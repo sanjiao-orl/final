@@ -104,7 +104,9 @@ class NotesStore {
     this.error = null;
     try {
       await invoke('write_note', { relPath, content });
-      if (this.relPath === relPath) {
+      // 仅当 relPath 未变 **且** content 仍等于写盘快照才清脏：写盘在途期间用户新敲的内容
+      // （setContent 已置 dirty）不能被误清，保持 dirty 让后续防抖再存。
+      if (this.relPath === relPath && this.content === content) {
         this.dirty = false;
         this.savedAt = Date.now();
       }

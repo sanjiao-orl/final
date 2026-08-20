@@ -169,7 +169,7 @@ describe('core HTTP 服务', () => {
     }
   });
 
-  it('请求体超限 → 413 JSON 响应，连接不重置', async () => {
+  it('请求体超限 → 413 JSON 响应，带 Connection: close（残留 body 不污染 keep-alive 下一请求，P3）', async () => {
     const s = await startTestServer();
     try {
       const res = await fetch(`${s.baseUrl}/v1/chat`, {
@@ -179,8 +179,46 @@ describe('core HTTP 服务', () => {
       });
       expect(res.status).toBe(413);
       expect(res.headers.get('content-type')).toContain('application/json');
+      // 超限即在响应结束销毁 socket 关连接——断言 Connection: close 头（可测面：后续同连接不再复用）
+      expect(res.headers.get('connection')).toBe('close');
       const body = (await res.json()) as { error: string };
       expect(body.error).toContain('请求体过大');
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('PATCH /v1/candidates 状态机：pending→adopted 合法 200；adopted→discarded 非法 400 透传中文原因（P2）', async () => {
+    const s = await startTestServer();
+    try {
+      const auth = { Authorization: `Bearer ${s.token}` };
+      const created = await fetch(`${s.baseUrl}/v1/candidates`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...auth },
+        body: JSON.stringify({ chapter: 'ch01.md', original: '旧文', proposed: '新文' }),
+      });
+      expect(created.status).toBe(200);
+      const id = ((await created.json()) as { candidate: { id: string } }).candidate.id;
+
+      // pending → adopted 合法（壳采纳路径）
+      const ok = await fetch(`${s.baseUrl}/v1/candidates/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...auth },
+        body: JSON.stringify({ status: 'adopted' }),
+      });
+      expect(ok.status).toBe(200);
+      expect(((await ok.json()) as { candidate: { status: string } }).candidate.status).toBe('adopted');
+
+      // adopted → discarded 非法 → 400，错误映射为业务校验而非 500
+      const bad = await fetch(`${s.baseUrl}/v1/candidates/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...auth },
+        body: JSON.stringify({ status: 'discarded' }),
+      });
+      expect(bad.status).toBe(400);
+      const bb = (await bad.json()) as { error: string };
+      expect(bb.error).toContain('adopted');
+      expect(bb.error).toContain('discarded');
     } finally {
       await s.close();
     }

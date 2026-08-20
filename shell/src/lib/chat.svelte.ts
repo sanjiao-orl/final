@@ -107,6 +107,20 @@ export class ChatStore {
     }
   }
 
+  /** 碰撞模式开关（批一③）：开启时 chat 请求体带 mode:'collide'，core 按 方案/漏洞/反方/裁决 四节输出。持久化 localStorage。 */
+  collide = $state(
+    typeof localStorage !== 'undefined' && localStorage.getItem('chat.collide') === '1',
+  );
+
+  setCollide(v: boolean): void {
+    this.collide = v;
+    try {
+      localStorage.setItem('chat.collide', v ? '1' : '0');
+    } catch {
+      // 隐私模式等：内存态生效即可
+    }
+  }
+
   /** 显示层会话列表：归档隐藏 + 搜索过滤。 */
   visibleSessions = $derived.by(() => {
     const meta = loadMeta();
@@ -155,7 +169,11 @@ export class ChatStore {
   }
 
   private saveMeta(): void {
-    localStorage.setItem(META_KEY, JSON.stringify(this.meta));
+    try {
+      localStorage.setItem(META_KEY, JSON.stringify(this.meta));
+    } catch {
+      // 隐私模式等：内存态生效即可（会话 overlay 与 setTier/setCollide 同款）
+    }
   }
 
   sessionTitle(s: SessionRow): string {
@@ -166,12 +184,31 @@ export class ChatStore {
   private streamAbort: AbortController | null = null;
   /** 最后一次流式是否被用户主动取消（聊天栏给中断消息打标）。 */
   abortedLastStream = $state(false);
+  /** 流代际：切会话/切存区时递增，使旧流回调（onDelta/onDone 等）按 gen 校验后整体失效，
+   *  防止旧流增量写进新会话历史消息、sessionId 被旧流回写覆盖。 */
+  private streamGen = 0;
+  /** 当前流式占位 assistant 消息的下标（send 时记录）；非流式/已结束为 -1。
+   *  由 store 持有并维护，组件直接读它定位光标/「正在调用」——避免 onError 推错误气泡后把光标标到错误行。 */
+  streamingIdx = $state(-1);
 
-  /** 中断当前流式：fetch 收到 abort 后服务连接断开，UI 不再展示残留 delta。
-   *  已落库的 assistant 占位 message 保留并打上「已中断」标记，方便用户接着发。 */
+  /**
+   * 中断当前流式：fetch 收到 abort 后服务连接断开。窗口内已收的 delta 已由批次器在被中断前
+   * flush 进占位 assistant 消息（见 core.ts batcher.dispose）——这些内容会保留，语意与「停止」按钮一致：
+   * 已生成的部分不丢，占位消息保留并打上「已中断」标记，方便用户接着发。
+   */
   abortStream(): void {
     if (!this.streaming) return;
     this.streamAbort?.abort();
+  }
+
+  /** 切换讨论现场（开历史/新建/切存区）前废弃在途流：中止请求 + 递增代际使旧流回调失效，并复位流态现场。 */
+  private abandonInFlightStream(): void {
+    if (this.streaming) this.abortStream();
+    this.streamGen++; // 递增代际：旧流的 onDelta/onDone/onError 校验 gen 全丢弃
+    this.streaming = false;
+    this.streamAbort = null;
+    this.streamingIdx = -1;
+    this.abortedLastStream = false;
   }
 
   /** 当前挂载章节点（scope='ch:' 前缀）：按 frontmatter 稳定 id 或 relPath 解析；解析不到返回 null。 */
@@ -196,6 +233,7 @@ export class ChatStore {
   /** 切换讨论存区：清空现场，加载该归属的会话，自动打开最近一个。 */
   async setScope(scope: string): Promise<void> {
     if (scope === this.scope && this.sessionId !== null) return;
+    this.abandonInFlightStream();
     this.scope = scope;
     this.sessionId = null;
     this.messages = [];
@@ -216,6 +254,7 @@ export class ChatStore {
 
   /** 打开历史会话（重启恢复 / 列表点选）。 */
   async openSession(id: string): Promise<void> {
+    this.abandonInFlightStream();
     this.sessionId = id;
     this.renamingId = null;
     approval.resetSessionAllowed();
@@ -234,6 +273,7 @@ export class ChatStore {
   }
 
   newSession(): void {
+    this.abandonInFlightStream();
     this.sessionId = null;
     this.messages = [];
     approval.resetSessionAllowed();
@@ -358,12 +398,14 @@ export class ChatStore {
     const trimmed = text.trim();
     if (!trimmed || this.streaming) return;
     this.abortedLastStream = false;
+    const gen = ++this.streamGen; // 本流代际：切会话后旧流回调按此判定丢弃
     // 草稿键与内容在发送前捕获：流式期间用户可改写草稿，成功后仅当内容未变才清（见下方）
     const draftKey = this.currentDraftKey();
     const draftAtSend = this.draftMap[draftKey];
     this.messages.push({ role: 'user', content: trimmed });
     this.messages.push({ role: 'assistant', content: '', tools: [] });
     const idx = this.messages.length - 1;
+    this.streamingIdx = idx; // store 持有占位下标，组件据此定位光标/「正在调用」
     this.streaming = true;
     const scopeAtSend = this.scope; // 流式期间切存区：结果不回写现场，但服务端会话已完整落库
     const ac = new AbortController();
@@ -373,15 +415,26 @@ export class ChatStore {
       const chapterNode = this.chapterNodeForScope();
       // 决策 0010：激活方案映射到 chat 通道的 persona，无激活/无映射不带。
       const persona = scheme.channelPersona('chat');
-      const body = this.sessionId
-        ? { sessionId: this.sessionId, text: trimmed, workDir: work.workDir, tier: this.tier, ...(chapterNode ? { chapter: chapterNode.relPath } : {}), ...(persona ? { persona } : {}) }
-        : { text: trimmed, workDir: work.workDir, scope: this.scope, tier: this.tier, ...(chapterNode ? { chapter: chapterNode.relPath } : {}), ...(persona ? { persona } : {}) };
+      // 批一③ 碰撞模式：开启时带 mode:'collide'；方案未给 chat 指派角色时回落到「讨论陪练」（已指派则尊重方案不动）。
+      const mode = this.collide ? ('collide' as const) : undefined;
+      const personaOrSparring = persona ?? (mode ? '讨论陪练' : undefined);
+      const body = {
+        ...(this.sessionId ? { sessionId: this.sessionId } : { scope: this.scope }),
+        text: trimmed,
+        workDir: work.workDir,
+        tier: this.tier,
+        ...(chapterNode ? { chapter: chapterNode.relPath } : {}),
+        ...(mode ? { mode } : {}),
+        ...(personaOrSparring ? { persona: personaOrSparring } : {}),
+      };
       await this.client.chatStream(body, {
         onDelta: (t) => {
+          if (gen !== this.streamGen) return; // 旧流（已切会话/切存区）增量丢弃，防写进新会话历史
           const m = this.messages[idx];
           if (m) m.content += t;
         },
         onToolCall: (c) => {
+          if (gen !== this.streamGen) return;
           const m = this.messages[idx];
           if (!m) return;
           // B6 审批门：危险工具按当前模式裁决（ask 弹卡 / auto 查会话放行表 / yolo 直放）。
@@ -398,6 +451,7 @@ export class ChatStore {
           m.tools?.push(tool);
         },
         onToolResult: (r) => {
+          if (gen !== this.streamGen) return;
           const m = this.messages[idx];
           const tool = m?.tools?.find((t) => t.id === r.id);
           if (!tool) return;
@@ -405,12 +459,14 @@ export class ChatStore {
           if (tool.state !== 'pending' && tool.state !== 'rejected') tool.state = 'done';
         },
         onDone: (d) => {
+          if (gen !== this.streamGen) return; // 旧流不算数：sessionId 不被回写覆盖
           if (this.scope === scopeAtSend) {
             this.sessionId = d.sessionId;
             void this.loadSessions(); // 新会话进列表/标题排序刷新
           }
         },
         onError: (err) => {
+          if (gen !== this.streamGen) return;
           this.messages.push({ role: 'error', content: `服务端错误：${err.message}` });
         },
       }, ac.signal);
@@ -441,14 +497,19 @@ export class ChatStore {
       if (ac.signal.aborted) {
         this.abortedLastStream = true;
       } else {
+        // 网络层失败（fetch TypeError/连接拒绝）由 core.ts 抛 CoreNetworkError，消息自带「core 可能已退出」提示
         this.messages.push({
           role: 'error',
           content: `请求失败：${err instanceof Error ? err.message : String(err)}`,
         });
       }
     } finally {
-      this.streaming = false;
-      this.streamAbort = null;
+      // 仅当仍是本流代际才复位流态，避免旧流收尾覆盖已接管的（切会话后新发的）新流
+      if (gen === this.streamGen) {
+        this.streaming = false;
+        this.streamAbort = null;
+        this.streamingIdx = -1;
+      }
     }
   }
 

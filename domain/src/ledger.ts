@@ -17,6 +17,7 @@ import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { z } from 'zod';
 import { atomicWrite, assertWorkDir, collectMdFiles, resolveInside, sortMdFilesNumberAware, toPosix } from './fsutil.js';
 import { frontmatterEnd, parseFrontmatter } from './frontmatter.js';
 import { loadPrompt } from './prompts.js';
@@ -1828,4 +1829,122 @@ export function issueSetStatus(
   if (!found) throw new Error(`issue_set_status 找不到 id: ${target}`);
   if (changed) atomicWrite(abs, nextLines.join('\n'));
   return { ok: true, id: target, status };
+}
+
+// ---------- 裁决留痕（decisions.md） ----------
+
+/** 裁决留痕默认文件路径（相对 workDir）。 */
+const DEFAULT_DECISION_PATH = 'editorial_notes/decisions.md';
+
+/** decision_tail 默认最多返回行数（单一事实源；server.ts 工具描述串复用同一常量）。 */
+export const DECISION_TAIL_DEFAULT_LIMIT = 20;
+
+/** 裁决枚举（z.enum 校验；与 MCP zod schema 同口径）。 */
+const DECISION_RULING_SCHEMA = z.enum(['采纳', '驳回', '搁置']);
+
+/**
+ * decision_append：把一条裁决追加进裁决留痕（一行一条 `- D-NNN | 日期 | 议题 | 立场 | 裁决 | 理由 | 章1,章2`）。
+ * - 编号：扫现有 `D-(\d+)` 取最大 +1 续号（3 位零填充）；日期服务端取当天（UTC，ISO 前 10 位）；
+ * - chapters 缺省/空数组输出 `-`，非空则逐项清洗后逗号拼接；
+ * - 字段清洗：topic/stance/reason/chapters 内 `[\r\n|]` 全换空格并 trim（crField，行内防破坏 `|` 分隔）；
+ *   topic/stance/reason 非空校验、空抛中文错；ruling 用 z.enum 校验、枚举外抛中文错；
+ * - 文件不存在（或空内容）时先写 `# 裁决留痕` 头再追加；白名单外抛错；原子写回。
+ * 追加式留痕：推翻旧裁决请新增条目并引用原 D 编号，不改旧行。
+ */
+export function decisionAppend(
+  workDir: string,
+  params: { topic: string; stance: string; ruling: string; reason: string; chapters?: string[]; path?: string },
+): { appended: number; id: string; path: string } {
+  const wd = assertWorkDir(workDir);
+  const rel = params.path || DEFAULT_DECISION_PATH;
+  const abs = assertLedgerMetaPath(wd, rel, 'issueLog'); // 复用 issueLog 守卫：解析/越界/.md 前缀
+  const posix = toPosix(path.relative(wd, abs));
+  if (!posix.startsWith('editorial_notes/')) {
+    throw new Error(`decision_append 的 path 只允许 editorial_notes/ 下的 .md 文件: ${rel}`);
+  }
+  const topic = crField(params.topic ?? '').trim();
+  const stance = crField(params.stance ?? '').trim();
+  const reason = crField(params.reason ?? '').trim();
+  if (topic === '') throw new Error('decision_append 的 topic 需要非空字符串');
+  if (stance === '') throw new Error('decision_append 的 stance 需要非空字符串');
+  if (reason === '') throw new Error('decision_append 的 reason 需要非空字符串');
+  if (!DECISION_RULING_SCHEMA.safeParse(params.ruling).success) {
+    throw new Error(`decision_append 的 ruling 非法: ${String(params.ruling)}（允许: 采纳/驳回/搁置）`);
+  }
+  const chapters =
+    params.chapters !== undefined && params.chapters.length > 0
+      ? params.chapters.map((c) => crField(c).trim()).filter((c) => c !== '').join(',')
+      : '-';
+
+  let existing = '';
+  try {
+    existing = fs.readFileSync(abs, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+
+  // 扫现有 `D-(\d+)` 取最大编号 +1 续号（3 位零填充）
+  let nextNo = 0;
+  for (const m of existing.matchAll(/D-(\d+)/g)) {
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n > nextNo) nextNo = n;
+  }
+  nextNo += 1;
+  const id = `D-${String(nextNo).padStart(3, '0')}`;
+  const date = new Date().toISOString().slice(0, 10);
+  const row = `- ${id} | ${date} | ${topic} | ${stance} | ${params.ruling} | ${reason} | ${chapters}`;
+
+  // 拼接：文件不存在（或空内容）时带头行；已有内容原样保留（末尾补换行分隔）
+  const header = existing.trim() === '' ? '# 裁决留痕\n\n' : '';
+  const sep = existing === '' || existing.endsWith('\n') ? '' : '\n';
+  atomicWrite(abs, existing + sep + header + row + '\n');
+  return { appended: 1, id, path: rel };
+}
+
+/**
+ * decision_tail：只读裁决留痕尾部（path 固定 editorial_notes/decisions.md，不开放）。
+ * - 文件不存在 → { total: 0, lines: [] }（降级，不抛错）；
+ * - total = 全文件中所有「以 `- D-` 开头」行的总数；limit 默认 DECISION_TAIL_DEFAULT_LIMIT、上限 100；
+ * - chapter 在场：先取「含该 chapter 子串」的行（保持原顺序），不足 limit 从尾部（最新）往前补齐不重复的行，
+ *   超过 limit 截断；无 chapter 直接取尾部 limit 行；返回的 lines 一律按文件原顺序（旧的在前）。
+ */
+export function decisionTail(
+  workDir: string,
+  chapter?: string,
+  limit?: number,
+): { total: number; lines: string[] } {
+  const wd = assertWorkDir(workDir);
+  const abs = path.join(wd, DEFAULT_DECISION_PATH);
+  let existing: string;
+  try {
+    existing = fs.readFileSync(abs, 'utf8');
+  } catch {
+    return { total: 0, lines: [] }; // 文件不存在降级
+  }
+  const lines = existing.split(/\r?\n/).filter((l) => l.startsWith('- D-'));
+  const total = lines.length;
+  let lim = DECISION_TAIL_DEFAULT_LIMIT;
+  if (typeof limit === 'number' && Number.isFinite(limit)) {
+    lim = Math.min(100, Math.max(1, Math.floor(limit))); // 钳制到 [1, 100]
+  }
+  if (chapter === undefined || chapter === '') {
+    return { total, lines: lines.slice(-lim) };
+  }
+  // chapter 过滤优先：行内含该子串即中，保持原顺序
+  const selectedIdx = new Set<number>();
+  lines.forEach((l, i) => {
+    if (l.includes(chapter)) selectedIdx.add(i);
+  });
+  if (selectedIdx.size >= lim) {
+    // 超过 limit 截断：按原顺序取前 lim 条（旧的在前）
+    const kept = [...selectedIdx].sort((a, b) => a - b).slice(0, lim);
+    return { total, lines: kept.map((i) => lines[i]!) };
+  }
+  // 不足 limit：从尾部（最新）往前补齐不重复的剩余行
+  for (let i = lines.length - 1; i >= 0 && selectedIdx.size < lim; i--) {
+    selectedIdx.add(i);
+  }
+  // 最终按文件原顺序（旧的在前）
+  const out = [...selectedIdx].sort((a, b) => a - b).map((i) => lines[i]!);
+  return { total, lines: out };
 }

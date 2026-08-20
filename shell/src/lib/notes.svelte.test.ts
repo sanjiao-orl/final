@@ -161,3 +161,23 @@ describe('作者笔记 store', () => {
     await notes.flush(); // 不抛错
   });
 });
+
+describe('作者笔记 store · flush 在途输入竞态', () => {
+  it('flush：写盘在途时 setContent 追加 → flush 返回后 dirty 仍为 true（在途新输入不被误清）', async () => {
+    let resolveWrite!: (v: unknown) => void;
+    const invoke = mockTauri(async (cmd) => {
+      if (cmd === 'read_note') return '';
+      if (cmd === 'write_note') return new Promise((r) => (resolveWrite = r));
+      throw new Error(`unexpected ${cmd}`);
+    });
+    await notes.load('book.md');
+    notes.setContent('第一版');
+    const p = notes.flush(); // 写盘挂起（快照 content='第一版'）
+    notes.setContent('第一版＋在途追加'); // 写盘在途用户新敲（置 dirty）
+    resolveWrite(undefined);
+    await p;
+    expect(notes.content).toBe('第一版＋在途追加');
+    expect(notes.dirty).toBe(true); // 新输入未被误清，保持 dirty 让后续防抖再存
+    expect(invoke).toHaveBeenCalledWith('write_note', { relPath: 'book.md', content: '第一版' });
+  });
+});

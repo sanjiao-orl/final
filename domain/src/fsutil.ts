@@ -31,6 +31,52 @@ export function resolveInside(workDir: string, relPath: string): string {
   throw new Error(`relPath 越界(必须位于 workDir 内): ${relPath}`);
 }
 
+/**
+ * 归一化路径解析：先 resolveInside 规范化（压入 workDir 内 + 消解 ..），
+ * 再一次性返回 { abs, posix }——abs 为绝对路径，posix 为相对 workDir 的正斜杠路径。
+ * 安全契约：所有按相对路径操作的工具必须"先过它、再对 posix 做前缀白名单判断"，
+ * 杜绝"用未归一化原始 relPath 做 startsWith 前缀检查、之后才 resolveInside" 的口径错位
+ * （例如 `manuscript/../.novel/ledger.md` 的原始串以 manuscript/ 开头、归一化后其实是 .novel/ 路径）。
+ *
+ * 附带符号链接逃逸防御：从目标（可能自身不存在）向上找最近存在的祖先，realpath 之，
+ * 确认 realpath 落点仍在 workDir 内，否则抛中文错——防止写入/读取路径经仓内 symlink/junction
+ * 指向作品目录外（collectMdFiles 读侧已跳 symlink，本函数补上写侧/单文件操作的落点校验）。
+ * 每操作只做一次，量级可接受。
+ */
+export function resolveInsidePosix(
+  workDir: string,
+  relPath: string,
+): { abs: string; posix: string } {
+  const base = assertWorkDir(workDir);
+  const abs = resolveInside(base, relPath);
+  const realBase = fs.realpathSync(base); // workDir 一定存在，realpath 必成功
+  // 从目标向上找最近存在的祖先；依赖 realBase 与 realProbe 同为 realpath 结果（Windows 大小写一致）
+  let probe = abs;
+  for (;;) {
+    let realProbe: string;
+    try {
+      realProbe = fs.realpathSync(probe);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT' || (err as NodeJS.ErrnoException).code === 'ENOTDIR') {
+        const parent = path.dirname(probe);
+        if (parent === probe) break; // 一路到根仍不存在：整条都在仓内，放行
+        probe = parent;
+        continue;
+      }
+      throw err;
+    }
+    // 复用 resolveInside 的"仍在 base 内"判定语义（win32 下比较公共前缀大小写不敏感）
+    const rel = path.relative(realBase, realProbe);
+    const inside =
+      rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+    if (!inside) {
+      throw new Error(`路径经符号链接指向作品目录外: ${relPath}`);
+    }
+    break;
+  }
+  return { abs, posix: toPosix(path.relative(base, abs)) };
+}
+
 /** 单个 .md 文件（相对 manuscript 的 rel 与绝对路径）。 */
 export interface MdFile {
   /** 相对 manuscript 的路径（原生分隔符）。 */

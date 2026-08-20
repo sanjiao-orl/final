@@ -15,9 +15,11 @@ export interface Frontmatter {
   id?: string;
   /** 本章目标字数（number 取整数；string 能 parseInt 成正整数才收，否则忽略）。 */
   goal?: number;
+  /** 本章蓝图碰撞模式（none/draft/locked；宽容解析，字符串即收，无值域校验）。 */
+  blueprint?: string;
 }
 
-const FM_KEYS = ['title', 'status', 'pov', 'tags', 'synopsis', 'id', 'goal'] as const;
+const FM_KEYS = ['title', 'status', 'pov', 'tags', 'synopsis', 'id', 'goal', 'blueprint'] as const;
 
 /** 匹配文件开头的 `---` 包裹块，闭合行也可以是 `...`（YAML 规范）。 */
 const FM_RE = /^---\r?\n([\s\S]*?)\r?\n(?:---|\.\.\.)(?:\r?\n|$)/;

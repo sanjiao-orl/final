@@ -101,13 +101,27 @@ describe('/v1/rewrite SSE 改写管道', () => {
     }
   });
 
-  it('输出护栏：过长（超过原文 3 倍）→ SSE error，疑似注水', async () => {
-    const s = await startTestServer({ modelForTier: () => stepModel([textResult(['七字扩写文七字扩写文'])]) });
+  it('输出护栏：过长（超过原文 3 倍，且原文≥20 字）→ SSE error，疑似注水', async () => {
+    const s = await startTestServer({ modelForTier: () => stepModel([textResult(['七'.repeat(61)])]) });
     try {
-      const res = await postRewrite(s.baseUrl, s.token, { original: '原文', instruction: '' });
+      // 原文 20 字、结果 61 字：61/20=3.05>3 → 命中过长护栏（原文足 20 字，比率护栏生效）
+      const res = await postRewrite(s.baseUrl, s.token, { original: '原'.repeat(20), instruction: '' });
       const events = await readSse(res);
       expect(events.at(-1)?.event).toBe('error');
       expect(String(events.at(-1)?.data.message)).toContain('过长');
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('输出护栏：短选区（不足 20 字）大比率扩写放行（ratio>3 豁免，不误吞合法扩写）', async () => {
+    const s = await startTestServer({ modelForTier: () => stepModel([textResult(['扩'.repeat(100)])]) });
+    try {
+      // 原文「嗯」1 字、结果 100 字：比例远超 3 倍，但短选区豁免比率护栏 → 正常 done
+      const res = await postRewrite(s.baseUrl, s.token, { original: '嗯', instruction: '展开成一句完整的话' });
+      const events = await readSse(res);
+      expect(events.map((e) => e.event)).toEqual(['text-delta', 'done']);
+      expect(events.at(-1)?.data.text).toBe('扩'.repeat(100));
     } finally {
       await s.close();
     }

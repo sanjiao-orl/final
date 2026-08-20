@@ -471,3 +471,36 @@ describe('CandidatesStore · 采纳后自动诊断（批三-3）', () => {
     expect(work.error).toBeNull(); // 不污染采纳主链路
   });
 });
+
+describe('CandidatesStore · 批量采纳部分失败不中断（逐条收集 + 总是重拉）', () => {
+  it('adoptSelected：第二条 patch 失败 → 第一条已 adopted、列表已重拉、error 含失败计数', async () => {
+    const patchCandidate = vi.fn((id: string) => {
+      if (id === 'c2') return Promise.reject(new Error('DB lock'));
+      return Promise.resolve({ candidate: CAND });
+    });
+    const listCandidates = vi.fn().mockResolvedValue({ candidates: [] });
+    const callTool = vi.fn().mockResolvedValue(undefined); // save + 后台刷树 + ledger_diagnostics 空
+    const client = clientOf({ patchCandidate, listCandidates, callTool });
+    const store = new CandidatesStore();
+    store.init(client);
+    work.init(client, 'C:/works/demo');
+    work.current = { relPath: '章节A.md', title: '章节A', frontmatter: {}, frontmatterRaw: '---\n---\n', savedMd: 'x' };
+    work.registerEditor({ getMd: () => 'x', applyEdit: () => 'ok', appendMd: () => 'ok', replaceBodyMd: () => 'ok' });
+
+    store.items = [CAND, { ...CAND, id: 'c2' }]; // 两条同章，锚点都 ok
+    store.toggleSelect('c1');
+    store.toggleSelect('c2');
+    await store.adoptSelected();
+    // 成功的照常 adopted（不整批中断/回滚）
+    expect(patchCandidate).toHaveBeenCalledWith('c1', { status: 'adopted' });
+    expect(patchCandidate).toHaveBeenCalledWith('c2', { status: 'adopted' }); // 失败的也尝试了落库
+    // 部分失败：error 文案含失败条数与首错原因
+    expect(work.error).toContain('部分候选未能采纳');
+    expect(work.error).toContain('落库失败 1 条');
+    expect(work.error).toContain('DB lock');
+    // 即便部分失败也总是重拉列表 + 清选择 + 复位 busy
+    expect(listCandidates).toHaveBeenCalledWith({ status: 'pending' });
+    expect(store.selected.size).toBe(0);
+    expect(store.busy).toBe(false);
+  });
+});

@@ -354,6 +354,103 @@ describe('ChatStore', () => {
   });
 });
 
+describe('ChatStore · 批一③ 碰撞模式', () => {
+  function doneStream() {
+    return vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+  }
+
+  it('collide 开 + 方案无 chat 指派 → body 带 mode:\'collide\' 与 persona:\'讨论陪练\'', async () => {
+    const chatStream = doneStream();
+    const client = streamClient({ chatStream });
+    const chat = new ChatStore();
+    chat.init(client);
+    chat.setCollide(true);
+    await chat.send('帮我碰撞一下');
+    expect(chatStream).toHaveBeenCalledWith(
+      { text: '帮我碰撞一下', workDir: '', scope: '', tier: 'writing', mode: 'collide', persona: '讨论陪练' },
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('collide 开 + 方案已指派 chat 角色 → 带 mode 但不覆盖 persona', async () => {
+    const chatStream = doneStream();
+    const getPosture = vi.fn().mockResolvedValue({
+      personas: [],
+      schemes: [{ name: 'S', description: '', channels: { chat: '外婆' }, source: 'work' }],
+      activeScheme: 'S',
+    });
+    const client = streamClient({ chatStream, getPosture });
+    const chat = new ChatStore();
+    chat.init(client);
+    scheme.init(client);
+    work.workDir = 'C:/works/demo';
+    await scheme.load(); // activeScheme='S' → chat persona='外婆'
+    chat.setCollide(true);
+    await chat.send('碰撞');
+    expect(chatStream).toHaveBeenCalledWith(
+      { text: '碰撞', workDir: 'C:/works/demo', scope: '', tier: 'writing', mode: 'collide', persona: '外婆' },
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('collide 关 → 不带 mode 也不带讨论陪练 persona', async () => {
+    const chatStream = doneStream();
+    const client = streamClient({ chatStream });
+    const chat = new ChatStore();
+    chat.init(client);
+    await chat.send('普通问题');
+    expect(chatStream).toHaveBeenCalledWith(
+      { text: '普通问题', workDir: '', scope: '', tier: 'writing' },
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('已有会话 + collide 开 → 带 sessionId、mode、persona', async () => {
+    const chatStream = doneStream();
+    const client = streamClient({ chatStream });
+    const chat = new ChatStore();
+    chat.init(client);
+    chat.sessionId = 's1';
+    chat.setCollide(true);
+    await chat.send('续聊碰撞');
+    expect(chatStream).toHaveBeenCalledWith(
+      { sessionId: 's1', text: '续聊碰撞', workDir: '', tier: 'writing', mode: 'collide', persona: '讨论陪练' },
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('setCollide 持久化：写回 localStorage 且初始化读取（临时 polyfill）', () => {
+    const store = new Map<string, string>();
+    const orig = (globalThis as Record<string, unknown>).localStorage;
+    (globalThis as Record<string, unknown>).localStorage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    };
+    try {
+      const chat = new ChatStore();
+      expect(chat.collide).toBe(false); // 无残留 → 默认关
+      chat.setCollide(true);
+      expect(chat.collide).toBe(true);
+      expect(store.get('chat.collide')).toBe('1');
+      // 新实例读到 localStorage 已开的持久态
+      const chat2 = new ChatStore();
+      expect(chat2.collide).toBe(true);
+      chat2.setCollide(false);
+      expect(store.get('chat.collide')).toBe('0');
+    } finally {
+      if (orig === undefined) delete (globalThis as Record<string, unknown>).localStorage;
+      else (globalThis as Record<string, unknown>).localStorage = orig;
+    }
+  });
+});
+
 describe('ChatStore · B6 审批联动', () => {
   it('ask 模式：危险工具（write_chapter）挂起待审批，结果不落 done', async () => {
     const chatStream = vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
@@ -947,5 +1044,113 @@ describe('ChatStore · AI 写完自动刷新（反馈#6）', () => {
     await chat.send('把 AI 正文放进暂存区');
     expect(loadSpy).toHaveBeenCalled();
     loadSpy.mockRestore();
+  });
+});
+
+describe('ChatStore · 流式中切会话（代际守卫）与 streamingIdx', () => {
+  // 占位一条可控挂起的 chatStream：回调先捕获，等测试手动 resolve
+  function pendingStream() {
+    let h!: ChatStreamHandlers;
+    let resolveStream!: () => void;
+    const chatStream = vi.fn().mockImplementation((_b: unknown, handlers: ChatStreamHandlers) => {
+      h = handlers;
+      return new Promise<void>((r) => (resolveStream = r));
+    });
+    return { chatStream, get h() { return h; }, get resolve() { return resolveStream; } };
+  }
+
+  it('发送中 openSession：abort 旧流 + 代际失效，旧流 onDelta 不写新会话、onDone 不覆盖 sessionId', async () => {
+    const p = pendingStream();
+    const sessionMessages = vi.fn().mockResolvedValue({
+      sessionId: 'hist',
+      messages: [{ id: 'm0', role: 'user', content: '历史消息' }],
+    });
+    const client = streamClient({ chatStream: p.chatStream, sessionMessages });
+    const chat = new ChatStore();
+    chat.init(client);
+
+    const send = chat.send('流式问题'); // 旧流 gen 建立，流式进行中
+    expect(chat.streaming).toBe(true);
+    expect(chat.messages.map((m) => m.content)).toEqual(['流式问题', '']);
+
+    await chat.openSession('hist'); // 流式中切历史会话 → 旧流被废弃，现场换成历史
+    expect(chat.messages.map((m) => m.content)).toEqual(['历史消息']);
+    expect(chat.streaming).toBe(false); // 切会话后流态复位
+
+    // 旧流回调此刻才到：代际不匹配，全部丢弃
+    p.h.onDelta('旧流残片');
+    p.h.onToolCall?.({ id: 'old', name: 'word_count', args: {} });
+    p.h.onDone?.({ sessionId: 'old', messageId: 'oldm' });
+    p.resolve();
+    await send;
+
+    expect(chat.messages).toEqual([{ role: 'user', content: '历史消息', tools: [] }]); // 旧流增量未写进新会话
+    expect(chat.sessionId).toBe('hist'); // sessionId 未被旧流 onDone 覆盖
+    expect(chat.streaming).toBe(false);
+  });
+
+  it('发送中 newSession：旧流增量/onDone 不写进清空后的新会话现场', async () => {
+    const p = pendingStream();
+    const client = streamClient({ chatStream: p.chatStream });
+    const chat = new ChatStore();
+    chat.init(client);
+    chat.scope = 'work';
+
+    const send = chat.send('问题');
+    chat.newSession(); // 流式中新建会话
+    expect(chat.messages).toEqual([]);
+    expect(chat.streaming).toBe(false);
+
+    p.h.onDelta('旧流残片');
+    p.h.onDone?.({ sessionId: 'sNew', messageId: 'mNew' });
+    p.resolve();
+    await send;
+
+    expect(chat.messages).toEqual([]); // 旧流增量未写回
+    expect(chat.sessionId).toBeNull(); // 旧流 onDone 未回写 sessionId
+  });
+
+  it('streamingIdx：send 时指向占位 assistant；正常结束或错误后复位 -1，不指到错误行', async () => {
+    // 正常结束
+    const okStream = vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+      h.onDelta('你好');
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const chat = new ChatStore();
+    chat.init(streamClient({ chatStream: okStream }));
+    const ok = chat.send('hi');
+    expect(chat.streamingIdx).toBe(1); // 占位 assistant 下标
+    await ok;
+    expect(chat.streamingIdx).toBe(-1);
+
+    // onError 推错误气泡：光标仍指向占位 assistant（错误在最后一行），流式结束后复位
+    const p = pendingStream();
+    const chat2 = new ChatStore();
+    chat2.init(streamClient({ chatStream: p.chatStream }));
+    const send = chat2.send('x');
+    expect(chat2.streamingIdx).toBe(1);
+    p.h.onError?.(new Error('boo'));
+    expect(chat2.messages.at(-1)?.role).toBe('error'); // 错误气泡已 push（最后一行）
+    expect(chat2.streamingIdx).toBe(1); // 光标仍指占位 assistant，不指到错误行
+    p.resolve();
+    await send;
+    expect(chat2.streamingIdx).toBe(-1);
+  });
+
+  it('流式全程不受影响：正常流 delta/tool/done 全落位', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+      h.onDelta('正文');
+      h.onToolCall?.({ id: 't1', name: 'word_count', args: {} });
+      h.onToolResult?.({ id: 't1', name: 'word_count', result: { count: 1 } });
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const client = streamClient({ chatStream });
+    const chat = new ChatStore();
+    chat.init(client);
+    await chat.send('帮我看看');
+    expect(chat.messages[1]?.content).toBe('正文');
+    expect(chat.messages[1]?.tools?.[0]?.state).toBe('done');
+    expect(chat.sessionId).toBe('s1');
+    expect(chat.streaming).toBe(false);
   });
 });

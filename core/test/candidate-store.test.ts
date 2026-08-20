@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
-import { CandidateStore } from '../src/candidate-store.js';
+import { CandidateStore, CandidateStateError } from '../src/candidate-store.js';
 import { SessionStore, SESSIONS_TABLE_DDL } from '../src/session-store.js';
 
 function tmpDbPath(): string {
@@ -167,11 +167,28 @@ describe('CandidateStore', () => {
     store.close();
   });
 
-  it('状态流转 pending → discarded / adopted', () => {
+  it('状态迁移校验：pending→adopted / pending→discarded 合法；已决策态是终态，非法跳转抛 CandidateStateError', () => {
     const store = new CandidateStore(tmpDbPath());
-    const c = store.create({ chapter: 'c.md', original: 'a', proposed: 'b' });
-    expect(store.patch(c.id, { status: 'discarded' })!.status).toBe('discarded');
-    expect(store.patch(c.id, { status: 'adopted' })!.status).toBe('adopted');
+    const a = store.create({ chapter: 'c.md', original: 'a', proposed: 'b' }); // pending
+    const b = store.create({ chapter: 'c.md', original: 'a', proposed: 'b' }); // pending
+
+    // 壳侧真实用到的两种迁移（见 shell/src/lib/candidates.svelte.ts patchCandidate 调用）
+    expect(store.patch(a.id, { status: 'adopted' })!.status).toBe('adopted');
+    expect(store.patch(b.id, { status: 'discarded' })!.status).toBe('discarded');
+
+    // 非法：已决策候选是终态，不允许回跳/改判（防误操作改判后账目与正文脱节）
+    expect(() => store.patch(a.id, { status: 'discarded' })).toThrow(CandidateStateError);
+    expect(() => store.patch(a.id, { status: 'discarded' })).toThrow(/adopted.*discarded/);
+    expect(() => store.patch(a.id, { status: 'pending' })).toThrow(CandidateStateError);
+    expect(() => store.patch(b.id, { status: 'pending' })).toThrow(CandidateStateError);
+    expect(() => store.patch(b.id, { status: 'adopted' })).toThrow(CandidateStateError);
+
+    // 非法迁移被拒后候选状态不变（无副作用）
+    expect(store.get(a.id)!.status).toBe('adopted');
+    expect(store.get(b.id)!.status).toBe('discarded');
+
+    // 合法迁移后同状态重发是幂等的（不改状态也可）
+    expect(store.patch(a.id, { status: 'adopted' })!.status).toBe('adopted');
     store.close();
   });
 

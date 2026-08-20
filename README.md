@@ -18,14 +18,14 @@ npm run dev:core        # 起 sidecar 核心(打印 port/token,写 core-runtime.
 # 浏览器打开 http://127.0.0.1:<port>/v1/dev → 裸联调页(对话/流式/工具/多会话,仅 dev 运行时开放,prod 安装包关闭);协议契约见 docs/decisions/0007
 
 node core/scripts/e2e.mjs            # 真实 LLM e2e(key 在场才跑)
-node core/scripts/e2e-workflow.mjs   # 写作闭环剧本:起草→暂存→采纳→落章→快照→冷读(7 步,真实 LLM)
+node core/scripts/e2e-workflow.mjs   # 写作闭环剧本:碰撞→留痕闸门→起草→暂存→采纳→落章→快照→冷读(9 步,真实 LLM)
 ```
 
 ## 包结构
 
 - `core/` — sidecar 核心:HTTP+SSE server、AI SDK v7、MCP client、node:sqlite 会话持久化
 - `domain/` — MCP 领域服务:结构树(卷/章/场,标题派生)、章节读写(原子写)、搜索、字数统计、章/卷生产与组织(新建/重命名/卷内重排)、历史快照读取
-- `shell/` — Tauri 2 + Svelte 5 + TipTap 壳(v5 布局:48px AI 窄条 + 会话/对话/工具/上下文/设置五栏,点击切换;左侧结构树 + 作者笔记(AI 物理不可见);多候选浮层 B1、工具卡 B3/B10、快照浏览器、目标字数 B5、ask/auto/yolo 审批 B6、会话多级挂载 B7、采纳留痕 B8、树搜索/场大纲/拖拽 B9、设置面板;自动保存间隔可配)
+- `shell/` — Tauri 2 + Svelte 5 + TipTap 壳(v5 布局:48px AI 窄条 + 会话/对话/工具/上下文/设置五栏,点击切换;左侧结构树 + 作者笔记(AI 物理不可见);多候选浮层 B1、工具卡 B3/B10、快照浏览器、目标字数 B5、ask/auto/yolo 审批 B6、会话多级挂载 B7、采纳留痕 B8、树搜索/场大纲/拖拽 B9、设置面板;方案 pill 与碰撞模式(四节对比色+blueprint 徽标);自动保存间隔可配)
 - `.demo-work/` — 演示作品(测试文本,随时可删)
 - `docs/` — 需求基线(01-产品定义)、现状与计划(现状.md)、决策记录(decisions/0001-0013);历史文档(诊断 00/roadmap/壳重设计系列/审核手册/生态调研/路线偏移与最新进展等)在 `docs/archive/`(逐件索引见 archive/README.md)
 - `scripts/check-env.ps1` — 检查 LLM_* 环境变量是否配置
@@ -55,7 +55,7 @@ node core/scripts/e2e-workflow.mjs   # 写作闭环剧本:起草→暂存→采�
 
 ## 验收口径
 
-- `npm run check` / `npm test`(623 用例:core 167 + domain 240 + shell 216;另 cargo test 16;写作闭环 e2e-workflow 7 步,真实 LLM key 在场才跑)
+- `npm run check` / `npm test`(692 用例:core 182 + domain 268 + shell 242;另 cargo test 17;写作闭环 e2e-workflow 9 步含碰撞闸门,真实 LLM key 在场才跑)
 - 每周出口 = 作者用本仓真实写作;不以测试绿为验收
 
 ## 已知现象

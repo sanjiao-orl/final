@@ -356,3 +356,85 @@ describe('WorkStore', () => {
     expect(work.error).toContain('找回失败');
   });
 });
+
+describe('WorkStore · 开章/保存竞态（代际 + 快照）', () => {
+  it('openChapter：并发连开两章，先发的读回落后被代际丢弃，current 停在最后点章', async () => {
+    let resolveA!: (v: unknown) => void;
+    const callTool = vi.fn((name: string) => {
+      if (name === 'read_chapter') {
+        // 第一次调用（A 章）挂起，稍后由 resolveA 回；第二次（B 章）立即回
+        if (!resolveA) return new Promise((r) => (resolveA = r));
+        return Promise.resolve({ ...READ_RESULT, body: 'B 章正文' });
+      }
+      return Promise.resolve(undefined);
+    });
+    const client = mockClient({ callTool });
+    const work = new WorkStore();
+    work.init(client, 'C:/works/demo');
+    const pA = work.openChapter(ch('A.md', 'A章')); // 先点 A，读挂起
+    const pB = work.openChapter(ch('B.md', 'B章')); // 后点 B，立即回
+    await pB;
+    expect(work.current?.relPath).toBe('B.md');
+    resolveA({ content: 'A', frontmatter: {}, frontmatterRaw: '---\n---\n', body: 'A 章正文' }); // A 的旧读回此刻才到
+    await pA;
+    expect(work.current?.relPath).toBe('B.md'); // 仍是后点章，未被 A 覆盖
+  });
+
+  it('saveCurrent：写盘在途切章（current 已换）→ 旧章照常落盘，新章 dirty 不被误清', async () => {
+    let resolveWrite!: (v: unknown) => void;
+    const callTool = vi.fn((name: string) => {
+      if (name === 'write_chapter') return new Promise((r) => (resolveWrite = r));
+      if (name === 'list_structure') return Promise.resolve(VOLUME);
+      return Promise.resolve(undefined);
+    });
+    const client = mockClient({ callTool });
+    const work = new WorkStore();
+    work.init(client, 'C:/works/demo');
+    work.current = { relPath: 'A.md', title: 'A章', frontmatter: {}, frontmatterRaw: '---\nfoo: 1\n---\n', savedMd: 'A 旧文' };
+    work.registerEditor({ getMd: () => 'A 的改动', applyEdit: () => 'not-found', appendMd: () => 'ok', replaceBodyMd: () => 'ok' });
+    work.dirty = true;
+    const saveP = work.saveCurrent(); // A 写盘挂起
+    // 保存在途：用户已切到 B 章（直接换 current，绕过 openChapter 脏保存门禁，只验 saveCurrent 快照语义）
+    work.current = { relPath: 'B.md', title: 'B章', frontmatter: {}, frontmatterRaw: '---\n---\n', savedMd: 'B 旧文' };
+    work.registerEditor({ getMd: () => 'B 的改动', applyEdit: () => 'not-found', appendMd: () => 'ok', replaceBodyMd: () => 'ok' });
+    work.dirty = true; // B 有脏
+    resolveWrite(undefined);
+    await saveP;
+    // A 照常落盘（用 A 的快照 relPath/frontmatter）
+    expect(callTool).toHaveBeenCalledWith('write_chapter', expect.objectContaining({
+      relPath: 'A.md',
+      content: '---\nfoo: 1\n---\nA 的改动',
+    }));
+    // B 的新章状态不被 A 的保存误清（savedMd 不变、dirty 保留）
+    expect(work.current?.relPath).toBe('B.md');
+    expect(work.current?.savedMd).toBe('B 旧文');
+    expect(work.dirty).toBe(true);
+  });
+
+  it('saveCurrent：并发调用等待在飞保存完成后重入，第二次脏保存不丢', async () => {
+    const writes: Array<(v: unknown) => void> = [];
+    const callTool = vi.fn((name: string) => {
+      if (name === 'write_chapter') return new Promise((r) => writes.push(r));
+      if (name === 'list_structure') return Promise.resolve(VOLUME);
+      return Promise.resolve(undefined);
+    });
+    const client = mockClient({ callTool });
+    const work = new WorkStore();
+    work.init(client, 'C:/works/demo');
+    work.current = { relPath: 'A.md', title: 'A章', frontmatter: {}, frontmatterRaw: '', savedMd: 'v1' };
+    work.registerEditor({ getMd: () => 'v2', applyEdit: () => 'not-found', appendMd: () => 'ok', replaceBodyMd: () => 'ok' });
+    work.dirty = true;
+    const p1 = work.saveCurrent();
+    const p2 = work.saveCurrent(); // 在飞时并发第二次：应等待 p1 完成后重入，不吞
+    expect(writes).toHaveLength(1); // 第一次立即发起写盘
+    writes[0]!(undefined); // 第一次写盘完成
+    await p1;
+    // p2 等 p1 完成后的重入是异步微任务，用 waitFor 等到第二次写盘发起
+    await vi.waitFor(() => expect(writes).toHaveLength(2)); // 第二次重入后再写一次（脏内容落盘）
+    writes[1]!(undefined);
+    const ok2 = await p2;
+    expect(ok2).toBe(true);
+    expect(work.current?.savedMd).toBe('v2');
+    expect(work.dirty).toBe(false);
+  });
+});

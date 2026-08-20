@@ -150,17 +150,22 @@ export async function handleRewriteRequest(
   }
 }
 
-/** 改写结果护栏：通过返回 null，违规返回给人看的错误消息。 */
+/** 改写结果护栏：通过返回 null，违规返回给人看的错误消息。
+ *  取舍：极短选区（trim 后不足 20 字，如「嗯」）对合法扩写的长度比天然失真——任何像样的扩写都会远超 3 倍，
+ *  故比率护栏（过短/过长）只对中长选区生效；超长绝对上限 MAX_OUTPUT_CHARS 是硬护栏，任何选区都拦。 */
 export function guardRewrite(result: string, original: string): string | null {
   if (result.length > MAX_OUTPUT_CHARS) {
     return `改写结果超长（${result.length} 字符，上限 ${MAX_OUTPUT_CHARS}），已拒绝`;
   }
-  const ratio = result.length / Math.max(original.trim().length, 1);
-  if (ratio < OUTPUT_RATIO_MIN) {
-    return `改写结果过短（${result.length} 字符 vs 原文 ${original.trim().length}，不足 20%），疑似未完成改写，已拒绝`;
-  }
-  if (ratio > OUTPUT_RATIO_MAX) {
-    return `改写结果过长（${result.length} 字符 vs 原文 ${original.trim().length}，超过 3 倍），疑似注水，已拒绝`;
+  // 短选区豁免比率护栏：扩写是把「嗯」这样的一句话/词撑成完整表达，比例必然巨大，拒了反而把合法改写挡掉。
+  if (original.trim().length >= 20) {
+    const ratio = result.length / Math.max(original.trim().length, 1);
+    if (ratio < OUTPUT_RATIO_MIN) {
+      return `改写结果过短（${result.length} 字符 vs 原文 ${original.trim().length}，不足 20%），疑似未完成改写，已拒绝`;
+    }
+    if (ratio > OUTPUT_RATIO_MAX) {
+      return `改写结果过长（${result.length} 字符 vs 原文 ${original.trim().length}，超过 3 倍），疑似注水，已拒绝`;
+    }
   }
   return null;
 }

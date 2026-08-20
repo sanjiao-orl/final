@@ -1,6 +1,6 @@
 // core.ts 单测：health() 与 SSE POST 中 AbortSignal 行为 + 裸联调参数记忆（resolveBareParam）。
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CoreClient, resolveBareParam, LS_CORE_TOKEN_KEY, LS_CORE_WORKDIR_KEY } from './core.js';
+import { CoreClient, CoreNetworkError, resolveBareParam, LS_CORE_TOKEN_KEY, LS_CORE_WORKDIR_KEY } from './core.js';
 
 const origFetch = globalThis.fetch;
 
@@ -132,6 +132,35 @@ describe('resolveBareParam（裸联调 token/workDir 记忆）', () => {
     });
     expect(v).toBeUndefined();
     expect(lsSet).not.toHaveBeenCalled();
+  });
+});
+
+describe('CoreClient 网络层错误提示（core 可能已退出）', () => {
+  it('callTool：fetch 连不上（网络层）→ 抛 CoreNetworkError，消息自带可行动提示', async () => {
+    globalThis.fetch = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'));
+    const c = new CoreClient('http://127.0.0.1:1', 't');
+    await expect(c.callTool('word_count', {})).rejects.toThrow(CoreNetworkError);
+    await expect(c.callTool('word_count', {})).rejects.toThrow('core 可能已退出');
+    await expect(c.callTool('word_count', {})).rejects.toThrow('请到设置页重启 core');
+  });
+
+  it('callTool：HTTP 4xx/5xx（业务错误）→ 普通 Error，不带「core 可能已退出」提示', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({ error: '参数缺失' }, 400));
+    const c = new CoreClient('http://127.0.0.1:1', 't');
+    const err = await c.callTool('word_count', {}).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(CoreNetworkError);
+    const msg = err instanceof Error ? err.message : String(err);
+    expect(msg).toContain('参数缺失');
+    expect(msg).not.toContain('core 可能已退出');
+  });
+
+  it('chatStream：SSE 流网络层失败 → 抛 CoreNetworkError 带提示，业务 SSE error 事件走 onError 不带', async () => {
+    // 网络层：fetch 拒绝
+    globalThis.fetch = vi.fn().mockRejectedValue(new TypeError('conn refused'));
+    const c = new CoreClient('http://127.0.0.1:1', 't');
+    await expect(c.chatStream({ text: 'x' }, { onDelta: () => undefined })).rejects.toThrow(CoreNetworkError);
+    await expect(c.chatStream({ text: 'x' }, { onDelta: () => undefined })).rejects.toThrow('core 可能已退出');
   });
 });
 

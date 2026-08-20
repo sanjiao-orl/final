@@ -10,6 +10,8 @@
   import { ui } from '../../lib/ui.svelte.js';
   import { work } from '../../lib/work.svelte.js';
   import { candidates } from '../../lib/candidates.svelte.js';
+  import { collideParse } from '../../lib/collide-parse.js';
+  import { collideVar } from '../../theme.js';
 
   let listEl = $state<HTMLDivElement | null>(null);
 
@@ -60,8 +62,9 @@
     return marked.parse(content, { async: false, gfm: true }) as string;
   }
 
-  // D2.5：最后一条 assistant 消息若在 streaming，追加 ▎ 光标；并在摘要行展示"正在调用 XX"。
-  const streamingIdx = $derived(chat.streaming ? chat.messages.length - 1 : -1);
+  // D2.5：光标/「正在调用」定位到流式占位消息——store 持有占位下标（send 时记录），
+  // 直接读它，避免 onError 推错误气泡后把光标标到错误行。
+  // （streamingIdx 由 store 维护：非流式/已结束为 -1）
 
   /** 当前消息是否有未完成工具（running/pending）—— 摘要行脉冲点 + "正在调用"提示用。 */
   function hasPending(tools: ChatMsgTools): boolean {
@@ -131,8 +134,17 @@
       {#if m.content !== ''}
         <div class="bubble">
           {#if m.role === 'assistant'}
-            {@html renderAiHtml(m.content)}
-            {#if i === streamingIdx && chat.streaming}<span class="cursor" aria-hidden="true">▍</span>{/if}
+            {@const secs = collideParse(m.content)}
+            {#if secs}
+              {#each secs as sec (sec.sec)}
+                <div class="collide-sec" style:--sec-color={collideVar(sec.sec)}>
+                  {@html marked.parse(sec.md, { async: false, gfm: true })}
+                </div>
+              {/each}
+            {:else}
+              {@html renderAiHtml(m.content)}
+            {/if}
+            {#if i === chat.streamingIdx && chat.streaming}<span class="cursor" aria-hidden="true">▍</span>{/if}
           {:else}
             {m.content}
           {/if}
@@ -142,7 +154,7 @@
         <button class="tool-summary" class:has-pending={hasPending(m.tools)} onclick={() => jumpToTools(i)} title="切到工具面板并定位到该轮">
           {#if hasPending(m.tools)}<i class="pulse-dot"></i>{/if}
           {m.tools.length} 个工具调用 · 查看
-          {#if streamingToolName(m.tools) && i === streamingIdx}
+          {#if streamingToolName(m.tools) && i === chat.streamingIdx}
             <span class="running-tool">正在调用 {streamingToolName(m.tools)}</span>
           {/if}
         </button>
@@ -179,6 +191,14 @@
         title={chat.tier === 'writing' ? '当前：写作档（主笔模型）· 点击切到背景档' : '当前：背景档（便宜模型，杂活/整理用）· 点击切回写作档'}
       >
         {chat.tier === 'writing' ? '写作档' : '背景档'}
+      </button>
+      <button
+        class="tier collide"
+        class:on={chat.collide}
+        onclick={() => chat.setCollide(!chat.collide)}
+        title={chat.collide ? '当前：碰撞模式（方案/漏洞/反方/裁决）· 点击关闭' : '碰撞模式：正反交锋出结构化方案（方案/漏洞/反方/裁决）· 点击开启'}
+      >
+        {chat.collide ? '碰撞·开' : '碰撞'}
       </button>
       <span class="hint">Enter 发送 · Shift+Enter 换行</span>
       {#if chat.streaming}
@@ -303,6 +323,18 @@
     font-size: 12.5px;
     line-height: 1.75;
     word-break: break-word;
+  }
+  /* 碰撞模式（批一③）四节着色：左边框 + 节标题色随 --sec-color（collideVar 注入）。 */
+  .msg-ai .bubble :global(.collide-sec) {
+    margin: 0.6em 0 0.9em;
+    padding-left: 10px;
+    border-left: 2px solid var(--sec-color);
+  }
+  .msg-ai .bubble :global(.collide-sec:first-child) {
+    margin-top: 0;
+  }
+  .msg-ai .bubble :global(.collide-sec h2) {
+    color: var(--sec-color);
   }
   /* D2.1：assistant 气泡内 markdown 基础排版（继承正文字体）。 */
   .msg-ai .bubble :global(h1),
@@ -504,6 +536,12 @@
     background: var(--accent-soft);
     border-color: var(--accent-line);
     color: var(--accent);
+  }
+  /* 碰撞模式胶囊：开态用 --collide-pro 提亮，与 tier 同款胶囊形态 */
+  .tier.collide.on {
+    background: color-mix(in srgb, var(--collide-pro) 14%, transparent);
+    border-color: color-mix(in srgb, var(--collide-pro) 55%, var(--line));
+    color: var(--collide-pro);
   }
   .send {
     width: 26px;

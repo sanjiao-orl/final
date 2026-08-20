@@ -76,4 +76,14 @@ describe('parseFrontmatter', () => {
     expect(parseFrontmatter('---\ntitle: 一\n---\n正文').id).toBeUndefined();
     expect(parseFrontmatter('---\ntitle: 一\n---\n正文').goal).toBeUndefined();
   });
+
+  it('解析 blueprint（宽容：字符串即收，无值域校验）', () => {
+    expect(parseFrontmatter('---\nblueprint: draft\n---\n正文').blueprint).toBe('draft');
+    expect(parseFrontmatter('---\nblueprint: locked\n---\n正文').blueprint).toBe('locked');
+    // 非 draft/locked 的任意字符串也照收（不加值域校验）
+    expect(parseFrontmatter('---\nblueprint: 自定义值\n---\n正文').blueprint).toBe('自定义值');
+    // 缺省不出现
+    expect(parseFrontmatter('---\ntitle: 一\n---\n正文').blueprint).toBeUndefined();
+    expect(parseFrontmatter('纯正文。').blueprint).toBeUndefined();
+  });
 });
