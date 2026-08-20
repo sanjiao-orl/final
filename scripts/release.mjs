@@ -1,7 +1,8 @@
 // release.mjs —— 真实发布脚本（零依赖 node）。
 // 职责：工作树预检 → 同步六处版本号（tauri.conf.json、shell/package.json、Cargo.toml、core/package.json、domain/package.json、
 //       package-lock.json 的 core/domain/shell 三段，并顺带同步 Cargo.lock 的 name = "app" 版本，写完后自检）
-//       → 带签名私钥跑 tauri build → 收集 bundle/.sig → 生成 latest.json → 版本落账（自动 commit/tag/push）→ 发布 release。
+//       → 带签名私钥跑 tauri build（仅 NSIS：core/prompts/ 中文目录名超出 WiX 1252 码页，MSI 已弃，
+//       tauri.conf.json bundle.targets = ["nsis"]）→ 收集 bundle/.sig → 生成 latest.json → 版本落账（自动 commit/tag/push）→ 发布 release。
 // 发布流程（对网络限速/断流友好，幂等续传）：
 //   1) 工作树预检：git status --porcelain 非空则列出脏文件；除版本文件（见 VERSION_FILES）外的任何脏文件
 //      中止，防止带未完成代码发版；仅版本文件脏时放行（那是上次发版半途遗留，续跑会覆盖重算为一致值）；
@@ -305,18 +306,13 @@ function build() {
 function collectArtifacts(version) {
   const nsis = path.join(bundleDir, 'nsis', `novel-ws_${version}_x64-setup.exe`);
   const sig = `${nsis}.sig`;
-  const msi = path.join(bundleDir, 'msi', `novel-ws_${version}_x64_en-US.msi`);
   if (!existsSync(nsis)) fail(`找不到 NSIS 安装包: ${nsis}`);
   if (!existsSync(sig)) {
     fail(`找不到签名文件: ${sig}。请确认已设置 TAURI_SIGNING_PRIVATE_KEY_PATH / TAURI_SIGNING_PRIVATE_KEY（本仓密钥路径: ${defaultKeyPath()}）`);
   }
+  // 仅 NSIS 单通道（MSI 已弃：core/prompts/ 中文目录名超出 WiX 1252 码页）。
   const files = [nsis, sig];
-  if (existsSync(msi)) {
-    files.push(msi);
-  } else {
-    console.warn('[release] 未找到 MSI 安装包，仅上传 NSIS + 签名 + latest.json');
-  }
-  return { nsis, sig, msi, files };
+  return { nsis, sig, files };
 }
 
 function writeLatestJson({ version, notes, nsis, sig, repo }) {
@@ -410,7 +406,7 @@ function main() {
     build();
   }
 
-  const { nsis, sig, msi, files } = collectArtifacts(version);
+  const { nsis, sig, files } = collectArtifacts(version);
   const latestPath = writeLatestJson({ version, notes, nsis, sig, repo });
   files.push(latestPath);
 
@@ -422,9 +418,6 @@ function main() {
   console.log(`  Release: https://github.com/${repo}/releases/tag/v${version}`);
   console.log(`  latest.json: https://github.com/${repo}/releases/latest/download/latest.json`);
   console.log(`  NSIS: https://github.com/${repo}/releases/download/v${version}/${path.basename(nsis)}`);
-  if (existsSync(msi)) {
-    console.log(`  MSI: https://github.com/${repo}/releases/download/v${version}/${path.basename(msi)}`);
-  }
 }
 
 main();
