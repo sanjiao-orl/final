@@ -20,6 +20,11 @@
 //   npm run release -- 0.1.1            # 指定版本
 //   npm run release -- patch            # patch/minor/major 自增
 //   npm run release -- 0.1.1 --notes "..." --skip-build
+//   npm run release -- patch --dry-run  # 无副作用演练：只读预检+版本内容内存校验+打印动作计划，不写盘不联网不动 git
+// 护栏（0014 决策 2）：① 版本写入事务化——七处新内容全部在内存构造并逐项校验通过后才落盘，
+//   校验阶段零写入，杜绝写到一半失败留下半套改动；落盘中断可重跑覆盖（幂等），落盘后仍有 check-versions 自检兜底；
+// ② --dry-run 空跑演练，产物缺失降级为警告（正式运行会先 build 出来）；③ 自增防呆——自增算出的版本其本地 tag 已存在即拦截
+//   （几乎总是半途续传误用自增把版本算错），续传必须显式指定版本号。
 // 注意：发版要求工作树干净（除版本文件外有未提交改动会直接拦截）；版本号改动由脚本自动落账，无需手动 commit/tag/push。
 // 签名私钥：默认 <用户目录>/.tauri/novel-ws.key；可用 TAURI_SIGNING_PRIVATE_KEY_PATH 覆盖路径，
 // 或 TAURI_SIGNING_PRIVATE_KEY 直接给密钥内容；密码用 TAURI_SIGNING_PRIVATE_KEY_PASSWORD（本仓密钥为空密码）。
@@ -56,10 +61,6 @@ function readJson(p) {
   return JSON.parse(readFileSync(p, 'utf8'));
 }
 
-function writeJson(p, value) {
-  writeFileSync(p, `${JSON.stringify(value, null, 2)}\n`);
-}
-
 function currentVersion() {
   return readJson(shellPkgPath).version;
 }
@@ -68,6 +69,7 @@ function parseArgv(argv) {
   let target = 'patch';
   let notes = null;
   let skipBuild = false;
+  let dryRun = false;
   let repo = null;
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -85,8 +87,10 @@ function parseArgv(argv) {
       repo = a.slice('--repo='.length);
     } else if (a === '--skip-build') {
       skipBuild = true;
+    } else if (a === '--dry-run') {
+      dryRun = true;
     } else if (a === '--help' || a === '-h') {
-      console.log(`用法: node scripts/release.mjs [patch|minor|major|X.Y.Z] [--notes <文本>] [--repo <owner/repo>] [--skip-build]`);
+      console.log(`用法: node scripts/release.mjs [patch|minor|major|X.Y.Z] [--notes <文本>] [--repo <owner/repo>] [--skip-build] [--dry-run]`);
       process.exit(0);
     } else if (a.startsWith('-')) {
       fail(`未知参数: ${a}`);
@@ -94,7 +98,7 @@ function parseArgv(argv) {
       target = a;
     }
   }
-  return { target, notes, skipBuild, repo };
+  return { target, notes, skipBuild, dryRun, repo };
 }
 
 function bumpVersion(current, target) {
@@ -131,43 +135,76 @@ function setCargoLockAppVersion(text, version) {
   return text.replace(re, `$1${version}$2`);
 }
 
-// 同步 package-lock.json 的第三份 workspace 版本（core/domain/shell）。只改这三个 version 字段，
-// 其余字节不动：JSON.parse → 改三处 → JSON.stringify(obj, null, 2) + '\n'（与 npm 生成的 2 空格缩进一致）。
-function syncLockfile(version) {
-  const lock = readJson(rootLockPath);
-  for (const sub of ['core', 'domain', 'shell']) {
-    if (!lock.packages?.[sub]) fail(`package-lock.json 缺少 packages.${sub} 段，无法同步版本`);
-    lock.packages[sub].version = version;
-  }
-  writeJson(rootLockPath, lock);
-}
+// —— 版本写入事务化（0014 决策 2）——
+// 第一阶段：纯内存构造全部七项写入 { path, content, assert }，不碰磁盘；
+// assert 是对该项新内容的版本字段校验函数（与写入用同一构造路径，校验即复读）。
+function computeVersionWrites(version) {
+  const jsonAssert = (c) => JSON.parse(c).version === version;
+  const writes = [];
 
-function syncVersions(version) {
   const tauriConf = readJson(tauriConfPath);
   tauriConf.version = version;
-  writeJson(tauriConfPath, tauriConf);
+  writes.push({ path: tauriConfPath, content: `${JSON.stringify(tauriConf, null, 2)}\n`, assert: jsonAssert });
 
   const shellPkg = readJson(shellPkgPath);
   shellPkg.version = version;
-  writeJson(shellPkgPath, shellPkg);
-
-  const cargoToml = readFileSync(cargoTomlPath, 'utf8');
-  writeFileSync(cargoTomlPath, setCargoPackageVersion(cargoToml, version));
+  writes.push({ path: shellPkgPath, content: `${JSON.stringify(shellPkg, null, 2)}\n`, assert: jsonAssert });
 
   // core/domain 也同步（sidecar 自报版本取自它们的 package.json，漏掉会不一致）
   for (const sub of ['core', 'domain']) {
     const pkgPath = path.join(root, sub, 'package.json');
     const pkg = readJson(pkgPath);
     pkg.version = version;
-    writeJson(pkgPath, pkg);
+    writes.push({ path: pkgPath, content: `${JSON.stringify(pkg, null, 2)}\n`, assert: jsonAssert });
   }
 
-  // 第六处：package-lock.json 的 workspaces 版本段同步，否则 npm 依赖解析视图与源码漂移。
-  syncLockfile(version);
+  const cargoTomlText = readFileSync(cargoTomlPath, 'utf8');
+  writes.push({
+    path: cargoTomlPath,
+    content: setCargoPackageVersion(cargoTomlText, version),
+    assert: (c) => /^version\s*=\s*"([^"]+)"/m.exec(c)?.[1] === version,
+  });
+
+  // 第六处：package-lock.json 的 workspaces 版本段同步（core/domain/shell 三段），否则 npm 依赖解析视图与源码漂移。
+  const lock = readJson(rootLockPath);
+  for (const sub of ['core', 'domain', 'shell']) {
+    if (!lock.packages?.[sub]) fail(`package-lock.json 缺少 packages.${sub} 段，无法同步版本`);
+    lock.packages[sub].version = version;
+  }
+  writes.push({
+    path: rootLockPath,
+    content: `${JSON.stringify(lock, null, 2)}\n`,
+    assert: (c) => ['core', 'domain', 'shell'].every((sub) => JSON.parse(c).packages[sub].version === version),
+  });
 
   // L-1：--skip-build 时不重算 Cargo.lock，这里的同步保证提交的 Cargo.lock 也是当前版本。
-  const cargoLock = readFileSync(cargoLockPath, 'utf8');
-  writeFileSync(cargoLockPath, setCargoLockAppVersion(cargoLock, version));
+  const cargoLockText = readFileSync(cargoLockPath, 'utf8');
+  writes.push({
+    path: cargoLockPath,
+    content: setCargoLockAppVersion(cargoLockText, version),
+    assert: (c) => /name = "app"\nversion = "([^"]*)"/.exec(c)?.[1] === version,
+  });
+
+  return writes;
+}
+
+// 第二阶段：逐项校验内存内容确实包含目标版本；任一不过即中止，此时一个字节都未写盘。
+function verifyWrites(writes, version) {
+  for (const w of writes) {
+    if (!w.assert(w.content)) fail(`事务预校验失败（未写入任何文件）: ${path.relative(root, w.path)} 未包含目标版本 ${version}`);
+  }
+}
+
+// 第三阶段：统一落盘。每项都是完整内容，中断后重跑覆盖重算（幂等），落盘后另有 check-versions 自检兜底。
+function applyWrites(writes) {
+  for (const w of writes) writeFileSync(w.path, w.content);
+  console.log(`[release] 已事务化写入 ${writes.length} 处版本文件`);
+}
+
+function syncVersions(version) {
+  const writes = computeVersionWrites(version);
+  verifyWrites(writes, version);
+  applyWrites(writes);
 }
 
 function defaultKeyPath() {
@@ -388,13 +425,42 @@ function uploadRelease(repo, version, notes, files) {
 }
 
 function main() {
-  const { target, notes, skipBuild, repo: repoArg } = parseArgv(process.argv.slice(2));
+  const { target, notes, skipBuild, dryRun, repo: repoArg } = parseArgv(process.argv.slice(2));
   assertCleanWorktree();
   const before = currentVersion();
   const version = bumpVersion(before, target);
   const repo = repoArg || detectRepo();
 
-  console.log(`[release] ${before} → v${version}（repo: ${repo}）`);
+  // 自增防呆：显式指定版本时 target === version；自增模式（patch/minor/major）算出的版本若本地 tag 已存在，
+  // 几乎总是发版半途续传误用自增把版本算错——拦截并提示显式版本号。显式指定不拦（幂等续传的合法路径）。
+  if (target !== version
+    && runCapture('git', ['tag', '-l', `v${version}`], { cwd: root }).stdout.trim() === `v${version}`) {
+    fail(`自增得到 v${version} 但该 tag 已存在。若为上次发版续传，请显式指定版本号重跑: node scripts/release.mjs ${before}`);
+  }
+
+  console.log(`[release] ${before} → v${version}（repo: ${repo}${dryRun ? '，dry-run' : ''}）`);
+
+  // dry-run：全流程无副作用演练。只读预检/凭据检查照跑；七处版本内容只在内存构造并校验，不落盘；
+  // 不 build、不动 git、不碰 gh release；产物缺失降级为警告（正式运行会先构建出来），保证干净环境空跑也能通过。
+  if (dryRun) {
+    const writes = computeVersionWrites(version);
+    verifyWrites(writes, version);
+    ensureGh(repo);
+    const nsisName = `novel-ws_${version}_x64-setup.exe`;
+    const artifactsReady = existsSync(path.join(bundleDir, 'nsis', nsisName));
+    console.log('[release] ---- dry-run 动作计划（以下均未执行）----');
+    if (!skipBuild) {
+      console.log('[release]   1. tauri build --ci（NSIS 单通道+签名），收集 .exe/.sig 并生成 latest.json');
+    } else if (!artifactsReady) {
+      console.warn(`[release]   [警告] --skip-build 但产物不存在: ${nsisName}——正式运行将在 collectArtifacts 处失败`);
+    }
+    console.log(`[release]   ${skipBuild ? 1 : 2}. 事务化写入 ${writes.length} 处版本文件 → check-versions 自检`);
+    console.log(`[release]   ${skipBuild ? 2 : 3}. git add 七件版本文件 → commit "chore(release): bump v${version}" → tag v${version} → push origin HEAD 与 tag`);
+    console.log(`[release]   ${skipBuild ? 3 : 4}. gh release create v${version} --draft → upload NSIS/sig/latest.json 共 3 资产（--clobber 幂等重试）→ edit --draft=false`);
+    console.log('[release] dry-run 通过：以上为正式运行将执行的动作，本次未产生任何变更');
+    return;
+  }
+
   syncVersions(version);
 
   // 版本单一事实源自检：六处写入后必须一致，否则中止，防止带着漂移版本发布。

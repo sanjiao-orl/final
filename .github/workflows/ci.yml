@@ -1,0 +1,33 @@
+# CI —— 工程护栏批（决策 0014 决策 2）：766+ 测试不再只靠本地自觉。
+# 门禁 = 版本六处一致(check) + 文档校验(check:docs) + 三包全量测试 + cargo test。
+# e2e-workflow 不进 CI：需要真实 LLM key，仅作者本机跑（core/scripts/e2e-workflow.mjs）。
+name: CI
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  gate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: shell/src-tauri
+      - name: Install dependencies
+        run: npm ci
+      - name: Check (versions six-place consistency per workspace)
+        run: npm run check
+      - name: Check docs
+        run: npm run check:docs
+      - name: Test (core + domain + shell)
+        run: npm test
+      - name: Cargo test (shell/src-tauri)
+        run: cargo test
+        working-directory: shell/src-tauri
