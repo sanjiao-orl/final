@@ -18,7 +18,7 @@
 - `npm run check` 0 错(含版本六处一致)
 - `npm test` 全绿(core + domain + shell)
 - 动 rust 时:`cargo test`(在 shell/src-tauri)
-- key 在场才跑真实 LLM 闭环:`node core/scripts/e2e-workflow.mjs`(9 步);测试 key 见 `C:\Users\25007\Desktop\文档\OpenCode key`
+- key 在场才跑真实 LLM 闭环:`node core/scripts/e2e-workflow.mjs`(10 步);测试 key 见 `C:\Users\25007\Desktop\文档\OpenCode key`
 - 改文档后:`npm run check:docs`
 
 ## 禁止
@@ -30,5 +30,5 @@
 ## 协作协议
 - 需求模糊或多条实现路径:列 2~3 个方案+推荐项问作者,不脑补架构决策。
 - 每次变更端到端闭环,附可运行验证凭证;主 agent 审核不盲信回馈,必复核 diff/实跑。
-- 最小 diff,拒绝无关重构;30 个 MCP 工具契约不动只做加法。
+- 最小 diff,拒绝无关重构;31 个 MCP 工具契约不动只做加法。
 - 被作者纠正后:教训沉淀进 `docs/current/现状.md` 规范节;本文件改动需作者指令。
