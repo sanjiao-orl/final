@@ -28,6 +28,8 @@ jobs:
         run: npm run check:docs
       - name: Test (core + domain + shell)
         run: npm test
+      - name: Build sidecar (tauri build script 校验 resources/sidecar/node.exe 在场，产物已 gitignore)
+        run: npm run build:sidecar
       - name: Cargo test (shell/src-tauri)
         run: cargo test
         working-directory: shell/src-tauri
