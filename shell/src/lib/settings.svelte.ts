@@ -73,6 +73,10 @@ export interface SettingsShape {
   inlineSplit: boolean;
   /** 采纳留痕：显示"为何采纳"（B8）。 */
   showInstruction: boolean;
+  /** 触发式续写：结果只进暂存区候选，默认关闭。 */
+  continueEnabled: boolean;
+  /** 钉住 AI 面板：正文点击不再收起，默认关闭。 */
+  aiPinned: boolean;
 }
 
 const DEFAULTS: SettingsShape = {
@@ -84,6 +88,8 @@ const DEFAULTS: SettingsShape = {
   snapshotBeforeAdopt: true,
   inlineSplit: false,
   showInstruction: true,
+  continueEnabled: false,
+  aiPinned: false,
 };
 
 function load<T>(key: string, fallback: T): T {
@@ -108,6 +114,8 @@ class SettingsStore {
   snapshotBeforeAdopt = $state(DEFAULTS.snapshotBeforeAdopt);
   inlineSplit = $state(DEFAULTS.inlineSplit);
   showInstruction = $state(DEFAULTS.showInstruction);
+  continueEnabled = $state(DEFAULTS.continueEnabled);
+  aiPinned = $state(DEFAULTS.aiPinned);
 
   // ---- 应用级配置（config.json：作品目录 + LLM 双档；配置值 > 环境变量 > 默认） ----
   /** 配置里的作品目录（空串=默认）。 */
@@ -146,6 +154,8 @@ class SettingsStore {
     this.snapshotBeforeAdopt = DEFAULTS.snapshotBeforeAdopt; // 常开，不落盘
     this.inlineSplit = load<boolean>('settings.inlineSplit', DEFAULTS.inlineSplit);
     this.showInstruction = load<boolean>('settings.showInstruction', DEFAULTS.showInstruction);
+    this.continueEnabled = load<boolean>('settings.continueEnabled', DEFAULTS.continueEnabled);
+    this.aiPinned = load<boolean>('settings.aiPinned', DEFAULTS.aiPinned);
     this.applyVisual();
   }
 
@@ -157,6 +167,8 @@ class SettingsStore {
     save('settings.autosave', this.autosaveSec);
     save('settings.inlineSplit', this.inlineSplit);
     save('settings.showInstruction', this.showInstruction);
+    save('settings.continueEnabled', this.continueEnabled);
+    save('settings.aiPinned', this.aiPinned);
     localStorage.removeItem('theme'); // 旧 key 让位
   }
 
@@ -204,6 +216,16 @@ class SettingsStore {
 
   setShowInstruction(on: boolean): void {
     this.showInstruction = on;
+    this.persist();
+  }
+
+  setContinueEnabled(on: boolean): void {
+    this.continueEnabled = on;
+    this.persist();
+  }
+
+  setAiPinned(on: boolean): void {
+    this.aiPinned = on;
     this.persist();
   }
 

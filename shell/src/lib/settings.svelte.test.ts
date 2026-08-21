@@ -289,3 +289,48 @@ describe('暂存与裁决 · inlineSplit 默认（反馈#3：默认暂存优先�
     expect(settings.inlineSplit).toBe(false);
   });
 });
+
+describe('AI 面板钉住开关', () => {
+  it('默认关闭', () => {
+    settings.aiPinned = false;
+    expect(settings.aiPinned).toBe(false);
+  });
+
+  it('持久化到 settings.aiPinned', () => {
+    const values = new Map<string, string>();
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      value: {
+        getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => values.set(key, value),
+        removeItem: (key: string) => values.delete(key),
+      },
+    });
+    settings.setAiPinned(true);
+    expect(values.get('settings.aiPinned')).toBe('true');
+    settings.setAiPinned(false);
+    expect(values.get('settings.aiPinned')).toBe('false');
+    delete (globalThis as { localStorage?: unknown }).localStorage;
+  });
+});
+
+describe('触发式续写开关', () => {
+  it('默认关闭，并持久化到 settings.continueEnabled', () => {
+    settings.continueEnabled = false;
+    expect(settings.continueEnabled).toBe(false);
+    const values = new Map<string, string>();
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      value: {
+        getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => values.set(key, value),
+        removeItem: (key: string) => values.delete(key),
+      },
+    });
+    settings.setContinueEnabled(true);
+    expect(values.get('settings.continueEnabled')).toBe('true');
+    settings.setContinueEnabled(false);
+    expect(values.get('settings.continueEnabled')).toBe('false');
+    delete (globalThis as { localStorage?: unknown }).localStorage;
+  });
+});

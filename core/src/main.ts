@@ -81,6 +81,9 @@ async function main(): Promise<void> {
     rewrite: {
       modelForTier: (tier: Tier) => modelForPurpose(process.env, tier),
     },
+    continue: {
+      modelForTier: () => modelForPurpose(process.env, 'background'),
+    },
   });
 
   // listen 失败（如端口占用）会走 main().catch 直接 process.exit——而此时 runtime 文件尚未写入

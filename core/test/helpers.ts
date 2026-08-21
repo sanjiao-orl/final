@@ -46,6 +46,7 @@ export async function startTestServer(overrides: {
     chat,
     candidates,
     rewrite: { modelForTier: chat.modelForTier },
+    continue: { modelForTier: () => chat.modelForTier('background') },
     version: 'test',
     ...(overrides.devEnabled !== undefined ? { devEnabled: overrides.devEnabled } : {}),
   });

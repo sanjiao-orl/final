@@ -224,6 +224,22 @@
       <span class="sl"></span>
     </label>
   </div>
+  <div class="row inline">
+    <span class="r-label">触发式续写</span>
+    <label class="switch">
+      <input type="checkbox" checked={settings.continueEnabled} onchange={(e) => settings.setContinueEnabled(e.currentTarget.checked)} />
+      <span class="sl"></span>
+    </label>
+  </div>
+  <div class="r-desc">快捷键 Ctrl+Enter；结果进入暂存区。</div>
+  <div class="row inline">
+    <span class="r-label">钉住 AI 面板</span>
+    <label class="switch">
+      <input type="checkbox" checked={settings.aiPinned} onchange={(e) => settings.setAiPinned(e.currentTarget.checked)} />
+      <span class="sl"></span>
+    </label>
+  </div>
+  <div class="r-desc">钉住后点击正文不再收起，Esc/Ctrl+J 仍可收起。</div>
 </div>
 
 <div class="note">默认值遵循「默认否、可配」——默认全部最保守（审批 ask、快照常开不可关）。</div>

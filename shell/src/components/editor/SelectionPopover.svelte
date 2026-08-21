@@ -8,6 +8,8 @@
   import { candidates } from '../../lib/candidates.svelte.js';
   import { snapshot } from '../../lib/snapshot.svelte.js';
   import { work } from '../../lib/work.svelte.js';
+  import { appendPolishRound, transferPolishToChat, polishInstruction } from '../../lib/bridge.svelte.js';
+  import type { ChapterNode } from '../../lib/types.js';
 
   interface Candidate {
     id: number;
@@ -24,11 +26,12 @@
     /** 选区原文（替换锚点）。 */
     original: string;
     chapter: string;
+    chapterNode: ChapterNode | undefined;
     /** 首次打磨指令（可为空=换一版）。 */
     initialInstruction: string;
     onClose: () => void;
   }
-  let { x, y, maxTop, original, chapter, initialInstruction, onClose }: Props = $props();
+  let { x, y, maxTop, original, chapter, chapterNode, initialInstruction, onClose }: Props = $props();
 
   let rootEl = $state<HTMLDivElement | null>(null);
 
@@ -41,6 +44,7 @@
   /** 流式打磨草稿：生成过程实时显示，完成态落候选卡（缺陷2修复）。 */
   let draft = $state('');
   let applying = $state(false);
+  let rounds = $state<Array<{ instruction: string; text: string }>>([]);
   let seq = 0;
 
   // Esc 关浮层；click outside 落在 mousedown 阶段判断（输入框/按钮/浮层自身内吞掉）
@@ -91,6 +95,7 @@
     draft = '';
     if (text === null) return;
     seq += 1;
+    rounds = appendPolishRound(rounds, polishInstruction(ask, variant), text);
     cands = [...cands, { id: seq, text, label: `候选 ${cn(cands.length + 1)}` }];
     active = cands.length - 1;
     instruction = '';
@@ -201,6 +206,9 @@
     <button class="btn" onclick={() => void polish()} disabled={polishing}>打磨</button>
     <button class="btn" onclick={() => void apply('insert')} disabled={cands.length === 0 || applying}>插入其后</button>
     <button class="btn primary" onclick={() => void apply('replace')} disabled={cands.length === 0 || applying}>替换原文</button>
+    <button class="btn" onclick={() => {
+      if (chapterNode) void transferPolishToChat(chapterNode, original, rounds).then(onClose);
+    }} disabled={polishing || !chapterNode}>转入对话</button>
   </div>
 </div>
 

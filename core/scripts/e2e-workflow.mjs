@@ -133,7 +133,34 @@ async function sseChat(body) {
   return events;
 }
 
-/** POST /v1/tools/:name 代理；MCP 重连中回 503，短退避重试（core 刚就绪时 MCP 可能还没连上）。 */
+/** POST /v1/continue 并完整消费 SSE。 */
+async function sseContinue(body) {
+  const res = await fetch(`${baseUrl}/v1/continue`, { method: 'POST', headers: auth, body: JSON.stringify(body) });
+  if (!res.ok) throw new Error(`/v1/continue 返回 ${res.status}: ${await res.text()}`);
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  const events = [];
+  let buf = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const raw = buf.slice(0, idx); buf = buf.slice(idx + 2);
+      let event = 'message'; const dataLines = [];
+      for (const line of raw.split('\n')) {
+        const t = line.trim();
+        if (t.startsWith('event:')) event = t.slice(6).trim();
+        else if (t.startsWith('data:')) dataLines.push(t.slice(5).trim());
+      }
+      if (dataLines.length) events.push({ event, data: JSON.parse(dataLines.join('\n')) });
+    }
+  }
+  return events;
+}
+
+/** POST /v1/tools/:name 代理；MCP 重连中回 503，短退避重试（core 刚就绪时可能还没连上）。 */
 async function callTool(name, args, retries = 5) {
   for (let i = 0; ; i++) {
     const res = await fetch(`${baseUrl}/v1/tools/${name}`, {
@@ -154,7 +181,7 @@ function firstParagraph(relPath) {
   return para.trim().slice(0, 200);
 }
 
-// ---- 1/9 握手：断言 version / protocol ----
+// ---- 1/10 握手：断言 version / protocol ----
 const healthRes = await fetch(`${baseUrl}/v1/health`, { headers: auth });
 const health = healthRes.ok ? await healthRes.json() : null;
 if (
@@ -162,11 +189,11 @@ if (
   typeof health?.version !== 'string' || health.version === '' ||
   typeof health?.protocol !== 'number' || health.protocol < 1
 ) {
-  fail('1/9 握手 /v1/health', `status=${healthRes.status} body=${JSON.stringify(health)}`);
+  fail('1/10 握手 /v1/health', `status=${healthRes.status} body=${JSON.stringify(health)}`);
 }
-pass('1/9 握手 /v1/health', `version=${health.version} protocol=${health.protocol}`);
+pass('1/10 握手 /v1/health', `version=${health.version} protocol=${health.protocol}`);
 
-// ---- 2/9 碰撞：mode=collide 真实碰撞对话，断言四节固定标题齐备（0013：碰撞 → blueprint=locked → 起草） ----
+// ---- 2/10 碰撞：mode=collide 真实碰撞对话，断言四节固定标题齐备（0013：碰撞 → blueprint=locked → 起草） ----
 let collideEvents;
 try {
   collideEvents = await sseChat({
@@ -176,7 +203,7 @@ try {
     mode: 'collide',
   });
 } catch (err) {
-  fail('2/9 碰撞 POST /v1/chat', err instanceof Error ? err.message : String(err));
+  fail('2/10 碰撞 POST /v1/chat', err instanceof Error ? err.message : String(err));
 }
 const collideText = collideEvents
   .filter((e) => e.event === 'text-delta')
@@ -184,17 +211,17 @@ const collideText = collideEvents
   .join('');
 const collideDone = collideEvents.filter((e) => e.event === 'done').length;
 const collideErr = collideEvents.filter((e) => e.event === 'error').length;
-if (collideErr > 0) fail('2/9 碰撞 POST /v1/chat', `服务端 error 事件: ${JSON.stringify(collideEvents.find((e) => e.event === 'error').data)}`);
-if (collideDone !== 1) fail('2/9 碰撞 POST /v1/chat', `未收到 done 事件（done=${collideDone}）`);
+if (collideErr > 0) fail('2/10 碰撞 POST /v1/chat', `服务端 error 事件: ${JSON.stringify(collideEvents.find((e) => e.event === 'error').data)}`);
+if (collideDone !== 1) fail('2/10 碰撞 POST /v1/chat', `未收到 done 事件（done=${collideDone}）`);
 // 四节固定标题是壳对比色渲染的契约（collide-parse 判据），缺任一即协议未被遵循
 for (const h of ['## 方案', '## 漏洞', '## 反方', '## 裁决']) {
   if (!collideText.includes(h)) {
-    fail('2/9 碰撞 POST /v1/chat', `输出缺固定标题「${h}」（碰撞协议未被遵循），输出开头=${collideText.slice(0, 120)}`);
+    fail('2/10 碰撞 POST /v1/chat', `输出缺固定标题「${h}」（碰撞协议未被遵循），输出开头=${collideText.slice(0, 120)}`);
   }
 }
-pass('2/9 碰撞 POST /v1/chat', `四节标题齐备，输出 ${collideText.trim().length} 字`);
+pass('2/10 碰撞 POST /v1/chat', `四节标题齐备，输出 ${collideText.trim().length} 字`);
 
-// ---- 3/9 留痕与闸门：decision_append 登记 → chapter_set_blueprint 置 locked → 读回核对（0013 决策 1/2） ----
+// ---- 3/10 留痕与闸门：decision_append 登记 → chapter_set_blueprint 置 locked → 读回核对（0013 决策 1/2） ----
 const dRes = await callTool('decision_append', {
   workDir,
   topic: `${TEST_TITLE} 构思碰撞`,
@@ -203,19 +230,19 @@ const dRes = await callTool('decision_append', {
   reason: 'e2e 碰撞闸门自动化验证',
   chapters: [TEST_CHAPTER],
 });
-if (!dRes.ok) fail('3/9 留痕 POST /v1/tools/decision_append', `status=${dRes.status} ${await dRes.text()}`);
+if (!dRes.ok) fail('3/10 留痕 POST /v1/tools/decision_append', `status=${dRes.status} ${await dRes.text()}`);
 const dBody = await dRes.json();
 // 编号不断言 D-001：碰撞步的模型可能已按协议义务自调 decision_append 先登记过（e2e 实跑观测到过），只断言格式
 if (dBody?.appended !== 1 || !/^D-\d{3}$/.test(dBody?.id ?? '')) {
-  fail('3/9 留痕 POST /v1/tools/decision_append', `返回异常: ${JSON.stringify(dBody)}`);
+  fail('3/10 留痕 POST /v1/tools/decision_append', `返回异常: ${JSON.stringify(dBody)}`);
 }
 const bRes = await callTool('chapter_set_blueprint', { workDir, relPath: TEST_CHAPTER, value: 'locked' });
-if (!bRes.ok) fail('3/9 闸门 POST /v1/tools/chapter_set_blueprint', `status=${bRes.status} ${await bRes.text()}`);
+if (!bRes.ok) fail('3/10 闸门 POST /v1/tools/chapter_set_blueprint', `status=${bRes.status} ${await bRes.text()}`);
 // 读回 frontmatter 核对 blueprint 落盘
 const rcRes = await callTool('read_chapter', { workDir, relPath: TEST_CHAPTER });
 const rcBody = rcRes.ok ? await rcRes.json() : null;
 if (rcBody?.frontmatter?.blueprint !== 'locked') {
-  fail('3/9 闸门读回 POST /v1/tools/read_chapter', `blueprint 应为 locked: ${JSON.stringify(rcBody?.frontmatter)}`);
+  fail('3/10 闸门读回 POST /v1/tools/read_chapter', `blueprint 应为 locked: ${JSON.stringify(rcBody?.frontmatter)}`);
 }
 // 讨论沉淀读取：decision_tail 应含刚登记的条目（模型在碰撞步可能已先登记过，按本条 id 查）
 const dtRes = await callTool('decision_tail', { workDir, chapter: TEST_CHAPTER });
@@ -224,11 +251,11 @@ if (
   typeof dtBody?.total !== 'number' || dtBody.total < 1 ||
   !Array.isArray(dtBody?.lines) || !dtBody.lines.some((l) => String(l).includes(dBody.id))
 ) {
-  fail('3/9 沉淀读取 POST /v1/tools/decision_tail', `返回异常: ${JSON.stringify(dtBody)}`);
+  fail('3/10 沉淀读取 POST /v1/tools/decision_tail', `返回异常: ${JSON.stringify(dtBody)}`);
 }
-pass('3/9 留痕与闸门', `decision ${dBody.id} 已登记，blueprint=locked 读回一致，decision_tail total=${dtBody.total}`);
+pass('3/10 留痕与闸门', `decision ${dBody.id} 已登记，blueprint=locked 读回一致，decision_tail total=${dtBody.total}`);
 
-// ---- 4/9 起草：真实 LLM 按「人的方向」起草一小段章节正文 ----
+// ---- 4/10 起草：真实 LLM 按「人的方向」起草一小段章节正文 ----
 const draftPrompt =
   '按「人的方向，你的笔」起草一小段章节正文：\n' +
   '方向：延续第一章《少年》的悬念——林渡夜宿客栈时听到窗外有人低声提及「青崖山」。\n' +
@@ -238,7 +265,7 @@ let draftEvents;
 try {
   draftEvents = await sseChat({ text: draftPrompt, tier: 'writing', workDir });
 } catch (err) {
-  fail('4/9 起草 POST /v1/chat', err instanceof Error ? err.message : String(err));
+  fail('4/10 起草 POST /v1/chat', err instanceof Error ? err.message : String(err));
 }
 const draftText = draftEvents
   .filter((e) => e.event === 'text-delta')
@@ -246,12 +273,21 @@ const draftText = draftEvents
   .join('');
 const doneCount = draftEvents.filter((e) => e.event === 'done').length;
 const errCount = draftEvents.filter((e) => e.event === 'error').length;
-if (errCount > 0) fail('4/9 起草 POST /v1/chat', `服务端 error 事件: ${JSON.stringify(draftEvents.find((e) => e.event === 'error').data)}`);
-if (doneCount !== 1) fail('4/9 起草 POST /v1/chat', `未收到 done 事件（done=${doneCount}）`);
-if (draftText.trim().length < 20) fail('4/9 起草 POST /v1/chat', 'AI 未产出有效正文（text-delta 过短或为空）');
-pass('4/9 起草 POST /v1/chat', `text-delta=${draftEvents.filter((e) => e.event === 'text-delta').length}，正文 ${draftText.trim().length} 字，片段="${draftText.trim().slice(0, 60)}…"`);
+if (errCount > 0) fail('4/10 起草 POST /v1/chat', `服务端 error 事件: ${JSON.stringify(draftEvents.find((e) => e.event === 'error').data)}`);
+if (doneCount !== 1) fail('4/10 起草 POST /v1/chat', `未收到 done 事件（done=${doneCount}）`);
+if (draftText.trim().length < 20) fail('4/10 起草 POST /v1/chat', 'AI 未产出有效正文（text-delta 过短或为空）');
+pass('4/10 起草 POST /v1/chat', `text-delta=${draftEvents.filter((e) => e.event === 'text-delta').length}，正文 ${draftText.trim().length} 字，片段="${draftText.trim().slice(0, 60)}…"`);
 
-// ---- 5/9 建暂存候选：AI 产出先进暂存区（人的方向、AI 的笔），不直接落章 ----
+// ---- 5/10 续写：便宜档触发式续写，完整消费 SSE 并核对 done ----
+const continueEvents = await sseContinue({ context: '林渡推开客栈的窗，雾气沿着窗棂无声漫进来，远处忽然传来一声铃响。' });
+const continueErrors = continueEvents.filter((e) => e.event === 'error');
+const continueDones = continueEvents.filter((e) => e.event === 'done');
+if (continueErrors.length || continueDones.length !== 1 || String(continueDones[0]?.data?.text ?? '').length < 20) {
+  fail('5/10 续写 POST /v1/continue', `SSE 异常: ${JSON.stringify(continueEvents)}`);
+}
+pass('5/10 续写 POST /v1/continue', `done=1，正文 ${String(continueDones[0].data.text).length} 字`);
+
+// ---- 6/10 建暂存候选：AI 产出先进暂存区（人的方向、AI 的笔），不直接落章 ----
 const candRes = await fetch(`${baseUrl}/v1/candidates`, {
   method: 'POST',
   headers: auth,
@@ -262,14 +298,14 @@ const candRes = await fetch(`${baseUrl}/v1/candidates`, {
     instruction: '起草第3章正文（AI 产出先进暂存区）',
   }),
 });
-if (!candRes.ok) fail('5/9 建暂存候选 POST /v1/candidates', `status=${candRes.status} ${await candRes.text()}`);
+if (!candRes.ok) fail('6/10 建暂存候选 POST /v1/candidates', `status=${candRes.status} ${await candRes.text()}`);
 const candidate = (await candRes.json()).candidate;
 if (!candidate?.id || candidate.status !== 'pending') {
-  fail('5/9 建暂存候选 POST /v1/candidates', `候选异常: ${JSON.stringify(candidate)}`);
+  fail('6/10 建暂存候选 POST /v1/candidates', `候选异常: ${JSON.stringify(candidate)}`);
 }
-pass('5/9 建暂存候选 POST /v1/candidates', `id=${candidate.id} status=${candidate.status}`);
+pass('6/10 建暂存候选 POST /v1/candidates', `id=${candidate.id} status=${candidate.status}`);
 
-// ---- 6/9 采纳候选：pending → adopted ----
+// ---- 7/10 采纳候选：pending → adopted ----
 const patchRes = await fetch(`${baseUrl}/v1/candidates/${candidate.id}`, {
   method: 'PATCH',
   headers: auth,
@@ -277,39 +313,39 @@ const patchRes = await fetch(`${baseUrl}/v1/candidates/${candidate.id}`, {
 });
 const patched = patchRes.ok ? (await patchRes.json()).candidate : null;
 if (!patchRes.ok || patched?.status !== 'adopted') {
-  fail('6/9 采纳候选 PATCH /v1/candidates/:id', `status=${patchRes.status} body=${JSON.stringify(patched)}`);
+  fail('7/10 采纳候选 PATCH /v1/candidates/:id', `status=${patchRes.status} body=${JSON.stringify(patched)}`);
 }
-pass('6/9 采纳候选 PATCH /v1/candidates/:id', `status=${patched.status}`);
+pass('7/10 采纳候选 PATCH /v1/candidates/:id', `status=${patched.status}`);
 
-// ---- 7/9 落章：把采纳正文写进测试章节（覆盖占位，触发写前自动快照）；fm 保留 blueprint: locked——碰撞放行后才起草，落章不丢闸门状态位 ----
+// ---- 8/10 落章：把采纳正文写进测试章节（覆盖占位，触发写前自动快照）；fm 保留 blueprint: locked——碰撞放行后才起草，落章不丢闸门状态位 ----
 const chapterContent = `---\ntitle: ${TEST_TITLE}\nstatus: 草稿\nblueprint: locked\n---\n\n${draftText.trim()}\n`;
 const wRes = await callTool('write_chapter', { workDir, relPath: TEST_CHAPTER, content: chapterContent });
-if (!wRes.ok) fail('7/9 落章 POST /v1/tools/write_chapter', `status=${wRes.status} ${await wRes.text()}`);
+if (!wRes.ok) fail('8/10 落章 POST /v1/tools/write_chapter', `status=${wRes.status} ${await wRes.text()}`);
 const wBody = await wRes.json();
 if (wBody?.ok !== true || typeof wBody?.bytes !== 'number' || wBody.bytes <= 0) {
-  fail('7/9 落章 POST /v1/tools/write_chapter', `返回异常: ${JSON.stringify(wBody)}`);
+  fail('8/10 落章 POST /v1/tools/write_chapter', `返回异常: ${JSON.stringify(wBody)}`);
 }
-pass('7/9 落章 POST /v1/tools/write_chapter', `bytes=${wBody.bytes}（覆盖占位已触发写前快照）`);
+pass('8/10 落章 POST /v1/tools/write_chapter', `bytes=${wBody.bytes}（覆盖占位已触发写前快照）`);
 
 // 落章后核对 list_structure 透出 blueprint（壳结构树徽标的数据源）
 const lsRes = await callTool('list_structure', { workDir });
 const lsText = lsRes.ok ? JSON.stringify(await lsRes.json()) : '';
 if (!lsRes.ok || !lsText.includes('"blueprint":"locked"')) {
-  fail('7/9 落章 POST /v1/tools/list_structure', `blueprint 未透出到结构树: ${lsText.slice(0, 200)}`);
+  fail('8/10 落章 POST /v1/tools/list_structure', `blueprint 未透出到结构树: ${lsText.slice(0, 200)}`);
 }
-pass('7/9 落章 list_structure 透出', 'blueprint=locked 已透出');
+pass('8/10 落章 list_structure 透出', 'blueprint=locked 已透出');
 
-// ---- 8/9 快照验证：写前自动快照应已存在 ----
+// ---- 9/10 快照验证：写前自动快照应已存在 ----
 const sRes = await callTool('list_snapshots', { workDir, relPath: TEST_CHAPTER });
-if (!sRes.ok) fail('8/9 快照验证 POST /v1/tools/list_snapshots', `status=${sRes.status} ${await sRes.text()}`);
+if (!sRes.ok) fail('9/10 快照验证 POST /v1/tools/list_snapshots', `status=${sRes.status} ${await sRes.text()}`);
 const sBody = await sRes.json();
 const snapshots = Array.isArray(sBody?.snapshots) ? sBody.snapshots : null;
 if (!snapshots || snapshots.length === 0) {
-  fail('8/9 快照验证 POST /v1/tools/list_snapshots', '未找到该章写前自动快照');
+  fail('9/10 快照验证 POST /v1/tools/list_snapshots', '未找到该章写前自动快照');
 }
-pass('8/9 快照验证 POST /v1/tools/list_snapshots', `快照 ${snapshots.length} 份，最新=${snapshots[0].timestamp}`);
+pass('9/10 快照验证 POST /v1/tools/list_snapshots', `快照 ${snapshots.length} 份，最新=${snapshots[0].timestamp}`);
 
-// ---- 9/9 冷读审阅：断言 findings 数组结构 ----
+// ---- 10/10 冷读审阅：断言 findings 数组结构 ----
 let rvBody = null;
 for (let i = 0; i < 5; i++) {
   const rvRes = await fetch(`${baseUrl}/v1/review`, {
@@ -326,14 +362,14 @@ for (let i = 0; i < 5; i++) {
 }
 const findings = rvBody?.findings;
 if (!Array.isArray(findings)) {
-  fail('9/9 冷读审阅 POST /v1/review', `返回异常: ${JSON.stringify(rvBody)?.slice(0, 300)}`);
+  fail('10/10 冷读审阅 POST /v1/review', `返回异常: ${JSON.stringify(rvBody)?.slice(0, 300)}`);
 }
 for (const f of findings) {
   if (typeof f?.severity !== 'string' || typeof f?.quote !== 'string' || typeof f?.why !== 'string') {
-    fail('9/9 冷读审阅 POST /v1/review', `findings 元素结构不完整: ${JSON.stringify(f)}`);
+    fail('10/10 冷读审阅 POST /v1/review', `findings 元素结构不完整: ${JSON.stringify(f)}`);
   }
 }
-pass('9/9 冷读审阅 POST /v1/review', `findings ${findings.length} 条${findings.length ? `，首条 severity=${findings[0].severity}` : ''}`);
+pass('10/10 冷读审阅 POST /v1/review', `findings ${findings.length} 条${findings.length ? `，首条 severity=${findings[0].severity}` : ''}`);
 
 // ---- 优雅关闭 + 清理临时副本 ----
 // Windows 无 SIGTERM：child.kill 走 TerminateProcess，exit code 必为 null（signal='SIGTERM'），属预期。
@@ -343,4 +379,4 @@ if (exitCode !== 0 && !(process.platform === 'win32' && exitCode === null)) {
   fail('core 退出', `core 退出码异常: ${exitCode}`);
 }
 try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* 忽略清理失败 */ }
-console.log('[e2e-workflow] 全部通过（9/9，core 已退出，临时 workDir 已清理）');
+console.log('[e2e-workflow] 全部通过（10/10，core 已退出，临时 workDir 已清理）');

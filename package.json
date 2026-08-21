@@ -13,6 +13,7 @@
     "dev:shell": "npm run dev -w shell",
     "test": "npm test --workspaces --if-present",
     "check": "npm run check --workspaces --if-present && node scripts/check-versions.mjs",
+    "check:docs": "node scripts/check-docs.mjs",
     "build": "npm run build --workspaces --if-present",
     "build:sidecar": "node scripts/build-sidecar.mjs",
     "release": "node scripts/release.mjs"

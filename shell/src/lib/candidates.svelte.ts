@@ -9,6 +9,8 @@ import { scheme } from './scheme.svelte.js';
 import { work } from './work.svelte.js';
 import { ISSUE_LOG_DEFAULT } from './paths.js';
 
+export const CONTINUE_CONTEXT_CHARS = 3000;
+
 /** ledger_diagnostics 返回的机械诊断结果（契约镜像，只消费 findings 计数）。 */
 interface LedgerDiagnosticsNotice {
   findings?: Array<{ severity: string; code?: string; message?: string; category?: string }>;
@@ -25,6 +27,8 @@ export class CandidatesStore {
   busy = $state(false);
   /** 流式改写中的生成现场（缺陷修复：改写过程在暂存区实时流式显示，完成态才落候选卡）。 */
   generating = $state<{ chapter: string; original: string; instruction: string; text: string } | null>(null);
+  /** 触发式续写在飞状态：过程文本不进编辑器，只显示按钮忙碌态。 */
+  continuing = $state(false);
   /** 全览视图（弹出展示全部候选：列表/双栏对照/批量操作/快照还原）。 */
   overviewOpen = $state(false);
   /** 全览视图数据源：全部状态的候选（status 不限，新在前）。 */
@@ -110,6 +114,37 @@ export class CandidatesStore {
   private generateAbort: AbortController | null = null;
   /** 流式生成期间是否在生成中（用于按钮态）。 */
   isGenerating = $derived(this.generating !== null);
+
+  /** 触发式续写：当前正文末尾 3000 字符 → SSE → append 候选，只在暂存区生效。 */
+  async continueFromChapter(): Promise<boolean> {
+    if (this.continuing || !work.current) return false;
+    const chapter = work.current;
+    const context = (work.editorApiText?.() ?? chapter.savedMd).slice(-CONTINUE_CONTEXT_CHARS);
+    if (!context.trim()) return false;
+    this.continuing = true;
+    let text = '';
+    const failure: { err: Error | null } = { err: null };
+    try {
+      await this.client.continueText(
+        { context, instruction: '续写', ...(work.workDir ? { workDir: work.workDir } : {}) },
+        {
+          onText: (d) => { text += d; },
+          onDone: ({ text: done }) => { text = done; },
+          onError: (err) => { failure.err = err; },
+        },
+      );
+      if (failure.err) throw failure.err;
+      if (!text.trim()) return false;
+      const r = await this.client.createCandidate({ chapter: chapter.relPath, original: '', proposed: text, instruction: '续写', kind: 'append' });
+      this.setItems([r.candidate, ...this.items]);
+      return true;
+    } catch (err) {
+      work.error = `AI 续写失败：${err instanceof Error ? err.message : String(err)}`;
+      return false;
+    } finally {
+      this.continuing = false;
+    }
+  }
 
   /** 取消当前流式生成（接在 selectionPopover/暂存区入口的停止按钮）。 */
   abortGenerate(): void {

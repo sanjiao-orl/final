@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export type PromptKind = 'chat' | 'review' | 'rewrite' | 'cold_read' | 'collide';
+export type PromptKind = 'chat' | 'review' | 'rewrite' | 'cold_read' | 'collide' | 'continue';
 
 /** 规范文件名契约（flat 布局，文件名 ASCII）。 */
 export const PROMPT_FILENAMES: Record<PromptKind, string> = {
@@ -13,6 +13,7 @@ export const PROMPT_FILENAMES: Record<PromptKind, string> = {
   rewrite: 'rewrite.md',
   cold_read: 'cold-read.md',
   collide: 'collide.md',
+  continue: 'continue.md',
 };
 
 /** 规范预置 skill 文件名（随包释放时与 prompt 一起补缺）。 */
@@ -39,6 +40,7 @@ const PROMPT_FALLBACKS: Record<PromptKind, string> = {
   rewrite: '你是小说改写器：只输出改写后的正文。',
   cold_read: '你是小说冷读审阅员。',
   collide: '你是小说写作工作台的碰撞陪练：按碰撞协议为作者的构想做有据、有对立、有后果的思考碰撞。',
+  continue: '你是续写助手：只输出续接后的小说正文。',
 };
 
 export interface PromptFile {

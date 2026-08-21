@@ -13,6 +13,7 @@
   import { settings } from '../../lib/settings.svelte.js';
   import { statusVar, layout } from '../../theme.js';
   import { work } from '../../lib/work.svelte.js';
+  import { quoteSelectionToChat } from '../../lib/bridge.svelte.js';
   import SelectionPopover from './SelectionPopover.svelte';
 
   interface Props {
@@ -20,8 +21,9 @@
     typewriter: boolean;
     /** 打开后待跳转的场景标题（消费一次即清）。 */
     scene: string | null;
+    continueEnabled: boolean;
   }
-  let { html, typewriter, scene }: Props = $props();
+  let { html, typewriter, scene, continueEnabled }: Props = $props();
 
   let scroller: HTMLDivElement;
   let host: HTMLDivElement;
@@ -314,6 +316,11 @@
       <div class="chapter-head">
         <h1 class="chapter-title">{cur.title}</h1>
         <div class="chapter-meta">
+          {#if continueEnabled}
+            <button class="continue-btn" disabled={candidates.continuing} onclick={() => void candidates.continueFromChapter()}>
+              {candidates.continuing ? '续写中…' : '续写'}
+            </button>
+          {/if}
           {#if fmStatus}
             <span class="pill status"><i class="dot" style:background={statusVar(fmStatus)}></i>{fmStatus}</span>
           {/if}
@@ -359,6 +366,10 @@
           }}
         />
         <button onclick={() => void submitRewrite()}>改写</button>
+        <button onclick={() => {
+          const chapter = work.current && work.findChapter(work.current.relPath);
+          if (chapter && editor && selBar) void quoteSelectionToChat(chapter, captureSelection(editor.state.doc, selBar.from, selBar.to));
+        }}>→对话</button>
       {/if}
     </div>
   {/if}
@@ -371,6 +382,7 @@
       original={popover.original}
       chapter={cur?.relPath ?? ''}
       initialInstruction={popover.instruction}
+      chapterNode={work.findChapter(cur?.relPath ?? '') ?? undefined}
       onClose={() => (popover = null)}
     />
   {/if}
@@ -407,6 +419,19 @@
     color: var(--muted);
     flex-wrap: wrap;
   }
+  .continue-btn {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 2px 9px;
+    color: var(--accent);
+    background: var(--panel);
+    cursor: pointer;
+  }
+  .continue-btn:disabled {
+    opacity: 0.6;
+    cursor: wait;
+  }
+
   .pill {
     display: inline-flex;
     align-items: center;

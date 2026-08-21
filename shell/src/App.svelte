@@ -27,8 +27,8 @@
   import ReviewPanel from './components/review/ReviewPanel.svelte';
   import DialogHost from './components/DialogHost.svelte';
 
-  /** 协议契约版本（与 shell/src-tauri/src/lib.rs 的 EXPECTED_PROTOCOL 对齐，docs/decisions/0007）。决策 0010 升 v2，批一③ 碰撞模式升 v3。 */
-  const EXPECTED_PROTOCOL = 3;
+  /** 协议契约版本（与 shell/src-tauri/src/lib.rs 的 EXPECTED_PROTOCOL 对齐，docs/decisions/0007）。触发式续写升 v4。 */
+  const EXPECTED_PROTOCOL = 4;
 
   let booted = $state(false);
   let bootError = $state<string | null>(null);
@@ -115,6 +115,11 @@
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
       e.preventDefault();
       void work.saveCurrent();
+    } else if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      if (settings.continueEnabled && work.current && !candidates.continuing) {
+        e.preventDefault();
+        void candidates.continueFromChapter();
+      }
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'j') {
       e.preventDefault();
       ui.toggleAi();
@@ -128,7 +133,7 @@
     // 该点击发生在面板内,只是元素先走了,不能算"点外部"。
     if (!t.isConnected) return;
     if (t.closest('[data-ai-zone], #approval-overlay')) return;
-    if (ui.aiOpen) ui.collapseAi();
+    if (ui.aiOpen && !settings.aiPinned) ui.collapseAi();
   }
 </script>
 
@@ -172,6 +177,7 @@
                 html={mdToHtml(work.current.savedMd)}
                 typewriter={settings.typewriter}
                 scene={work.pendingScene}
+                continueEnabled={settings.continueEnabled}
               />
             {/key}
           {:else}

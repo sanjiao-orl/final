@@ -8,6 +8,7 @@ import { getGitCommit } from './config.js';
 import { devPage } from './dev.js';
 import { corsHeadersFor, HttpError, readJsonBody, toPublicErrorMessage, writeJson, writeJson413 } from './http.js';
 import { handleReviewRequest } from './review.js';
+import { handleContinueRequest, type ContinueDeps } from './continue.js';
 import { handleRewriteRequest, type RewriteDeps } from './rewrite.js';
 import { listPosture } from './prompts.js';
 import { normalizeWorkDir } from './workdir.js';
@@ -30,6 +31,7 @@ export interface ServerDeps {
   chat: ChatDeps;
   candidates: CandidateStore;
   rewrite: RewriteDeps;
+  continue: ContinueDeps;
   version: string;
   /** /v1/dev 联调页开关：缺省 = tsx dev 运行时开、prod bundle 关（见 devEnabledDefault）。 */
   devEnabled?: boolean;
@@ -193,6 +195,12 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
   if (req.method === 'POST' && pathname === '/v1/rewrite') {
     const body = await readJsonBody(req);
     await handleRewriteRequest(body, deps.rewrite, req, res);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/v1/continue') {
+    const body = await readJsonBody(req);
+    await handleContinueRequest(body, deps.continue, req, res);
     return;
   }
 

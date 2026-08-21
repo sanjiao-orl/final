@@ -13,6 +13,9 @@ npm install
 #   LLM_MODEL     deepseek-v4-pro(写作档)
 #   LLM_MODEL_CHEAP  deepseek-v4-flash(后台档,缺省回退 LLM_MODEL)
 # 注:裸 /zen/v1 端点付费模型余额不足会 402;/zen/go/v1 为 Go 订阅模型池,可用模型以 GET /models 为准
+# 多模型池(可选,D4):LLM_PRESET_<名>_BASE_URL / LLM_PRESET_<名>_API_KEY / LLM_PRESET_<名>_MODEL 定义预设,可多家 provider;
+#   LLM_ASSIGN_WRITING / LLM_ASSIGN_BACKGROUND / LLM_ASSIGN_REVIEW 把三用途绑到预设 id;
+#   有任一预设即走预设表(未分配用途回退第一预设),无预设回退上面双档;壳设置面板同构(config.json 优先于环境变量)
 
 npm run dev:core        # 起 sidecar 核心(打印 port/token,写 core-runtime.local.json,含版本/commit/协议自报)
 # 浏览器打开 http://127.0.0.1:<port>/v1/dev → 裸联调页(对话/流式/工具/多会话,仅 dev 运行时开放,prod 安装包关闭);协议契约见 docs/decisions/0007
@@ -27,12 +30,12 @@ node core/scripts/e2e-workflow.mjs   # 写作闭环剧本:碰撞→留痕闸门�
 - `domain/` — MCP 领域服务:结构树(卷/章/场,标题派生)、章节读写(原子写)、搜索、字数统计、章/卷生产与组织(新建/重命名/卷内重排)、历史快照读取
 - `shell/` — Tauri 2 + Svelte 5 + TipTap 壳(v5 布局:48px AI 窄条 + 会话/对话/工具/上下文/设置五栏,点击切换;左侧结构树 + 作者笔记(AI 物理不可见);多候选浮层 B1、工具卡 B3/B10、快照浏览器、目标字数 B5、ask/auto/yolo 审批 B6、会话多级挂载 B7、采纳留痕 B8、树搜索/场大纲/拖拽 B9、设置面板;方案 pill 与碰撞模式(四节对比色+blueprint 徽标);自动保存间隔可配)
 - `.demo-work/` — 演示作品(测试文本,随时可删)
-- `docs/` — 需求基线(01-产品定义)、现状与计划(现状.md)、决策记录(decisions/0001-0013);历史文档(诊断 00/roadmap/壳重设计系列/审核手册/生态调研/路线偏移与最新进展等)在 `docs/archive/`(逐件索引见 archive/README.md)
+- `docs/` — 现状与待办(`current/现状.md`)、需求基线(`reference/01-产品定义.md`)、决策记录(`decisions/0001-0013`);历史文档(诊断 00/roadmap/壳重设计系列/审核手册/生态调研/路线偏移与最新进展等)在 `docs/archive/`(逐件索引见 archive/README.md)
 - `scripts/check-env.ps1` — 检查 LLM_* 环境变量是否配置
 
 ## 下一轮流程（动工前必读）
 
-- 当前待办与优先级见 `docs/现状.md` 待办节；设计类改动先入 `docs/decisions/` 按序号定稿，再动工实现。
+- 当前待办与优先级见 `docs/current/现状.md` 待办节；设计类改动先入 `docs/decisions/` 按序号定稿，再动工实现。
 
 ## 更新通道
 

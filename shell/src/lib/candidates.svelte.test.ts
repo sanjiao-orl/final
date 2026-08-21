@@ -472,6 +472,48 @@ describe('CandidatesStore · 采纳后自动诊断（批三-3）', () => {
   });
 });
 
+describe('CandidatesStore · 触发式续写', () => {
+  it('done 后创建 append 候选，且在飞时防重入', async () => {
+    let release!: () => void;
+    const continueText = vi.fn().mockImplementation((_body: unknown, h: { onText: (text: string) => void; onDone?: (done: { text: string }) => void }) =>
+      new Promise<void>((resolve) => {
+        release = () => { h.onText('续写文本'); h.onDone?.({ text: '续写文本' }); resolve(); };
+      }),
+    );
+    const createCandidate = vi.fn().mockResolvedValue({ candidate: { ...CAND, kind: 'append', original: '', proposed: '续写文本', instruction: '续写' } });
+    const store = new CandidatesStore();
+    store.init(clientOf({ continueText, createCandidate }));
+    work.init(clientOf(), 'C:/works/demo');
+    work.current = { relPath: '章节A.md', title: '章节A', frontmatter: {}, frontmatterRaw: '', savedMd: '正文' };
+    work.registerEditor({ getMd: () => '当前正文', applyEdit: () => 'ok', appendMd: () => 'ok', replaceBodyMd: () => 'ok' });
+    const first = store.continueFromChapter();
+    expect(store.continuing).toBe(true);
+    expect(await store.continueFromChapter()).toBe(false);
+    expect(continueText).toHaveBeenCalledTimes(1);
+    release();
+    expect(await first).toBe(true);
+    expect(createCandidate).toHaveBeenCalledWith({ chapter: '章节A.md', original: '', proposed: '续写文本', instruction: '续写', kind: 'append' });
+  });
+
+  it('无当前章或正文为空不发请求；error 只报错不建候选', async () => {
+    const continueText = vi.fn();
+    const createCandidate = vi.fn();
+    const client = clientOf({ continueText, createCandidate });
+    const store = new CandidatesStore();
+    store.init(client);
+    expect(await store.continueFromChapter()).toBe(false);
+    work.init(client, 'C:/works/demo');
+    work.current = { relPath: '空.md', title: '空', frontmatter: {}, frontmatterRaw: '', savedMd: '  ' };
+    expect(await store.continueFromChapter()).toBe(false);
+    expect(continueText).not.toHaveBeenCalled();
+    work.current = { ...work.current, savedMd: '正文' };
+    store.init(clientOf({ continueText: vi.fn().mockImplementation(async (_b: unknown, h: { onError?: (err: Error) => void }) => h.onError?.(new Error('服务端错误'))), createCandidate }));
+    expect(await store.continueFromChapter()).toBe(false);
+    expect(work.error).toContain('AI 续写失败');
+    expect(createCandidate).not.toHaveBeenCalled();
+  });
+});
+
 describe('CandidatesStore · 批量采纳部分失败不中断（逐条收集 + 总是重拉）', () => {
   it('adoptSelected：第二条 patch 失败 → 第一条已 adopted、列表已重拉、error 含失败计数', async () => {
     const patchCandidate = vi.fn((id: string) => {

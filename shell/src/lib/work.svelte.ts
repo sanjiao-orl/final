@@ -115,6 +115,11 @@ export class WorkStore {
     this.editorApi = api;
   }
 
+  /** 当前编辑器正文；未挂载时由调用方回退到已保存正文。 */
+  editorApiText(): string | null {
+    return this.editorApi?.getMd() ?? null;
+  }
+
   /** 等编辑器挂载就位（开章后应用候选前用）；超时返回 false。 */
   async whenEditorReady(timeoutMs = 3000): Promise<boolean> {
     const t0 = Date.now();

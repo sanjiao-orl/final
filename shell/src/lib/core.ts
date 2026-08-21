@@ -44,6 +44,12 @@ export interface RewriteStreamHandlers {
   onError?: (err: Error) => void;
 }
 
+export interface ContinueStreamHandlers {
+  onText: (text: string) => void;
+  onDone?: (done: { text: string }) => void;
+  onError?: (err: Error) => void;
+}
+
 /** GET /v1/posture 的角色条目（契约镜像，决策 0010）。 */
 export interface PosturePersona {
   name: string;
@@ -199,6 +205,7 @@ export class CoreClient {
     original: string;
     proposed: string;
     instruction?: string;
+    kind?: 'replace' | 'append' | 'replace_all';
     sessionId?: string;
   }): Promise<{ candidate: Candidate }> {
     return this.request(`${API_PREFIX}/candidates`, {
@@ -277,6 +284,24 @@ export class CoreClient {
     }, signal);
   }
 
+  /** POST /v1/continue 的 SSE 流：续写结果只进入暂存区候选。 */
+  async continueText(
+    body: { context: string; instruction?: string; workDir?: string },
+    handlers: ContinueStreamHandlers,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.postSse(`${API_PREFIX}/continue`, body, handlers.onText, (event, data, flush) => {
+      if (event === 'done') {
+        flush();
+        handlers.onDone?.({ text: String((data as { text?: string }).text ?? '') });
+      } else if (event === 'error') {
+        flush();
+        const msg = (data as { message?: string }).message ?? '服务端错误';
+        handlers.onError?.(new Error(msg));
+      }
+    }, signal);
+  }
+
   /** SSE POST 共用管道：fetch + ReadableStream 手工解析帧，text-delta 批次进 onDelta。 */
   private async postSse(
     path: string,
@@ -331,7 +356,8 @@ export class CoreClient {
         buf = parsed.rest;
         for (const frame of parsed.frames) {
           if (frame.event === 'text-delta') {
-            batcher.push(String((frame.data as { delta?: string }).delta ?? ''));
+            const delta = frame.data as { text?: string; delta?: string };
+            batcher.push(String(delta.text ?? delta.delta ?? ''));
           } else {
             onEvent(frame.event, frame.data, () => batcher.flushNow());
           }

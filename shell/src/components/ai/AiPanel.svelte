@@ -5,6 +5,7 @@
   // 钳制到 [280, 可用宽]，拖拽中跳过宽度动效，松手恢复。
   import { iconSvg } from '../../lib/icons.js';
   import { chat } from '../../lib/chat.svelte.js';
+  import { settings } from '../../lib/settings.svelte.js';
   import { ui, type AiColId } from '../../lib/ui.svelte.js';
   import SessionColumn from './SessionColumn.svelte';
   import ChatColumn from './ChatColumn.svelte';
@@ -75,6 +76,13 @@
       <div class="head">
         <span class="title">{current.title}{#if current.id === 'tools'}<i class="n">{chat.messages.reduce((n, m) => n + (m.tools?.length ?? 0), 0)}</i>{/if}</span>
         <span class="hint">{current.hint}</span>
+        <button
+          class="icon-btn pin-btn"
+          class:on={settings.aiPinned}
+          onclick={() => settings.setAiPinned(!settings.aiPinned)}
+          title={settings.aiPinned ? '取消钉住 AI 面板' : '钉住 AI 面板'}
+          aria-label={settings.aiPinned ? '取消钉住 AI 面板' : '钉住 AI 面板'}
+        >📌</button>
         <button class="icon-btn" onclick={() => ui.toggleCol(current.id)} title="关此栏（点窄条图标切换）" aria-label={`关闭${current.title}栏`}>
           {@html iconSvg('close', 14, 2)}
         </button>
@@ -207,6 +215,9 @@
   .icon-btn:hover {
     background: color-mix(in srgb, var(--muted) 12%, transparent);
     color: var(--ink);
+  }
+  .pin-btn.on {
+    color: var(--accent);
   }
   .body {
     flex: 1;
