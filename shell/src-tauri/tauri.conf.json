@@ -1,7 +1,7 @@
 {
   "$schema": "../../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "novel-ws",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "identifier": "com.novelws.app",
   "build": {
     "frontendDist": "../dist",
@@ -36,7 +36,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
