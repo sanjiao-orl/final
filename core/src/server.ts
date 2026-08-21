@@ -15,6 +15,7 @@ import { normalizeWorkDir } from './workdir.js';
 import { PROTOCOL_VERSION } from './runtime.js';
 import { CandidateStore, CandidateStateError, type CandidateStatus } from './candidate-store.js';
 import type { SessionStore } from './session-store.js';
+import { StatsStore, previousDailyStat } from './stats-store.js';
 
 /** esbuild 构建时注入的 git 短 commit（scripts/build-sidecar.mjs 的 define）；tsx 开发运行时未定义则回退到实时 git。 */
 declare const __CORE_COMMIT__: string | undefined;
@@ -30,6 +31,7 @@ export interface ServerDeps {
   store: SessionStore;
   chat: ChatDeps;
   candidates: CandidateStore;
+  stats: StatsStore;
   rewrite: RewriteDeps;
   continue: ContinueDeps;
   version: string;
@@ -156,6 +158,40 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
     return;
   }
 
+  if (req.method === 'GET' && pathname === '/v1/stats/daily') {
+    const raw = url.searchParams.get('workDir');
+    if (!raw) throw new HttpError(400, '缺少 workDir');
+    const workDir = normalizeWorkDir(raw);
+    writeJson(res, 200, { days: deps.stats.list(workDir) }, req.headers.origin);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/v1/stats/snapshot') {
+    const body = await readJsonBody(req);
+    if (!body || typeof body !== 'object' || typeof (body as { workDir?: unknown }).workDir !== 'string' || !(body as { workDir: string }).workDir) {
+      throw new HttpError(400, '请求体必须包含 workDir');
+    }
+    const workDir = normalizeWorkDir((body as { workDir: string }).workDir);
+    const tool = deps.chat.tools?.word_count;
+    if (!tool?.execute) throw new HttpError(502, 'word_count 工具不可用');
+    let result: unknown;
+    try {
+      result = await tool.execute({ workDir } as never, {
+        toolCallId: 'stats-snapshot', messages: [], context: undefined,
+      });
+    } catch (err) {
+      throw new HttpError(502, `word_count 工具执行失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    const parsed = extractWordCountTotal(result);
+    if (parsed === undefined) throw new HttpError(502, 'word_count 工具返回结果无效');
+    const date = localDate();
+    const days = deps.stats.list(workDir);
+    const prev = previousDailyStat(days, date);
+    deps.stats.upsert(workDir, date, parsed);
+    writeJson(res, 200, { date, words: parsed, prev, delta: prev ? parsed - prev.words : null }, req.headers.origin);
+    return;
+  }
+
   if (req.method === 'POST' && pathname.startsWith('/v1/tools/')) {
     const name = decodePathSegment(pathname.slice('/v1/tools/'.length));
     if (!name || name.includes('/')) throw new HttpError(404, `工具名非法: ${name}`);
@@ -215,6 +251,28 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
   }
 
   writeJson(res, 404, { error: `未找到: ${req.method} ${pathname}` }, req.headers.origin);
+}
+
+function localDate(): string {
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
+function extractWordCountTotal(result: unknown): number | undefined {
+  let value = result;
+  if (value && typeof value === 'object') {
+    const r = value as { structuredContent?: unknown; content?: Array<{ type?: string; text?: string }> };
+    if (r.structuredContent !== undefined) value = r.structuredContent;
+    else {
+      const text = r.content?.find((item) => item.type === 'text')?.text;
+      if (text === undefined) return undefined;
+      try { value = JSON.parse(text); } catch { return undefined; }
+    }
+  }
+  if (!value || typeof value !== 'object') return undefined;
+  const total = (value as { total?: unknown }).total;
+  return typeof total === 'number' && Number.isFinite(total) ? total : undefined;
 }
 
 type ToolInputValidation =

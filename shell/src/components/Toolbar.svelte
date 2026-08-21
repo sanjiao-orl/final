@@ -11,6 +11,14 @@
   import { scheme } from '../lib/scheme.svelte.js';
   import { ui } from '../lib/ui.svelte.js';
   import { work } from '../lib/work.svelte.js';
+  import {
+    buildCalendarGrid,
+    summarize,
+    todayIso,
+    type CalendarCell,
+    type CalendarSummary,
+    type DailyStat,
+  } from '../lib/stats-calendar.js';
   import WorkMenu from './WorkMenu.svelte';
   import SnapshotBrowser from './SnapshotBrowser.svelte';
 
@@ -131,6 +139,52 @@
     const ok = await scheme.activate(name);
     if (ok) schemeOpen = false;
   }
+
+  // ---------- 码字日历（任务 1d：按日落账热力 + 速度摘要） ----------
+  let calOpen = $state(false);
+  let calLoading = $state(false);
+  /** null = 拉取失败/无数据（弹层显示「暂无数据」，静默降级不报错）。 */
+  let calDays = $state<DailyStat[] | null>(null);
+
+  /** 开合日历下拉；打开时拉 getDailyStats（经 work store 代理 core client）。 */
+  async function toggleCalendar(): Promise<void> {
+    calOpen = !calOpen;
+    if (!calOpen) return;
+    calLoading = true;
+    try {
+      calDays = (await work.dailyStats()).days;
+    } catch {
+      calDays = null;
+    } finally {
+      calLoading = false;
+    }
+  }
+
+  const calGrid = $derived(calDays ? buildCalendarGrid(calDays, todayIso()) : null);
+  const calSummary = $derived(calDays ? summarize(calDays, todayIso()) : null);
+  /** 网格是行主序（行=周一~周日）；CSS grid grid-auto-flow:column 按列填，这里转列主序扁平序列。 */
+  const calCells = $derived.by((): CalendarCell[] => {
+    const g = calGrid;
+    if (!g) return [];
+    const out: CalendarCell[] = [];
+    for (let c = 0; c < 10; c++) for (let r = 0; r < 7; r++) out.push(g[r]![c]!);
+    return out;
+  });
+
+  /** 格 tooltip：日期 + 当日增量（首日显总字数，未来/无记录直说）。 */
+  function cellTip(cell: CalendarCell): string {
+    if (cell.future) return `${cell.date} · 未来`;
+    if (cell.words === undefined) return `${cell.date} · 无记录`;
+    if (cell.delta === null || cell.delta === undefined) return `${cell.date} · 首日记录 ${cell.words.toLocaleString('zh-CN')} 字`;
+    return `${cell.date} · ${cell.delta >= 0 ? '+' : ''}${cell.delta.toLocaleString('zh-CN')} 字`;
+  }
+
+  /** 摘要行首段：今日 +N；今日无记录 → 「今日 未记录」；今日是首个记录日 → 首日字数。 */
+  function todayLabel(s: CalendarSummary): string {
+    if (s.todayWords === null) return '今日 未记录';
+    if (s.todayDelta === null) return `今日 首日 ${s.todayWords.toLocaleString('zh-CN')} 字`;
+    return `今日 ${s.todayDelta >= 0 ? '+' : ''}${s.todayDelta.toLocaleString('zh-CN')}`;
+  }
 </script>
 
 <header data-ai-zone>
@@ -197,6 +251,34 @@
         {:else}
           <div class="work-empty">还没有方案（可在作品 .novel/schemes/ 下新增）</div>
         {/each}
+      </div>
+    {/if}
+  </span>
+  <span class="tb-cal-anchor">
+    <button class="tb-mode" class:on={calOpen} onclick={() => void toggleCalendar()} title="码字日历：按日落账，近 10 周热力 + 速度摘要">
+      <i class="dot"></i>日历
+    </button>
+    {#if calOpen}
+      <!-- 码字日历下拉：同款 overlay+menu 两件套；热力格 11px，5 档色阶由 --ok/--muted 派生（深浅主题通吃） -->
+      <button class="cal-menu-overlay" onclick={() => (calOpen = false)} aria-label="关闭码字日历"></button>
+      <div class="cal-menu" role="menu" aria-label="码字日历">
+        {#if calLoading}
+          <div class="cal-empty">加载中…</div>
+        {:else if calSummary}
+          <div class="cal-grid" role="img" aria-label="近 10 周码字热力图">
+            {#each calCells as cell (cell.date)}
+              <span class="cal-cell lv{cell.level}" class:future={cell.future} title={cellTip(cell)}></span>
+            {/each}
+          </div>
+          <div class="cal-summary">
+            <span>{todayLabel(calSummary)}</span>
+            <span>近7日均 {calSummary.weekAvg.toLocaleString('zh-CN')}</span>
+            <span>记录 {calSummary.totalDays} 天</span>
+            <span>总字数 {calSummary.totalWords.toLocaleString('zh-CN')}</span>
+          </div>
+        {:else}
+          <div class="cal-empty">暂无数据</div>
+        {/if}
       </div>
     {/if}
   </span>
@@ -443,5 +525,80 @@
     padding: 6px 8px;
     font-size: 11.5px;
     color: var(--muted);
+  }
+  /* 码字日历下拉（任务 1d）：包裹 pill 锚定，几何同款方案下拉 */
+  .tb-cal-anchor {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    height: 100%;
+    flex: none;
+  }
+  .cal-menu-overlay {
+    position: fixed;
+    inset: 0;
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: default;
+    z-index: 40;
+  }
+  .cal-menu {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    z-index: 41;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    box-shadow: var(--shadow-pop);
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  /* 热力网格：行=周一~周日 7 行，grid-auto-flow:column 让 10 周按列排（格 11px，规格 10-12px 内） */
+  .cal-grid {
+    display: grid;
+    grid-template-rows: repeat(7, 11px);
+    grid-auto-flow: column;
+    gap: 2px;
+  }
+  .cal-cell {
+    width: 11px;
+    height: 11px;
+    border-radius: 2px;
+    /* lv0 无记录：muted 弱底（深浅主题均从 token 派生） */
+    background: color-mix(in srgb, var(--muted) 14%, transparent);
+  }
+  /* lv1-lv4：--ok 四档递进（有字 → 4000+ 满档），混 --panel 保证深浅主题底温一致 */
+  .cal-cell.lv1 {
+    background: color-mix(in srgb, var(--ok) 30%, var(--panel));
+  }
+  .cal-cell.lv2 {
+    background: color-mix(in srgb, var(--ok) 50%, var(--panel));
+  }
+  .cal-cell.lv3 {
+    background: color-mix(in srgb, var(--ok) 72%, var(--panel));
+  }
+  .cal-cell.lv4 {
+    background: var(--ok);
+  }
+  .cal-cell.future {
+    opacity: 0.35;
+  }
+  .cal-summary {
+    display: flex;
+    gap: 10px;
+    font-size: 11px;
+    color: var(--muted);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .cal-empty {
+    padding: 10px 12px;
+    font-size: 11.5px;
+    color: var(--muted);
+    white-space: nowrap;
   }
 </style>

@@ -12,7 +12,7 @@ use tauri::Manager;
 use tauri_plugin_updater::UpdaterExt;
 
 /// 协议契约版本（core 侧自报，docs/decisions/0007）。壳只认这个版本，不匹配即拒接。批一③ 升 v3。
-const EXPECTED_PROTOCOL: u64 = 5;
+const EXPECTED_PROTOCOL: u64 = 6;
 
 /// 应用配置文件（app_config_dir 下）。字段可空：空=回落环境变量/缺省。
 const CONFIG_FILE: &str = "config.json";
@@ -911,6 +911,7 @@ pub fn run() {
   tauri::Builder::default()
     .plugin(tauri_plugin_updater::Builder::new().build())
     .plugin(tauri_plugin_dialog::init())
+    .plugin(tauri_plugin_clipboard_manager::init())
     .plugin(
       tauri_plugin_log::Builder::default()
         .level(log::LevelFilter::Info)
@@ -961,10 +962,10 @@ mod tests {
   /// 握手校验：协议版本不匹配或缺失必须拒接（快速失败，防新旧壳/core 混接）。
   #[test]
   fn handshake_validates_protocol() {
-    assert!(validate_protocol(Some(5)).is_ok(), "期望协议 v5 通过（LLM 生效态）");
+    assert!(validate_protocol(Some(6)).is_ok(), "期望协议 v6 通过");
     assert!(
-      validate_protocol(Some(4)).is_err(),
-      "协议 v4 与壳期望不符必须拒绝"
+      validate_protocol(Some(5)).is_err(),
+      "协议 v5 与壳期望不符必须拒绝"
     );
     assert!(validate_protocol(None).is_err(), "缺 protocol 字段必须拒绝");
   }
@@ -987,7 +988,7 @@ mod tests {
       work_dir: "w".to_string(),
       version: "v".to_string(),
       commit: "c".to_string(),
-      protocol: 5,
+      protocol: 6,
     };
     assert!(
       matches!(

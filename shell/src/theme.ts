@@ -18,7 +18,7 @@ export interface ThemePalette {
   accent: string;
   ok: string;
   danger: string;
-  /** 结构树状态点：草稿/打磨/定稿（其余 status 用 muted）。 */
+  /** 结构树状态点：草稿/已发布/已校对（其余 status 用 muted）。 */
   statusDraft: string;
   statusPolish: string;
   statusFinal: string;
@@ -190,8 +190,8 @@ export function applyTheme(mode: ThemeMode, root: HTMLElement = document.documen
 /** status 文本 → 状态点颜色变量名；未知状态回落 muted。 */
 export function statusVar(status: string | undefined): string {
   if (status === '草稿') return 'var(--status-draft)';
-  if (status === '打磨') return 'var(--status-polish)';
-  if (status === '定稿') return 'var(--status-final)';
+  if (status === '已发布') return 'var(--status-polish)';
+  if (status === '已校对') return 'var(--status-final)';
   return 'var(--muted)';
 }
 

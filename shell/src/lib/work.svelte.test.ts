@@ -1,8 +1,15 @@
-// work.svelte.ts 单测：结构树/开章（脏保存门禁）/保存/删除/导出/编辑入口/重命名 title 同步/回收站。
+// work.svelte.ts 单测：结构树/开章（脏保存门禁）/保存/删除/导出/编辑入口/重命名 title 同步/回收站
+// + 码字落账（任务 1b fire-and-forget）/章发布状态流转（任务 2b）/日历数据（1d）/平台格式复制（3b）。
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CoreClient } from './core.js';
 import type { ChapterNode, VolumeNode } from './types.js';
 import { WorkStore } from './work.svelte.js';
+
+// 剪贴板模块整体 mock：copyChapterText 的插件/回落分支归 clipboard.test.ts 管，这里只验 store 调用链
+vi.mock('./clipboard.js', () => ({ writeClipboardText: vi.fn() }));
+import { writeClipboardText } from './clipboard.js';
+
+const clipWrite = vi.mocked(writeClipboardText);
 
 function ch(relPath: string, title: string, wordCount = 100): ChapterNode {
   return { type: 'chapter', title, relPath, wordCount, scenes: [{ type: 'scene', title: '场景一', line: 3 }] };
@@ -13,7 +20,13 @@ const VOLUME: VolumeNode[] = [{ type: 'volume', title: '第一卷', children: [c
 const READ_RESULT = { content: '正文', frontmatter: {}, frontmatterRaw: '---\nfoo: 1\n---\n', body: '正文' };
 
 function mockClient(overrides: Record<string, unknown> = {}): CoreClient {
-  return { callTool: vi.fn(), ...overrides } as unknown as CoreClient;
+  return {
+    callTool: vi.fn(),
+    // saveCurrent 成功后 fire-and-forget 落账（任务 1b）：mock 缺它会被当同步异常吞进「保存失败」
+    recordStatsSnapshot: vi.fn().mockResolvedValue({ date: '2026-08-12', words: 100, prev: null, delta: null }),
+    getDailyStats: vi.fn().mockResolvedValue({ days: [] }),
+    ...overrides,
+  } as unknown as CoreClient;
 }
 
 // node 测试环境无 localStorage；work.svelte.ts 的 trash helpers 走 localStorage，polyfill 一个最小可写实现
@@ -38,6 +51,7 @@ Object.defineProperty(globalThis, 'localStorage', { configurable: true, get: () 
 
 beforeEach(() => {
   _store.clear();
+  clipWrite.mockReset();
 });
 
 describe('WorkStore', () => {
@@ -409,6 +423,185 @@ describe('WorkStore · 开章/保存竞态（代际 + 快照）', () => {
     expect(work.current?.relPath).toBe('B.md');
     expect(work.current?.savedMd).toBe('B 旧文');
     expect(work.dirty).toBe(true);
+  });
+
+  it('saveCurrent 成功后 fire-and-forget 落账 recordStatsSnapshot(workDir)，不阻塞返回', async () => {
+    const recordStatsSnapshot = vi.fn().mockResolvedValue({ date: '2026-08-12', words: 100, prev: null, delta: null });
+    const callTool = vi
+      .fn()
+      .mockResolvedValueOnce(READ_RESULT)
+      .mockResolvedValueOnce(undefined) // write_chapter
+      .mockResolvedValueOnce(VOLUME); // 后台 loadStructure
+    const client = mockClient({ callTool, recordStatsSnapshot });
+    const work = new WorkStore();
+    work.init(client, 'C:/works/demo');
+    await work.openChapter(VOLUME[0]!.children[0]!);
+    work.dirty = true;
+    const ok = await work.saveCurrent();
+    expect(ok).toBe(true);
+    // fire-and-forget：saveCurrent 返回前已发起（void 前台不 await），参数只有 workDir
+    expect(recordStatsSnapshot).toHaveBeenCalledWith('C:/works/demo');
+    expect(work.error).toBeNull();
+    await new Promise((r) => setTimeout(r, 0)); // 放后台微任务跑完
+  });
+
+  it('recordStatsSnapshot 失败静默：不影响保存结果、不报红条、不打扰并发守卫', async () => {
+    const recordStatsSnapshot = vi.fn().mockRejectedValue(new Error('core 断连'));
+    const callTool = vi
+      .fn()
+      .mockResolvedValueOnce(READ_RESULT)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValue(VOLUME);
+    const client = mockClient({ callTool, recordStatsSnapshot });
+    const work = new WorkStore();
+    work.init(client, 'C:/works/demo');
+    await work.openChapter(VOLUME[0]!.children[0]!);
+    work.dirty = true;
+    const ok = await work.saveCurrent();
+    expect(ok).toBe(true);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(recordStatsSnapshot).toHaveBeenCalledTimes(1);
+    expect(work.error).toBeNull(); // 落账失败被吞，不污染保存现场
+    expect(work.dirty).toBe(false);
+  });
+
+  it('cycleChapterStatus：无 status → 草稿，frontmatterRaw 开栏后插入 status 行并走 saveCurrent', async () => {
+    const callTool = vi
+      .fn()
+      .mockResolvedValueOnce(READ_RESULT) // openChapter（frontmatterRaw 无 status）
+      .mockResolvedValueOnce(undefined) // write_chapter
+      .mockResolvedValue(VOLUME); // loadStructure
+    const client = mockClient({ callTool });
+    const work = new WorkStore();
+    work.init(client, 'C:/works/demo');
+    await work.openChapter(VOLUME[0]!.children[0]!);
+    const ok = await work.cycleChapterStatus();
+    expect(ok).toBe(true);
+    expect(work.current?.frontmatterRaw).toBe('---\nstatus: 草稿\nfoo: 1\n---\n'); // 其余键字节级保留
+    expect(work.current?.frontmatter).toMatchObject({ status: '草稿' });
+    // 复用 saveCurrent 落盘：write_chapter 内容 = 新 frontmatterRaw + 正文
+    expect(callTool).toHaveBeenCalledWith('write_chapter', {
+      workDir: 'C:/works/demo',
+      relPath: '第一卷/第一章.md',
+      content: '---\nstatus: 草稿\nfoo: 1\n---\n正文',
+    });
+  });
+
+  it('cycleChapterStatus：三态回环逐档推进（草稿→已发布→已校对→草稿），只改 status 行', async () => {
+    const callTool = vi.fn().mockResolvedValue(undefined).mockResolvedValue(VOLUME);
+    const client = mockClient({ callTool });
+    const work = new WorkStore();
+    work.init(client, 'C:/works/demo');
+    work.current = {
+      relPath: 'A.md',
+      title: 'A章',
+      frontmatter: { status: '草稿' },
+      frontmatterRaw: '---\ntitle: A\nstatus: 草稿\n---\n',
+      savedMd: 'v',
+    };
+    work.registerEditor({ getMd: () => 'v', applyEdit: () => 'not-found', appendMd: () => 'ok', replaceBodyMd: () => 'ok' });
+    await work.cycleChapterStatus();
+    expect(work.current?.frontmatterRaw).toBe('---\ntitle: A\nstatus: 已发布\n---\n');
+    await work.cycleChapterStatus();
+    expect(work.current?.frontmatterRaw).toBe('---\ntitle: A\nstatus: 已校对\n---\n');
+    await work.cycleChapterStatus();
+    expect(work.current?.frontmatterRaw).toBe('---\ntitle: A\nstatus: 草稿\n---\n');
+    // 未知值也归草稿起步
+    work.current!.frontmatter = { status: '完结' };
+    work.current!.frontmatterRaw = '---\nstatus: 完结\n---\n';
+    await work.cycleChapterStatus();
+    expect(work.current?.frontmatterRaw).toBe('---\nstatus: 草稿\n---\n');
+  });
+
+  it('cycleChapterStatus：保存失败回滚 frontmatterRaw/frontmatter，pill 不显示未落盘的态', async () => {
+    const callTool = vi.fn().mockRejectedValue(new Error('磁盘已满'));
+    const client = mockClient({ callTool });
+    const work = new WorkStore();
+    work.init(client, 'C:/works/demo');
+    work.current = {
+      relPath: 'A.md',
+      title: 'A章',
+      frontmatter: { status: '已发布' },
+      frontmatterRaw: '---\nstatus: 已发布\n---\n',
+      savedMd: 'v',
+    };
+    const ok = await work.cycleChapterStatus();
+    expect(ok).toBe(false);
+    expect(work.current?.frontmatterRaw).toBe('---\nstatus: 已发布\n---\n'); // 回滚
+    expect(work.current?.frontmatter).toMatchObject({ status: '已发布' });
+    expect(work.error).toContain('保存失败');
+  });
+
+  it('cycleChapterStatus / copyChapterText：无当前章直接 false，不发任何工具调用', async () => {
+    const callTool = vi.fn();
+    const client = mockClient({ callTool });
+    const work = new WorkStore();
+    work.init(client, 'C:/works/demo');
+    expect(await work.cycleChapterStatus()).toBe(false);
+    expect(await work.copyChapterText()).toBe(false);
+    expect(callTool).not.toHaveBeenCalled();
+  });
+
+  it('dailyStats：代理 getDailyStats(workDir)', async () => {
+    const getDailyStats = vi.fn().mockResolvedValue({ days: [{ date: '2026-08-12', words: 1200 }] });
+    const client = mockClient({ getDailyStats });
+    const work = new WorkStore();
+    work.init(client, 'C:/works/demo');
+    await expect(work.dailyStats()).resolves.toEqual({ days: [{ date: '2026-08-12', words: 1200 }] });
+    expect(getDailyStats).toHaveBeenCalledWith('C:/works/demo');
+  });
+
+  it('copyChapterText：export_chapter_text 参数正确，取 text 写剪贴板，成功返回 true', async () => {
+    clipWrite.mockResolvedValue(undefined);
+    const callTool = vi
+      .fn()
+      .mockResolvedValueOnce(READ_RESULT) // openChapter
+      .mockResolvedValueOnce({ title: '第一章', text: '第一章\n\n平台格式正文' }); // export_chapter_text（core 已 unwrap）
+    const client = mockClient({ callTool });
+    const work = new WorkStore();
+    work.init(client, 'C:/works/demo');
+    await work.openChapter(VOLUME[0]!.children[0]!);
+    const ok = await work.copyChapterText();
+    expect(ok).toBe(true);
+    expect(callTool).toHaveBeenLastCalledWith('export_chapter_text', {
+      workDir: 'C:/works/demo',
+      relPath: '第一卷/第一章.md',
+    });
+    expect(clipWrite).toHaveBeenCalledWith('第一章\n\n平台格式正文'); // 是平台格式 text，不是原始 md
+    expect(work.error).toBeNull();
+  });
+
+  it('copyChapterText：工具失败 → false + 可行动红条', async () => {
+    const callTool = vi
+      .fn()
+      .mockResolvedValueOnce(READ_RESULT)
+      .mockRejectedValueOnce(new Error('导出被拒'));
+    const client = mockClient({ callTool });
+    const work = new WorkStore();
+    work.init(client, 'C:/works/demo');
+    await work.openChapter(VOLUME[0]!.children[0]!);
+    const ok = await work.copyChapterText();
+    expect(ok).toBe(false);
+    expect(clipWrite).not.toHaveBeenCalled();
+    expect(work.error).toContain('复制失败');
+    expect(work.error).toContain('导出被拒');
+    expect(work.error).toContain('手动复制'); // 可行动提示
+  });
+
+  it('copyChapterText：剪贴板两级回落都失败 → false + 红条（不误报成功）', async () => {
+    clipWrite.mockRejectedValue(new Error('剪贴板不可用（Tauri 插件与 Web Clipboard 均失败）'));
+    const callTool = vi
+      .fn()
+      .mockResolvedValueOnce(READ_RESULT)
+      .mockResolvedValueOnce({ title: '第一章', text: '第一章\n\n正文' });
+    const client = mockClient({ callTool });
+    const work = new WorkStore();
+    work.init(client, 'C:/works/demo');
+    await work.openChapter(VOLUME[0]!.children[0]!);
+    const ok = await work.copyChapterText();
+    expect(ok).toBe(false);
+    expect(clipWrite).toHaveBeenCalledTimes(1);
+    expect(work.error).toContain('复制失败');
   });
 
   it('saveCurrent：并发调用等待在飞保存完成后重入，第二次脏保存不丢', async () => {

@@ -9,12 +9,14 @@ import type { ChatDeps } from '../src/chat.js';
 import { createAppServer } from '../src/server.js';
 import { CandidateStore } from '../src/candidate-store.js';
 import { SessionStore } from '../src/session-store.js';
+import { StatsStore } from '../src/stats-store.js';
 
 export interface TestServer {
   baseUrl: string;
   token: string;
   store: SessionStore;
   candidates: CandidateStore;
+  stats: StatsStore;
   close: () => Promise<void>;
 }
 
@@ -28,6 +30,7 @@ export async function startTestServer(overrides: {
   const dbPath = path.join(dir, 'sessions.sqlite');
   const store = new SessionStore(dbPath);
   const candidates = new CandidateStore(dbPath);
+  const stats = new StatsStore(dbPath);
   const token = randomUUID();
   const chat: ChatDeps = {
     store,
@@ -45,6 +48,7 @@ export async function startTestServer(overrides: {
     store,
     chat,
     candidates,
+    stats,
     rewrite: { modelForTier: chat.modelForTier },
     continue: { modelForTier: () => chat.modelForTier('background') },
     version: 'test',
@@ -58,11 +62,13 @@ export async function startTestServer(overrides: {
     token,
     store,
     candidates,
+    stats,
     close: async () => {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       store.close();
       candidates.close();
+      stats.close();
     },
   };
 }

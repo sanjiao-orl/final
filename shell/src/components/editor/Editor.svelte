@@ -12,6 +12,7 @@
   import { candidates } from '../../lib/candidates.svelte.js';
   import { settings } from '../../lib/settings.svelte.js';
   import { statusVar, layout } from '../../theme.js';
+  import { nextChapterStatus } from '../../lib/frontmatter.js';
   import { work } from '../../lib/work.svelte.js';
   import { quoteSelectionToChat } from '../../lib/bridge.svelte.js';
   import SelectionPopover from './SelectionPopover.svelte';
@@ -308,6 +309,23 @@
   const goal = $derived(work.currentGoal());
   const wordCount = $derived(work.findChapter(work.current?.relPath ?? '')?.wordCount ?? 0);
   const goalRatio = $derived(goal ? Math.min(1, wordCount / goal) : null);
+
+  // ---------- 平台格式复制（任务 3）：成功短暂「已复制」（1.5s），失败红条在 work.copyChapterText 内落 ----------
+  let copying = $state(false);
+  let copied = $state(false);
+  async function copyChapter(): Promise<void> {
+    if (copying) return;
+    copying = true;
+    try {
+      const ok = await work.copyChapterText();
+      if (ok) {
+        copied = true;
+        setTimeout(() => (copied = false), 1500);
+      }
+    } finally {
+      copying = false;
+    }
+  }
 </script>
 
 <div class="scroller" bind:this={scroller}>
@@ -321,9 +339,25 @@
               {candidates.continuing ? '续写中…' : '续写'}
             </button>
           {/if}
-          {#if fmStatus}
-            <span class="pill status"><i class="dot" style:background={statusVar(fmStatus)}></i>{fmStatus}</span>
-          {/if}
+          <button
+            class="continue-btn"
+            disabled={copying || candidates.continuing}
+            title="复制平台格式正文到剪贴板（章标题 + 平台排版正文）"
+            onclick={() => void copyChapter()}
+          >
+            {copied ? '已复制' : copying ? '复制中…' : '复制'}
+          </button>
+          <!-- 发布状态三态流转（任务 2）：有 status 实态显当前值；无 status 虚态「草稿」（虚线/半透明） -->
+          <button
+            class="pill status"
+            class:unset={!fmStatus}
+            style:--st={statusVar(fmStatus)}
+            disabled={work.saving}
+            title={fmStatus ? `发布状态：${fmStatus}（点击切换到「${nextChapterStatus(fmStatus)}」）` : '点击设定发布状态：草稿→已发布→已校对'}
+            onclick={() => void work.cycleChapterStatus()}
+          >
+            <i class="dot" style:background={statusVar(fmStatus)}></i>{fmStatus ?? '草稿'}
+          </button>
           {#if fmPov}<span class="pill">POV · {fmPov}</span>{/if}
           {#each fmTags as t (t)}<span class="pill">{t}</span>{/each}
           {#if goal}
@@ -448,8 +482,25 @@
     border-radius: 50%;
   }
   .pill.status {
-    border-color: color-mix(in srgb, var(--status-polish) 40%, var(--line));
-    color: var(--status-polish);
+    /* --st 由行内 style 注入（statusVar 按当前态给色），未知态回落 muted */
+    border-color: color-mix(in srgb, var(--st, var(--muted)) 45%, var(--line));
+    color: var(--st, var(--muted));
+    cursor: pointer;
+    transition: border-color var(--t-hover), color var(--t-hover), opacity var(--t-hover);
+  }
+  .pill.status:hover:not(:disabled) {
+    border-color: var(--st, var(--muted));
+  }
+  /* 未设定 status：虚态「草稿」（虚线 + 半透明），点击开始三态流转 */
+  .pill.status.unset {
+    border-style: dashed;
+    border-color: var(--line);
+    color: var(--muted);
+    opacity: 0.65;
+  }
+  .pill.status:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
   .goal-wrap {
     display: flex;

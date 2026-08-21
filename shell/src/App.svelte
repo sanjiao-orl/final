@@ -30,7 +30,7 @@
   import DialogHost from './components/DialogHost.svelte';
 
   /** 协议契约版本（与 shell/src-tauri/src/lib.rs 的 EXPECTED_PROTOCOL 对齐，docs/decisions/0007）。触发式续写升 v4。 */
-  const EXPECTED_PROTOCOL = 5;
+  const EXPECTED_PROTOCOL = 6;
 
   let booted = $state(false);
   let bootError = $state<string | null>(null);

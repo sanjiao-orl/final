@@ -15,6 +15,7 @@ import { startDomainMcp } from './mcp.js';
 import { createAppServer } from './server.js';
 import { CandidateStore } from './candidate-store.js';
 import { SessionStore } from './session-store.js';
+import { StatsStore } from './stats-store.js';
 import { PROTOCOL_VERSION, readyLine, writeRuntimeFile, type RuntimeInfo } from './runtime.js';
 
 /** esbuild 构建时注入的 git 短 commit（与 server.ts 同款判定模式）：tsx dev 未定义 → /v1/dev 联调页开；prod bundle 注入 → 关。 */
@@ -58,6 +59,7 @@ async function main(): Promise<void> {
   const dbPath = path.join(getNovelDir(), 'sessions.sqlite');
   const store = new SessionStore(dbPath);
   const candidates = new CandidateStore(dbPath); // 与 sessions 同库（FK 到 sessions）
+  const stats = new StatsStore(dbPath);
   const mcp = startDomainMcp(); // 连不上自动重连（已 warn）；重连期间工具代理回 503
   await mcp.start();
 
@@ -69,6 +71,7 @@ async function main(): Promise<void> {
     token,
     store,
     candidates,
+    stats,
     version: VERSION,
     devEnabled,
     chat: {
@@ -141,6 +144,11 @@ async function main(): Promise<void> {
     }
     try {
       candidates.close();
+    } catch {
+      // 忽略关闭失败
+    }
+    try {
+      stats.close();
     } catch {
       // 忽略关闭失败
     }

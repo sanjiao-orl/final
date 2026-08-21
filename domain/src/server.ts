@@ -1,5 +1,5 @@
 /**
- * server.ts —— MCP stdio server 装配：注册三十个工具并连接 stdio transport。
+ * server.ts —— MCP stdio server 装配：注册三十一个工具并连接 stdio transport。
  * 双侧合并口径：基础工具 8 个 + WS-9 scan_quality + A 组 8 工具 + WS-17 账本 4 工具 + 0008 skill_read 1 工具 + 0009 问题日志 2 工具（issue_append/issue_set_status）+ scheme_set_active 1 工具（激活/取消激活方案指针）。
  * 批三-3 新增 2 工具：ledger_chapter_slice（按章过滤的账本视图，只读）+ write_meta（书级元数据写入，不写账本/不写正文）。
  * 批一③ 碰撞模式 新增 3 工具：decision_append（裁决留痕追加）/ decision_tail（裁决留痕尾部只读）/ chapter_set_blueprint（章蓝图模式设置），并在 frontmatter 透出 blueprint、buildChapter 透传。
@@ -14,6 +14,7 @@ import {
   createVolume,
   deleteChapter,
   deleteVolume,
+  exportChapterText,
   exportTxt,
   listSnapshots,
   listStructure,
@@ -165,6 +166,19 @@ server.registerTool(
     inputSchema: { workDir: z.string().describe('作品文件夹的绝对路径') },
   },
   async ({ workDir }) => jsonResult(exportTxt(workDir)),
+);
+
+server.registerTool(
+  'export_chapter_text',
+  {
+    title: '导出单章平台文本',
+    description: '返回平台格式的单章文本（章标题+正文，frontmatter 与 ### 场景标记已处理），供复制到发布平台。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      relPath: z.string().describe('相对 workDir 的章文件路径，必须是 manuscript/ 内的 .md'),
+    },
+  },
+  async ({ workDir, relPath }) => jsonResult(exportChapterText(workDir, relPath)),
 );
 
 server.registerTool(

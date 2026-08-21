@@ -417,6 +417,41 @@ export interface ExportTxtResult {
   bytes: number;
 }
 
+/** 单章平台格式：场景标题去掉 ###，正文去 frontmatter 后整体 trim。 */
+export function formatChapterTxt(title: string, body: string): string {
+  const text = body
+    .split(/\r?\n/)
+    .map((line) => line.replace(SCENE_RE, '$1')) // 场景标题去 ###
+    .join('\n')
+    .replace(/\r\n/g, '\n')
+    .trim();
+  return `${title}\n\n${text}`;
+}
+
+export interface ExportChapterTextResult {
+  title: string;
+  text: string;
+}
+
+/** export_chapter_text：返回单章可直接粘贴到发布平台的文本。 */
+export function exportChapterText(workDir: string, relPath: string): ExportChapterTextResult {
+  const { posix } = resolveInsidePosix(workDir, relPath);
+  if (!posix.startsWith('manuscript/') || !posix.toLowerCase().endsWith('.md')) {
+    throw new Error(`export_chapter_text 只允许 manuscript/ 内的 .md 文件: ${relPath}`);
+  }
+  const chapter = listStructure(workDir)
+    .flatMap((vol) => vol.children)
+    .find((ch) => ch.relPath === posix);
+  if (!chapter) throw new Error(`export_chapter_text 找不到对应章: ${relPath}`);
+  let body: string;
+  try {
+    body = readChapter(workDir, posix).body;
+  } catch {
+    throw new Error(`export_chapter_text 章文件不存在: ${relPath}`);
+  }
+  return { title: chapter.title, text: formatChapterTxt(chapter.title, body) };
+}
+
 /**
  * export_txt：全稿导出为可直接投出的 txt——按结构树顺序（卷→章），
  * 去 frontmatter、场景标题去掉 ### 标记；章为最小结构（题名+正文），卷名独占一行。
@@ -430,13 +465,7 @@ export function exportTxt(workDir: string): ExportTxtResult {
     if (vol.title !== ROOT_VOLUME_TITLE) blocks.push(vol.title);
     for (const ch of vol.children) {
       const { body } = readChapter(workDir, ch.relPath);
-      const text = body
-        .split(/\r?\n/)
-        .map((line) => line.replace(SCENE_RE, '$1')) // 场景标题去 ###
-        .join('\n')
-        .replace(/\r\n/g, '\n')
-        .trim();
-      blocks.push(`${ch.title}\n\n${text}`);
+      blocks.push(formatChapterTxt(ch.title, body));
       chapters += 1;
     }
   }

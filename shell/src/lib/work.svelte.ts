@@ -2,8 +2,10 @@
  * work.svelte.ts —— 作品数据面：结构树、当前章、保存/删除/导出。
  * 壳零产品逻辑的落点：结构/字数/快照/软删/导出全部调 domain 工具（经 core 代理），这里只搬数据。
  */
-import type { CoreClient } from './core.js';
+import type { CoreClient, DailyStats } from './core.js';
 import type { ChapterNode, ReadChapterResult, VolumeNode } from './types.js';
+import { setFrontmatterStatus, nextChapterStatus } from './frontmatter.js';
+import { writeClipboardText } from './clipboard.js';
 
 /** 编辑器现场入口：序列化 md + 候选替换 / 追加 / 整章替换 / 插入（original 唯一定位）。 */
 export interface EditorApi {
@@ -250,6 +252,7 @@ export class WorkStore {
           this.dirty = false;
         }
         void this.loadStructure().catch(() => undefined); // 字数/场景可能变了，后台刷树（失败红条已在 loadStructure 内）
+        void this.client.recordStatsSnapshot(this.workDir).catch(() => undefined);
         return true;
       } catch (err) {
         // 保存失败：仅当仍是原章才报红条 + 保留脏标（已切章则不污染新章状态）
@@ -266,6 +269,54 @@ export class WorkStore {
       return await run;
     } finally {
       if (this.savingPromise === run) this.savingPromise = null;
+    }
+  }
+
+  /**
+   * 章发布状态三态流转（任务 2，纯壳侧）：无 status/未知值 → 草稿 → 已发布 → 已校对 → 草稿（回环）。
+   * 只改 frontmatterRaw 的 status 行（其余键字节级保留，见 frontmatter.ts），随后复用 saveCurrent
+   * 落盘（快照/原子写/刷树全走既有路径，不另调 domain 工具）；保存失败回滚现场，pill 不显示未落盘的态。
+   */
+  async cycleChapterStatus(): Promise<boolean> {
+    const cur = this.current;
+    if (!cur) return false;
+    const status = typeof cur.frontmatter.status === 'string' ? cur.frontmatter.status : undefined;
+    const next = nextChapterStatus(status);
+    const prevRaw = cur.frontmatterRaw;
+    const prevFm = cur.frontmatter;
+    cur.frontmatterRaw = setFrontmatterStatus(prevRaw, next);
+    cur.frontmatter = { ...prevFm, status: next };
+    const ok = await this.saveCurrent();
+    if (!ok && this.current === cur) {
+      cur.frontmatterRaw = prevRaw;
+      cur.frontmatter = prevFm;
+    }
+    return ok;
+  }
+
+  /** 码字日历数据（Toolbar 日历下拉打开时拉取）；失败抛出，由调用方静默降级「暂无数据」。 */
+  dailyStats(): Promise<DailyStats> {
+    return this.client.getDailyStats(this.workDir);
+  }
+
+  /**
+   * 平台格式复制（任务 3）：export_chapter_text 取 {title, text}（text=章标题+两换行+平台格式正文，
+   * core 已 unwrap），写剪贴板（Tauri 插件优先、Web Clipboard 回落）。成功返回 true（按钮短暂反馈）；
+   * 失败进红条（可行动提示）并返回 false。
+   */
+  async copyChapterText(): Promise<boolean> {
+    const cur = this.current;
+    if (!cur) return false;
+    try {
+      const r = await this.client.callTool<{ title: string; text: string }>('export_chapter_text', {
+        workDir: this.workDir,
+        relPath: cur.relPath,
+      });
+      await writeClipboardText(r.text);
+      return true;
+    } catch (err) {
+      this.error = `复制失败：${err instanceof Error ? err.message : String(err)}（可在正文全选后手动复制）`;
+      return false;
     }
   }
 

@@ -28,6 +28,17 @@ export interface CoreInfo {
   workDir: string;
 }
 
+export interface StatsSnapshot {
+  date: string;
+  words: number;
+  prev: { date: string; words: number } | null;
+  delta: number | null;
+}
+
+export interface DailyStats {
+  days: Array<{ date: string; words: number }>;
+}
+
 export interface ChatStreamHandlers {
   /** 批次后的文本增量（≤40ms 一条）。 */
   onDelta: (text: string) => void;
@@ -168,6 +179,18 @@ export class CoreClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(args),
     });
+  }
+
+  recordStatsSnapshot(workDir: string): Promise<StatsSnapshot> {
+    return this.request(`${API_PREFIX}/stats/snapshot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workDir }),
+    });
+  }
+
+  getDailyStats(workDir: string): Promise<DailyStats> {
+    return this.request(`${API_PREFIX}/stats/daily?workDir=${encodeURIComponent(workDir)}`);
   }
 
   /** 当前 core 实际生效的模型池、用途分配与三档模型。 */

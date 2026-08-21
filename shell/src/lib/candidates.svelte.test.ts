@@ -27,6 +27,8 @@ function clientOf(overrides: Record<string, unknown> = {}): CoreClient {
     patchCandidate: vi.fn().mockResolvedValue({ candidate: CAND }),
     rewriteStream: vi.fn().mockResolvedValue(undefined),
     callTool: vi.fn().mockResolvedValue(undefined),
+    // 采纳会触发 work.saveCurrent → 保存成功后 fire-and-forget 落账（任务 1b）
+    recordStatsSnapshot: vi.fn().mockResolvedValue({ date: '2026-08-12', words: 100, prev: null, delta: null }),
     ...overrides,
   } as unknown as CoreClient;
 }
