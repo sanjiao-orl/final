@@ -327,6 +327,7 @@ describe('/v1/chat SSE 管道', () => {
     }
   });
 
+  // CI 双核 runner 上落库 60 条+全管道可超 vitest 默认 5s（实测 11.5s），显式放宽
   it('回放条数预算：历史超过 20 条时只回放最近片段，当前消息必在末尾', async () => {
     const model = stepModel([textResult(['好'])]);
     const s = await startTestServer({ modelForTier: () => model });
@@ -348,7 +349,7 @@ describe('/v1/chat SSE 管道', () => {
     } finally {
       await s.close();
     }
-  });
+  }, 20_000);
 
   it('回放字符预算：历史超 40k 字符只回放最近片段，截断后从 user 开始', async () => {
     const model = stepModel([textResult(['好'])]);
