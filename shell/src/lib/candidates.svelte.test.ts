@@ -71,12 +71,13 @@ describe('CandidatesStore', () => {
     expect(work.error).toContain('暂存区加载失败');
   });
 
-  it('选择逻辑：单选/全选/清空/计数；toggleDrawer 打开时加载', async () => {
+  it('选择逻辑：单选/全选/清空/计数；openStaging 打开 tab 并加载', async () => {
     const client = clientOf();
     const store = new CandidatesStore();
     store.init(client);
-    store.toggleDrawer();
-    expect(store.drawerOpen).toBe(true);
+    store.openStaging();
+    expect(store.stagingTab).toBe(true);
+    expect(store.viewingId).toBe(null);
     expect(client.listCandidates).toHaveBeenCalledWith({ status: 'pending' });
 
     store.items = [CAND, { ...CAND, id: 'c2' }];

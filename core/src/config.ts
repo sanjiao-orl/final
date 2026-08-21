@@ -74,6 +74,57 @@ export interface LlmPreset {
   model: string;
 }
 
+export interface LlmDescription {
+  mode: 'presets' | 'legacy';
+  presets: Array<{ id: string; baseUrl: string; model: string; apiKeyMasked: string }>;
+  assign: Partial<Record<Tier, string>>;
+  effective: Record<Tier, { presetId: string; model: string } | { model: string } | { error: string }>;
+  legacy?: { baseUrl: string; model: string; modelCheap: string; apiKeyMasked: string; error?: string };
+}
+
+function maskApiKey(apiKey: string): string {
+  if (!apiKey) return '';
+  return `${Array.from(apiKey).slice(0, 4).join('')}••••`;
+}
+
+function resolvePresetForPurpose(presets: Map<string, LlmPreset>, assign: Map<Tier, string>, purpose: Tier) {
+  const assigned = assign.get(purpose);
+  const id = assigned === undefined ? undefined : normalizePresetId(assigned);
+  const preset = id === undefined ? presets.values().next().value : presets.get(id);
+  if (assigned !== undefined && !preset) return { error: `指向不存在的预设:${id}` } as const;
+  return { presetId: preset!.id, model: preset!.model } as const;
+}
+
+/** 返回 core 实际解析出的模型配置；只返回 api key 的前四字符和固定掩码。 */
+export function describeLlm(env: NodeJS.ProcessEnv = process.env): LlmDescription {
+  const presets = scanLlmPresets(env);
+  const assignMap = scanLlmAssign(env);
+  const assign: Partial<Record<Tier, string>> = {};
+  for (const purpose of ['writing', 'background', 'review'] as Tier[]) {
+    const value = assignMap.get(purpose);
+    if (value !== undefined) assign[purpose] = normalizePresetId(value);
+  }
+  if (presets.size > 0) {
+    const effective = {} as LlmDescription['effective'];
+    for (const purpose of ['writing', 'background', 'review'] as Tier[]) {
+      effective[purpose] = resolvePresetForPurpose(presets, assignMap, purpose);
+    }
+    return {
+      mode: 'presets',
+      presets: [...presets.values()].map(({ id, baseUrl, model, apiKey }) => ({ id, baseUrl, model, apiKeyMasked: maskApiKey(apiKey) })),
+      assign,
+      effective,
+    };
+  }
+  const baseUrl = env.LLM_BASE_URL || '';
+  const apiKey = env.LLM_API_KEY || '';
+  const model = env.LLM_MODEL || '';
+  const modelCheap = env.LLM_MODEL_CHEAP || model;
+  const missing = [!baseUrl && 'LLM_BASE_URL', !apiKey && 'LLM_API_KEY', !model && 'LLM_MODEL'].filter(Boolean) as string[];
+  const legacy = { baseUrl, model, modelCheap, apiKeyMasked: maskApiKey(apiKey), ...(missing.length ? { error: `未配置：缺少 ${missing.join('、')}` } : {}) };
+  return { mode: 'legacy', presets: [], assign, effective: { writing: { model }, background: { model: modelCheap }, review: { model: modelCheap } }, legacy };
+}
+
 /** 扫描 LLM_PRESET_<ID>_{BASE_URL,API_KEY,MODEL}，组预设表；归一化撞名/缺字段即抛错。 */
 export function scanLlmPresets(env: NodeJS.ProcessEnv = process.env): Map<string, LlmPreset> {
   const byId = new Map<string, LlmPreset>();
@@ -151,17 +202,13 @@ export function modelForPurpose(env: NodeJS.ProcessEnv = process.env, purpose: T
   const presets = scanLlmPresets(env);
   if (presets.size > 0) {
     const assign = scanLlmAssign(env);
-    const assigned = assign.get(purpose);
-    if (assigned !== undefined) {
-      const id = normalizePresetId(assigned);
-      const preset = presets.get(id);
-      if (!preset) {
-        throw new Error(`LLM_ASSIGN_${purpose.toUpperCase()} 指向不存在的预设：${assigned}`);
-      }
-      return buildModel(preset.baseUrl, preset.apiKey, preset.model);
+    const resolved = resolvePresetForPurpose(presets, assign, purpose);
+    if ('error' in resolved) {
+      const assigned = assign.get(purpose)!;
+      throw new Error(`LLM_ASSIGN_${purpose.toUpperCase()} 指向不存在的预设：${assigned}`);
     }
-    const first = presets.values().next().value!;
-    return buildModel(first.baseUrl, first.apiKey, first.model);
+    const preset = presets.get(resolved.presetId)!;
+    return buildModel(preset.baseUrl, preset.apiKey, resolved.model);
   }
   const config = loadLlmConfig(env);
   return buildModel(config.baseUrl, config.apiKey, purpose === 'writing' ? config.model : config.modelCheap);

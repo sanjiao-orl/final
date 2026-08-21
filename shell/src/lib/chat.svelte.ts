@@ -83,6 +83,8 @@ export class ChatStore {
    * 或 `scope:<scope>`（未建新会话）；ChatColumn composer 与 store 共用 currentDraftKey() 定位。
    */
   draftMap = $state<Record<string, string>>({});
+  /** 当前会话/归属下待发送的选区引用附件。 */
+  quoteMap = $state<Record<string, { label: string; text: string } | null>>({});
 
   /** 当前草稿键：有会话挂会话，无会话挂归属 scope（两者变化时草稿随键切换）。 */
   currentDraftKey(): string {
@@ -96,6 +98,14 @@ export class ChatStore {
 
   setDraft(key: string, text: string): void {
     this.draftMap[key] = text;
+  }
+
+  getQuote(key: string): { label: string; text: string } | null {
+    return this.quoteMap[key] ?? null;
+  }
+
+  setQuote(key: string, quote: { label: string; text: string } | null): void {
+    this.quoteMap[key] = quote;
   }
 
   setTier(t: 'writing' | 'background'): void {
@@ -402,7 +412,10 @@ export class ChatStore {
     // 草稿键与内容在发送前捕获：流式期间用户可改写草稿，成功后仅当内容未变才清（见下方）
     const draftKey = this.currentDraftKey();
     const draftAtSend = this.draftMap[draftKey];
-    this.messages.push({ role: 'user', content: trimmed });
+    const quoteAtSend = this.quoteMap[draftKey];
+    const quoteText = quoteAtSend ? quoteAtSend.text.split('\n').map((line) => `> ${line}`).join('\n') : '';
+    const messageText = quoteText ? `${quoteText}\n\n${trimmed}` : trimmed;
+    this.messages.push({ role: 'user', content: messageText });
     this.messages.push({ role: 'assistant', content: '', tools: [] });
     const idx = this.messages.length - 1;
     this.streamingIdx = idx; // store 持有占位下标，组件据此定位光标/「正在调用」
@@ -420,7 +433,7 @@ export class ChatStore {
       const personaOrSparring = persona ?? (mode ? '讨论陪练' : undefined);
       const body = {
         ...(this.sessionId ? { sessionId: this.sessionId } : { scope: this.scope }),
-        text: trimmed,
+        text: messageText,
         workDir: work.workDir,
         tier: this.tier,
         ...(chapterNode ? { chapter: chapterNode.relPath } : {}),
@@ -490,6 +503,7 @@ export class ChatStore {
         }
         // 任务1（反馈#1）：发送成功后清该键草稿（流式期间用户若已改写新内容则保留）
         if (this.draftMap[draftKey] === draftAtSend) delete this.draftMap[draftKey];
+        if (this.quoteMap[draftKey] === quoteAtSend) delete this.quoteMap[draftKey];
       } else {
         this.abortedLastStream = true;
       }

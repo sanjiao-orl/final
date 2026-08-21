@@ -8,9 +8,14 @@
  * 生效优先级 配置 > 环境变量 > 默认；模型/作品目录是 core 启动时读的，保存后需 restart_core 才生效。
  */
 import { applyTheme, type ThemeMode } from '../theme.js';
-import { tauriInvoke } from './core.js';
+import { tauriInvoke, type CoreClient, type LlmStatus } from './core.js';
 
 export type ApprovalMode = 'ask' | 'auto' | 'yolo';
+
+/** 与 core/rust normalizePresetId 同口径：环境变量预设 id 统一为大写下划线。 */
+export function normalizePresetId(id: string): string {
+  return id.trim().toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+}
 
 /** 单个模型预设（D4）：id 由壳生成并保持稳定；name 仅展示。 */
 export interface AppLlmPreset {
@@ -132,6 +137,9 @@ class SettingsStore {
   appLlmAssign = $state<AppLlmAssign>({});
   /** 当前生效值/来源（config/env/default）；null=尚未加载（非 Tauri 环境）。 */
   configStatus = $state<ConfigStatus | null>(null);
+  /** core 回报的模型真值；null=尚未加载。 */
+  llmStatus = $state<LlmStatus | null>(null);
+  private coreClient: CoreClient | null = null;
   saving = $state(false);
   restarting = $state(false);
   appNotice = $state<string | null>(null);
@@ -270,6 +278,19 @@ class SettingsStore {
 
   // ---------- 应用级配置（config.json，Tauri 侧持久化） ----------
 
+  init(client: CoreClient): void {
+    this.coreClient = client;
+  }
+
+  async loadLlmStatus(): Promise<void> {
+    if (!this.coreClient) return;
+    try {
+      this.llmStatus = await this.coreClient.getLlm();
+    } catch (err) {
+      this.appError = `读取 core 模型状态失败：${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
   /** 启动时加载：拉 config_status（已存配置 + 各字段生效值/来源）。非 Tauri 环境静默跳过。 */
   async loadAppConfig(): Promise<void> {
     const invoke = tauriInvoke();
@@ -350,8 +371,15 @@ class SettingsStore {
           },
         },
       });
-      this.appNotice = '已保存到本机应用数据目录（config.json）；重启 core 后生效';
       await this.loadAppConfig();
+      // 正常运行时 coreClient 已由 App 注入；无 client 仅为非 boot 单测/早期调用保留保存语义。
+      if (this.coreClient) {
+        if (!(await this.restartCore())) return false;
+        await this.loadLlmStatus();
+      }
+      const effective = this.llmStatus?.effective;
+      const model = (p: 'writing' | 'background' | 'review') => effective?.[p]?.error ?? effective?.[p]?.model ?? '未配置';
+      this.appNotice = `已保存并重启生效:写作档=${model('writing')} / 背景档=${model('background')} / 审阅档=${model('review')}`;
       return true;
     } catch (err) {
       this.appError = `保存配置失败：${err instanceof Error ? err.message : String(err)}`;
@@ -375,11 +403,7 @@ class SettingsStore {
       this.appError = `切换作品失败：${this.appError ?? '保存配置失败'}`;
       return false;
     }
-    const restarted = await this.restartCore();
-    if (!restarted) {
-      this.appError = `切换作品失败：${this.appError ?? '重启 core 失败'}`;
-      return false;
-    }
+    if (!this.coreClient) return (await this.restartCore());
     return true;
   }
 

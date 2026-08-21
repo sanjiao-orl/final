@@ -19,7 +19,9 @@
   import TreeView from './components/tree/TreeView.svelte';
   import NotesArea from './components/notes/NotesArea.svelte';
   import Editor from './components/editor/Editor.svelte';
-  import StagingDrawer from './components/staging/StagingDrawer.svelte';
+  import StagingList from './components/staging/StagingList.svelte';
+  import CandidateView from './components/staging/CandidateView.svelte';
+  import StagingOverview from './components/staging/StagingOverview.svelte';
   import AiRail from './components/ai/AiRail.svelte';
   import AiPanel from './components/ai/AiPanel.svelte';
   import ApprovalCard from './components/approval/ApprovalCard.svelte';
@@ -28,7 +30,7 @@
   import DialogHost from './components/DialogHost.svelte';
 
   /** 协议契约版本（与 shell/src-tauri/src/lib.rs 的 EXPECTED_PROTOCOL 对齐，docs/decisions/0007）。触发式续写升 v4。 */
-  const EXPECTED_PROTOCOL = 4;
+  const EXPECTED_PROTOCOL = 5;
 
   let booted = $state(false);
   let bootError = $state<string | null>(null);
@@ -44,6 +46,8 @@
     snapshot.init(client, workDir);
     review.init(client, workDir);
     scheme.init(client); // work.init 已就位 workDir，load 直接按新作品拉 posture
+    settings.init(client);
+    void settings.loadLlmStatus();
     // 启动握手（D2，对齐 shell/src-tauri/src/lib.rs 的 validate_protocol）：
     // /v1/health 自报 protocol 字段，期望 v2，不匹配或缺字段直接红条拒接。
     const health = await client.health();
@@ -106,12 +110,14 @@
         helpOpen = false;
         return;
       }
+      // 候选详情覆盖层打开时 Esc 归 CandidateView 处置（两个 window 监听都会触发,此处让路防连带收 AI 栏）
+      if (candidates.viewingId || candidates.generating) return;
       approval.active = null;
       ui.collapseAi();
     } else if (e.key === 'F8') {
       e.preventDefault();
       ui.toggleFocus();
-      if (ui.focus) candidates.drawerOpen = false; // 专注=只剩编辑器,暂存抽屉一并收起
+      if (ui.focus) candidates.viewingId = null; // 专注=只剩编辑器,关闭候选详情
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
       e.preventDefault();
       void work.saveCurrent();
@@ -165,7 +171,8 @@
 
     <div class="main">
       <aside class="left" data-ai-zone>
-        <div class="left-tree"><TreeView /></div>
+        <div class="staging-tabs"><button class:active={!candidates.stagingTab} onclick={() => (candidates.stagingTab = false)}>目录</button><button class:active={candidates.stagingTab} onclick={() => candidates.openStaging()}>暂存 {candidates.pendingCount}</button></div>
+        <div class="left-tree">{#if candidates.stagingTab}<StagingList />{:else}<TreeView />{/if}</div>
         <NotesArea />
       </aside>
 
@@ -183,8 +190,8 @@
           {:else}
             <div class="placeholder">从左侧选择一章开始写作；Ctrl+S 保存，F8 专注。</div>
           {/if}
+          {#if candidates.viewingId || candidates.generating}<CandidateView />{/if}
         </div>
-        <StagingDrawer />
       </section>
 
       <div class="rail-wrap" data-ai-zone>
@@ -198,6 +205,10 @@
     <ApprovalCard />
     {#if review.open}
       <ReviewPanel />
+    {/if}
+    {#if candidates.overviewOpen}
+      <!-- 全览弹层挂顶层：openOverview 会关 stagingTab,挂 StagingList 内会随 tab 一起卸载 -->
+      <StagingOverview />
     {/if}
     <SnapshotToast />
     <DialogHost />
@@ -324,6 +335,9 @@
     display: flex;
     flex-direction: column;
   }
+  .staging-tabs { display: flex; gap: 4px; padding: 8px 10px 6px; background: var(--panel); }
+  .staging-tabs button { flex: 1; border: 0; border-radius: 999px; padding: 6px 4px; background: transparent; color: var(--muted); font-size: 11px; cursor: pointer; }
+  .staging-tabs button.active { background: var(--paper); color: var(--ink); font-weight: 600; }
   /* 结构树占左栏剩余空间（min-height:0 + 自身滚动），笔记区 flex:none 由自身高度决定 */
   .left-tree {
     flex: 1;
@@ -341,6 +355,7 @@
     flex-direction: column;
   }
   .editor-area {
+    position: relative;
     flex: 1;
     min-height: 0;
   }

@@ -1,7 +1,7 @@
 // settings.svelte.ts 应用级配置单测：loadAppConfig / saveAppConfig / restartCore（mock tauri invoke，
 // 参照现有 *.svelte.test.ts 的写法）。localStorage 偏好项不在本文件覆盖范围（原逻辑不动）。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { settings } from './settings.svelte.js';
+import { normalizePresetId, settings } from './settings.svelte.js';
 
 type InvokeFn = (cmd: string, args?: Record<string, unknown>) => unknown;
 
@@ -35,6 +35,8 @@ beforeEach(() => {
   settings.appLlmPresets = [];
   settings.appLlmAssign = {};
   settings.configStatus = null;
+  settings.llmStatus = null;
+  settings.init(null as never);
   settings.appNotice = null;
   settings.appError = null;
   settings.registerCoreRestartHandler(null);
@@ -281,6 +283,53 @@ describe('应用级配置（config.json）', () => {
     settings.dismissAppError();
     expect(await settings.switchWork('C:/works/b')).toBe(false);
     expect(settings.appError).toContain('仅 Tauri 环境');
+  });
+});
+
+describe('LLM core 生效态', () => {
+  it('loadLlmStatus：映射 client 返回值；缺失 client 静默跳过', async () => {
+    const status = { mode: 'presets' as const, presets: [], assign: {}, effective: { writing: { model: 'writer' }, background: { model: 'bg' }, review: { model: 'review' } } };
+    const client = { getLlm: vi.fn().mockResolvedValue(status) };
+    settings.init(client as never);
+    await settings.loadLlmStatus();
+    expect(settings.llmStatus).toEqual(status);
+    settings.init(null as never);
+    settings.appError = null;
+    await settings.loadLlmStatus();
+    expect(settings.appError).toBeNull();
+  });
+
+  it('saveAppConfig：写配置→重启→读取 core 真值，并在 notice 展示三档模型', async () => {
+    const status = { mode: 'presets' as const, presets: [], assign: {}, effective: { writing: { model: 'writer-v2' }, background: { model: 'bg-v2' }, review: { model: 'review-v2' } } };
+    const client = { getLlm: vi.fn().mockResolvedValue(status) };
+    settings.init(client as never);
+    const invoke = mockTauri(async (cmd) => {
+      if (cmd === 'write_config' || cmd === 'restart_core') return undefined;
+      if (cmd === 'config_status') return STATUS;
+      throw new Error(`unexpected ${cmd}`);
+    });
+    expect(await settings.saveAppConfig()).toBe(true);
+    expect(invoke).toHaveBeenCalledWith('restart_core');
+    expect(settings.appNotice).toContain('writer-v2');
+    expect(settings.appNotice).toContain('bg-v2');
+    expect(settings.appNotice).toContain('review-v2');
+  });
+
+  it('saveAppConfig：重启失败返回 false 并报错', async () => {
+    settings.init({ getLlm: vi.fn() } as never);
+    mockTauri(async (cmd) => {
+      if (cmd === 'write_config') return undefined;
+      if (cmd === 'config_status') return STATUS;
+      if (cmd === 'restart_core') throw new Error('core 起不来');
+      throw new Error(`unexpected ${cmd}`);
+    });
+    expect(await settings.saveAppConfig()).toBe(false);
+    expect(settings.appError).toContain('重启 core 失败');
+  });
+
+  it('normalizePresetId：与 core 统一为大写下划线', () => {
+    expect(normalizePresetId('MAIN-WRITER-AB12')).toBe('MAIN_WRITER_AB12');
+    expect(normalizePresetId(' main writer ab12 ')).toBe('MAIN_WRITER_AB12');
   });
 });
 

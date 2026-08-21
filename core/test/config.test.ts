@@ -5,6 +5,7 @@ import {
   assertNodeVersion,
   createModelForTier,
   DEFAULT_LLM_TIMEOUT_SECONDS,
+  describeLlm,
   getDomainMcpCommand,
   getGitCommit,
   getLlmTimeoutSeconds,
@@ -131,6 +132,23 @@ describe('config', () => {
     expect(() => modelForPurpose({ ...PRESET_ENV, LLM_ASSIGN_REVIEW: 'missing' }, 'review')).toThrow(
       /LLM_ASSIGN_REVIEW 指向不存在的预设/,
     );
+  });
+
+  it('describeLlm：预设真值、回退、错误与 key 打码', () => {
+    const result = describeLlm({ ...PRESET_ENV, LLM_ASSIGN_WRITING: 'main-writer', LLM_ASSIGN_BACKGROUND: 'missing' });
+    expect(result.mode).toBe('presets');
+    expect(result.presets).toHaveLength(3);
+    expect(result.assign).toEqual({ writing: 'MAIN_WRITER', background: 'MISSING' });
+    expect(result.effective.writing).toEqual({ presetId: 'MAIN_WRITER', model: 'writer-m' });
+    expect(result.effective.review).toEqual({ presetId: 'MAIN_WRITER', model: 'writer-m' });
+    expect(result.effective.background).toEqual({ error: '指向不存在的预设:MISSING' });
+    expect(result.presets.find((preset) => preset.id === 'MAIN_WRITER')?.apiKeyMasked).toBe('kw••••');
+    expect(result.presets.find((preset) => preset.id === 'MAIN_WRITER')?.apiKeyMasked).not.toContain('secret');
+  });
+
+  it('describeLlm：legacy 齐全与缺失均不抛错', () => {
+    expect(describeLlm(FULL_ENV)).toMatchObject({ mode: 'legacy', effective: { writing: { model: 'm1' }, background: { model: 'm2' }, review: { model: 'm2' } } });
+    expect(describeLlm({ LLM_BASE_URL: 'http://x', LLM_API_KEY: 'k' }).legacy?.error).toContain('LLM_MODEL');
   });
 
   it('modelForPurpose：无预设时完全按 legacy 四变量，缺变量维持报错语义', () => {

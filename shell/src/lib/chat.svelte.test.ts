@@ -107,6 +107,25 @@ describe('ChatStore', () => {
     expect(chat.tier).toBe('writing');
   });
 
+  it('send：有引用附件时合成「引用块+正文」发出，done 后清附件（R4 引用附件化）', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_body: unknown, h: ChatStreamHandlers) => {
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const client = streamClient({ chatStream });
+    const chat = new ChatStore();
+    chat.init(client);
+    const key = chat.currentDraftKey();
+    chat.setQuote(key, { label: '引用 · 第一章 · 6 字', text: '第一行\n第二行' });
+    await chat.send('接着聊这段');
+    expect(chatStream).toHaveBeenCalledWith(
+      { text: '> 第一行\n> 第二行\n\n接着聊这段', workDir: '', scope: '', tier: 'writing' },
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(chat.messages[0]).toEqual({ role: 'user', content: '> 第一行\n> 第二行\n\n接着聊这段' });
+    expect(chat.getQuote(key)).toBeNull();
+  });
+
   it('send：激活方案映射 chat persona → 请求体带 persona（决策 0010）', async () => {
     const chatStream = vi.fn().mockImplementation(async (_body: unknown, h: ChatStreamHandlers) => {
       h.onDone?.({ sessionId: 's1', messageId: 'm1' });

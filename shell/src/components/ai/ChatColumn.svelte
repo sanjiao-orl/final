@@ -12,6 +12,7 @@
   import { candidates } from '../../lib/candidates.svelte.js';
   import { collideParse } from '../../lib/collide-parse.js';
   import { collideVar } from '../../theme.js';
+  import { splitLeadingQuote } from '../../lib/bridge.svelte.js';
 
   let listEl = $state<HTMLDivElement | null>(null);
 
@@ -25,6 +26,11 @@
     if (!text.trim()) return;
     chat.setDraft(key, ''); // 立即清输入框（store 侧发送成功后兜底再清，失败则保留供重发）
     void chat.send(text);
+  }
+
+  let expandedQuotes = $state<Record<number, boolean>>({});
+  function toggleQuote(i: number): void {
+    expandedQuotes[i] = !expandedQuotes[i];
   }
 
   // D2.3：仅当用户已接近底部时才跟底；上翻阅读旧文不再被强行拉回。
@@ -145,6 +151,14 @@
               {@html renderAiHtml(m.content)}
             {/if}
             {#if i === chat.streamingIdx && chat.streaming}<span class="cursor" aria-hidden="true">▍</span>{/if}
+          {:else if m.role === 'user'}
+            {@const parts = splitLeadingQuote(m.content)}
+            {#if parts.quote}
+              <button class="quote-message" class:expanded={expandedQuotes[i]} onclick={() => toggleQuote(i)} aria-expanded={expandedQuotes[i]}>
+                <span>{expandedQuotes[i] ? parts.quote : parts.quote.split('\n').slice(0, 3).join('\n')}{!expandedQuotes[i] && parts.quote.split('\n').length > 3 ? '…' : ''}</span>
+              </button>
+            {/if}
+            {#if parts.body}<div class="quote-body">{parts.body}</div>{/if}
           {:else}
             {m.content}
           {/if}
@@ -163,7 +177,7 @@
     </div>
   {/each}
   {#if candidates.pendingCount > 0}
-    <div class="staged-note" role="button" tabindex="0" onclick={() => candidates.toggleDrawer()} onkeydown={(e) => e.key === "Enter" && candidates.toggleDrawer()}>
+    <div class="staged-note" role="button" tabindex="0" onclick={() => candidates.openStaging()} onkeydown={(e) => e.key === "Enter" && candidates.openStaging()}>
       {@html iconSvg('drawer', 13)}
       产出 {candidates.pendingCount} 条改写候选 → 已送暂存区，点击前往裁决
     </div>
@@ -172,6 +186,9 @@
 
 <div class="composer">
   <div class="box">
+    {#if chat.getQuote(chat.currentDraftKey())}
+      <div class="quote-chip"><span>📎 {chat.getQuote(chat.currentDraftKey())?.label}</span><button onclick={() => chat.setQuote(chat.currentDraftKey(), null)} aria-label="移除引用">×</button></div>
+    {/if}
     <textarea
       placeholder={`对${chat.scopeLabel()}下指令…(Enter 发送, Shift+Enter 换行)`}
       value={chat.getDraft(chat.currentDraftKey())}
@@ -495,6 +512,36 @@
   .box:focus-within {
     border-color: var(--accent-line);
   }
+  .quote-chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 7px 8px 0;
+    padding: 3px 7px;
+    border: 1px solid var(--accent-line);
+    border-radius: 10px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 10.5px;
+    line-height: 1.4;
+  }
+  .quote-chip span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .quote-chip button { color: inherit; font-size: 15px; line-height: 1; }
+  .quote-message {
+    display: block;
+    max-width: 100%;
+    padding: 3px 9px;
+    border: none;
+    border-left: 3px solid var(--line);
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    font-style: italic;
+    text-align: left;
+    white-space: pre-wrap;
+    cursor: pointer;
+  }
+  .quote-body { white-space: pre-wrap; }
   textarea {
     width: 100%;
     border: none;

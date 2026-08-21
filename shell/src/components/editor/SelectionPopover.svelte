@@ -126,22 +126,17 @@
     applying = false;
   }
 
-  // 定位钳位：垂直不没入暂存抽屉（抽屉开合 maxTop 需重算）。
-  // 原型用 MutationObserver 监抽屉 class 触发重钳，这里用 $effect 监听 drawerOpen + 实际高度响应式重算，
-  // 与浮层尺寸/抽屉状态同源，避免打开瞬间计算后抽屉开合盖住浮层。
-
-  /** 抽屉开合后（268px）按浮层实际高度重算 maxTop。 */
+  // 定位钳位：仅按正文滚动区实际高度计算，暂存区已移入左栏。
   // svelte-ignore state_referenced_locally —— 初始值取自打开瞬间的 prop；后续变化由 $effect 重算覆写
   let liveMaxTop = $state(maxTop);
   $effect(() => {
-    const drawerH = candidates.drawerOpen ? 268 : 0;
     const popH = rootEl?.offsetHeight || 380;
     const scroller = rootEl?.closest('.scroller') as HTMLElement | null;
     if (!scroller) {
       liveMaxTop = maxTop;
       return;
     }
-    const max = Math.max(120, scroller.clientHeight - drawerH - popH - 8);
+    const max = Math.max(120, scroller.clientHeight - popH - 8);
     liveMaxTop = Math.min(maxTop, max);
   });
 

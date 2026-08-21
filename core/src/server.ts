@@ -4,7 +4,7 @@ import { createServer as createHttpServer, type IncomingMessage, type Server, ty
 import { asSchema, type FlexibleSchema } from 'ai';
 import { z } from 'zod';
 import { handleChatRequest, type ChatDeps } from './chat.js';
-import { getGitCommit } from './config.js';
+import { describeLlm, getGitCommit } from './config.js';
 import { devPage } from './dev.js';
 import { corsHeadersFor, HttpError, readJsonBody, toPublicErrorMessage, writeJson, writeJson413 } from './http.js';
 import { handleReviewRequest } from './review.js';
@@ -120,6 +120,11 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
   // 其余端点一律校验 Authorization: Bearer
   if (req.headers.authorization !== `Bearer ${deps.token}`) {
     writeJson(res, 401, { error: '未授权：需要 Authorization: Bearer <token>' }, req.headers.origin);
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/v1/llm') {
+    writeJson(res, 200, describeLlm(), req.headers.origin);
     return;
   }
 

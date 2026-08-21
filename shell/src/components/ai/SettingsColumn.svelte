@@ -3,7 +3,7 @@
   // 保存与快照（自动保存间隔、采纳前自动快照常开）、暂存与裁决（分流/采纳留痕）。
   // 第二步新增：作品目录（config.json workDir）+ 模型配置（BYOK 双档 LLM_*），保存后重启 core 生效。
   import { open } from '@tauri-apps/plugin-dialog';
-  import { settings, type ApprovalMode } from '../../lib/settings.svelte.js';
+  import { settings, normalizePresetId, type ApprovalMode } from '../../lib/settings.svelte.js';
   import type { ResolvedField } from '../../lib/settings.svelte.js';
 
   const APPROVALS: { mode: ApprovalMode; name: string; desc: string }[] = [
@@ -28,6 +28,17 @@
   function ph(f: ResolvedField | undefined, hint: string): string {
     if (!f) return hint;
     return f.value ? `当前生效（${SRC_LABEL[f.source]}）：${f.value}` : `当前生效（缺省）：${hint}`;
+  }
+
+  function effectiveLabel(purpose: 'writing' | 'background' | 'review'): string {
+    const e = settings.llmStatus?.effective[purpose];
+    if (!e) return '加载中…';
+    if (e.error) return e.error;
+    if (settings.llmStatus?.mode === 'legacy') {
+      const legacy = settings.llmStatus.legacy;
+      return legacy ? `${purpose === 'writing' ? legacy.model : legacy.modelCheap}（legacy 四字段）` : '未配置';
+    }
+    return e.model ? `${e.presetId ?? '预设'} · ${e.model}` : '未配置';
   }
 
   async function pickWorkDir(): Promise<void> {
@@ -101,6 +112,12 @@
 
 <div class="group">
   <div class="label">模 型 预 设（按用途分配）</div>
+  <div class="effective-block">
+    <div class="sub-label">当前生效(core 实际在用)</div>
+    {#each ASSIGNS as a (a.purpose)}
+      <div class="row inline"><span class="r-label">{a.name}</span><span class:error={!!settings.llmStatus?.effective[a.purpose]?.error}>{effectiveLabel(a.purpose)}</span></div>
+    {/each}
+  </div>
   {#each settings.appLlmPresets as preset, i (preset.id)}
     <div class="preset-card">
       <div class="preset-head">
@@ -125,6 +142,9 @@
       </div>
     </div>
   {/each}
+  {#each (settings.llmStatus?.presets ?? []).filter((p) => !settings.appLlmPresets.some((local) => normalizePresetId(local.id) === p.id)) as preset (preset.id)}
+    <div class="preset-card readonly"><div class="preset-head"><span class="preset-title">{preset.id}</span><span class="badge">来自环境变量（只读,需改环境变量）</span></div><div class="r-desc">{preset.model}</div></div>
+  {/each}
   <div class="row-inline">
     <button class="btn" onclick={() => settings.addLlmPreset()}>+ 添加预设</button>
   </div>
@@ -138,7 +158,7 @@
         value={settings.appLlmAssign[a.purpose] ?? ''}
         onchange={(e) => settings.setLlmAssign(a.purpose, e.currentTarget.value || undefined)}
       >
-        <option value="">未指定（回退第一预设）</option>
+        <option value="">未指定 → 实际用 {settings.llmStatus?.effective[a.purpose]?.model ?? '未配置'}</option>
         {#each settings.appLlmPresets as p (p.id)}
           <option value={p.id}>{p.name || p.id}</option>
         {/each}
@@ -245,6 +265,9 @@
 <div class="note">默认值遵循「默认否、可配」——默认全部最保守（审批 ask、快照常开不可关）。</div>
 
 <style>
+  .effective-block { border: 1px solid var(--line); border-radius: 7px; padding: 7px; margin-bottom: 9px; }
+  .error { color: var(--danger, #c44); }
+  .badge { font-size: 10px; color: var(--muted); }
   .group {
     margin-top: 2px;
   }

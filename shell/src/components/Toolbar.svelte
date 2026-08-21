@@ -204,7 +204,7 @@
     {@html iconSvg('search', 15)}
     {review.running ? '扫描中…' : '审阅'}{#if review.blockerTotal > 0}<i class="tb-badge danger" title="BLOCKER 未清零">{review.blockerTotal}</i>{/if}
   </button>
-  <button class="tb-btn" class:on={candidates.drawerOpen} onclick={() => candidates.toggleDrawer()} title="暂存区：AI 产出候选，批量采纳/整改/丢弃">
+  <button class="tb-btn" class:on={candidates.stagingTab} onclick={() => candidates.openStaging()} title="暂存区：AI 产出候选，批量采纳/整改/丢弃">
     {@html iconSvg('drawer', 15)}
     暂存{#if candidates.pendingCount > 0}<i class="tb-badge">{candidates.pendingCount}</i>{/if}
   </button>

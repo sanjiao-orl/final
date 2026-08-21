@@ -191,7 +191,12 @@ if (
 ) {
   fail('1/10 握手 /v1/health', `status=${healthRes.status} body=${JSON.stringify(health)}`);
 }
-pass('1/10 握手 /v1/health', `version=${health.version} protocol=${health.protocol}`);
+const llmRes = await fetch(`${baseUrl}/v1/llm`, { headers: auth });
+const llm = llmRes.ok ? await llmRes.json() : null;
+if (llmRes.status !== 200 || typeof llm?.effective?.writing?.model !== 'string' || llm.effective.writing.model === '') {
+  fail('1/10 握手 /v1/llm', `status=${llmRes.status} body=${JSON.stringify(llm)}`);
+}
+pass('1/10 握手 /v1/llm', `生效模型=${llm.effective.writing.model}`);
 
 // ---- 2/10 碰撞：mode=collide 真实碰撞对话，断言四节固定标题齐备（0013：碰撞 → blueprint=locked → 起草） ----
 let collideEvents;

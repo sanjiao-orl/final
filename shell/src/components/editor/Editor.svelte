@@ -176,12 +176,12 @@
     }
     if (settings.inlineSplit && original.length <= 200) {
       // 浮层定位（内容坐标，相对 scroller）：贴浮动条下缘，水平钳在 scroller 内，
-      // 垂直钳在暂存抽屉（268px 高）之上——永不没入暂存区
+      // 垂直钳在正文滚动区内，暂存区已移入左栏
       const popW = layout.selPopWidth;
       const popH = 420; // 浮层估算高（原文条 + 候选列表 + 底部输入），组件按实际高度自我钳位
       const x = Math.max(12, Math.min(selBar.left, scroller.clientWidth - popW - 12));
       const y = selBar.top + layout.selBarHeight + 6;
-      const maxTop = Math.max(120, scroller.clientHeight - (candidates.drawerOpen ? 268 : 0) - popH - 8);
+      const maxTop = Math.max(120, scroller.clientHeight - popH - 8);
       popover = {
         x,
         y: Math.min(y, maxTop),

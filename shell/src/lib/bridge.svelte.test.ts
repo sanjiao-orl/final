@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => {
     setScope: vi.fn(async () => { calls.push('setScope'); }),
     showCol: vi.fn(() => { calls.push('showCol'); }),
     setDraft: vi.fn(() => { calls.push('setDraft'); }),
+    setQuote: vi.fn(() => { calls.push('setQuote'); }),
     send: vi.fn(async (_msg: string) => { calls.push('send'); }),
     getDraft: vi.fn(() => '原有草稿'),
     currentDraftKey: vi.fn(() => 'scope:ch:ch-1'),
@@ -14,7 +15,7 @@ const mocks = vi.hoisted(() => {
 });
 
 vi.mock('./chat.svelte.js', () => ({
-  chat: { setScope: mocks.setScope, currentDraftKey: mocks.currentDraftKey, getDraft: mocks.getDraft, setDraft: mocks.setDraft, send: mocks.send },
+  chat: { setScope: mocks.setScope, currentDraftKey: mocks.currentDraftKey, getDraft: mocks.getDraft, setDraft: mocks.setDraft, setQuote: mocks.setQuote, send: mocks.send },
 }));
 vi.mock('./ui.svelte.js', () => ({
   ui: { showCol: mocks.showCol },
@@ -47,13 +48,13 @@ beforeEach(() => {
 });
 
 describe('选区与对话桥', () => {
-  it('quoteSelectionToChat：引用逐行加 >、前插草稿，先切 scope 再写草稿', async () => {
+  it('quoteSelectionToChat：切 scope 后设置附件引用，不污染草稿', async () => {
     await quoteSelectionToChat(chapter, '第一行\n第二行');
 
     expect(mocks.setScope).toHaveBeenCalledWith('ch:ch-1');
-    expect(mocks.setDraft).toHaveBeenCalledWith('scope:ch:ch-1', '> 第一行\n> 第二行\n\n原有草稿');
+    expect(mocks.setQuote).toHaveBeenCalledWith('scope:ch:ch-1', { label: '引用 · 第一章 · 7 字', text: '第一行\n第二行' });
+    expect(mocks.setDraft).not.toHaveBeenCalled();
     expect(mocks.showCol).toHaveBeenCalledWith('chat');
-    expect(mocks.calls.indexOf('setScope')).toBeLessThan(mocks.calls.indexOf('setDraft'));
   });
 
   it('transferPolishToChat：发送原文、逐轮记录与锚定替换指令', async () => {

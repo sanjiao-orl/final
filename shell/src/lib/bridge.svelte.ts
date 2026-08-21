@@ -9,16 +9,19 @@ function chapterScope(chapter: ChapterNode): string {
   return `ch:${chapter.id ?? chapter.relPath}`;
 }
 
-function quoteBlock(text: string): string {
-  return text.split('\n').map((line) => `> ${line}`).join('\n');
+export function splitLeadingQuote(content: string): { quote: string; body: string } {
+  const match = content.match(/^(?:> .*\n?)+/);
+  if (!match) return { quote: '', body: content };
+  const quote = match[0].replace(/\n$/, '');
+  const body = content.slice(match[0].length).replace(/^\n+/, '');
+  return { quote, body };
 }
 
 export async function quoteSelectionToChat(chapter: ChapterNode, text: string): Promise<void> {
   await chat.setScope(chapterScope(chapter));
   ui.showCol('chat');
   const key = chat.currentDraftKey();
-  const old = chat.getDraft(key);
-  chat.setDraft(key, `${quoteBlock(text)}\n\n${old}`);
+  chat.setQuote(key, { label: `引用 · ${chapter.title} · ${text.length} 字`, text });
 }
 
 export async function transferPolishToChat(
@@ -52,4 +55,6 @@ export function polishInstruction(input: string, variant: string): string {
   return input.trim() || variant;
 }
 
-export { quoteBlock };
+export function quoteBlock(text: string): string {
+  return text.split('\n').map((line) => `> ${line}`).join('\n');
+}

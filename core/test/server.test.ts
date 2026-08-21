@@ -4,6 +4,29 @@ import { PROTOCOL_VERSION } from '../src/runtime.js';
 import { readSse, startTestServer } from './helpers.js';
 
 describe('core HTTP 服务', () => {
+  it('GET /v1/llm → 200 配置形状', async () => {
+    const s = await startTestServer();
+    const previous = { ...process.env };
+    try {
+      Object.assign(process.env, {
+        LLM_PRESET_TEST_BASE_URL: 'http://test/v1',
+        LLM_PRESET_TEST_API_KEY: 'secret-key',
+        LLM_PRESET_TEST_MODEL: 'test-model',
+      });
+      const res = await fetch(`${s.baseUrl}/v1/llm`, { headers: { Authorization: `Bearer ${s.token}` } });
+      const body = (await res.json()) as { mode: string; effective: { writing: { model: string } }; presets: Array<{ apiKeyMasked: string }> };
+      expect(res.status).toBe(200);
+      expect(body.mode).toBe('presets');
+      expect(typeof body.effective.writing.model).toBe('string');
+      expect(body.effective.writing.model).not.toBe('');
+      expect(body.presets.every((preset: { apiKeyMasked: string }) => !preset.apiKeyMasked.includes('secret-key'))).toBe(true);
+    } finally {
+      for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+      Object.assign(process.env, previous);
+      await s.close();
+    }
+  });
+
   it('GET /v1/health → 200 { ok, version, protocol, commit }', async () => {
     const s = await startTestServer();
     try {

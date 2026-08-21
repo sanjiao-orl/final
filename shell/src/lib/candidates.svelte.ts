@@ -23,7 +23,10 @@ export class CandidatesStore {
   items = $state<Candidate[]>([]);
   /** 抽屉里勾选的候选 id。 */
   selected = $state<Set<string>>(new Set());
-  drawerOpen = $state(false);
+  /** 左栏暂存 tab 是否打开。 */
+  stagingTab = $state(false);
+  /** 正文区当前查看的候选详情。 */
+  viewingId = $state<string | null>(null);
   busy = $state(false);
   /** 流式改写中的生成现场（缺陷修复：改写过程在暂存区实时流式显示，完成态才落候选卡）。 */
   generating = $state<{ chapter: string; original: string; instruction: string; text: string } | null>(null);
@@ -58,24 +61,23 @@ export class CandidatesStore {
     try {
       const r = await this.client.listCandidates({ status: 'pending' });
       this.setItems(r.candidates);
+      if (this.stagingTab && this.viewingId === null) this.viewingId = this.items[0]?.id ?? null;
     } catch (err) {
       work.error = `暂存区加载失败：${err instanceof Error ? err.message : String(err)}`;
     }
   }
 
-  toggleDrawer(): void {
-    if (this.drawerOpen) {
-      this.drawerOpen = false;
-      return;
-    }
-    this.overviewOpen = false; // 抽屉与全览互斥
-    this.drawerOpen = true;
+  openStaging(): void {
+    this.overviewOpen = false; // 左栏暂存与全览互斥
+    this.stagingTab = true;
+    const first = this.items[0];
+    this.viewingId = first?.id ?? null;
     void this.load();
   }
 
-  /** 全览：载入全部状态候选并弹出（与抽屉互斥）；关闭时清空选中。 */
+  /** 全览：载入全部状态候选并弹出（与暂存 tab 互斥）。 */
   async openOverview(): Promise<void> {
-    this.drawerOpen = false;
+    this.stagingTab = false;
     this.overviewOpen = true;
     await this.loadAll();
   }
@@ -165,7 +167,7 @@ export class CandidatesStore {
     let text = '';
     const failure: { err: Error | null } = { err: null }; // 闭包赋值，TS 收窄不跨闭包，用对象持有
     this.generating = { chapter, original, instruction: instruction.trim(), text: '' };
-    this.drawerOpen = true; // 暂存区实时展示生成内容
+    this.stagingTab = true; // 左栏实时展示生成状态
     const ac = new AbortController();
     this.generateAbort = ac;
     try {
@@ -343,6 +345,9 @@ export class CandidatesStore {
       // 总是重拉列表（部分失败也要刷新，避免抽屉仍把已 adopted 的显示为 pending）+ 清选择 + 复位 busy
       await this.load();
       if (this.overviewOpen) void this.loadAll();
+      if (this.viewingId && !this.items.some((i) => i.id === this.viewingId)) {
+        this.viewingId = this.items[0]?.id ?? null;
+      }
       this.clearSelection();
       this.busy = false;
     }

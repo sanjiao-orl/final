@@ -1,0 +1,19 @@
+<script lang="ts">
+  import { candidates } from '../../lib/candidates.svelte.js';
+  import { settings } from '../../lib/settings.svelte.js';
+  import { work } from '../../lib/work.svelte.js';
+  const KIND_LABEL: Record<string, string> = { replace: '替换', append: '追加', replace_all: '整章' };
+  const chapterLabel = (chapter: string) => work.current?.relPath === chapter ? work.current.title : chapter.split(/[\\/]/).pop()?.replace(/\.md$/, '') ?? chapter;
+  function close(e?: KeyboardEvent) { if (e) e.stopPropagation(); candidates.viewingId = null; }
+</script>
+<svelte:window onkeydown={(e) => { if (e.key === 'Escape' && (candidates.viewingId || candidates.generating)) close(e); }} />
+<div class="view" role="dialog" aria-label="候选详情" tabindex="-1">
+  <header><strong>{candidates.viewingId ? '暂存候选' : 'AI 生成中'}</strong><span>{#if candidates.viewingId}{chapterLabel(candidates.items.find((i) => i.id === candidates.viewingId)?.chapter ?? '')}{/if}</span><button onclick={() => close()}>返回</button></header>
+  {#if candidates.viewingId}
+    {@const c = candidates.items.find((i) => i.id === candidates.viewingId)}
+    {#if c}<div class="meta">{#if c.kind}<b>{KIND_LABEL[c.kind] ?? c.kind}</b>{/if}{#if settings.showInstruction} 指令：{c.instruction || '润色'}{/if}</div><div class="diff"><article><span class="label">原 文</span><div class="prose">{c.original || '（新增段：此处原本没有内容）'}</div></article><div class="arrow">→</div><article><span class="label">候 选</span><div class="prose">{c.proposed}</div></article></div><div class="ops"><button class="primary" disabled={candidates.busy} onclick={() => void candidates.adoptOne(c)}>采纳</button><button disabled={candidates.busy} onclick={() => void candidates.discardOne(c)}>丢弃</button><button onclick={() => void candidates.openOverview()}>全览</button></div>{/if}
+  {:else if candidates.generating}<div class="meta pulse">AI 改写中 · {candidates.generating.text.length} 字</div><div class="diff"><article><span class="label">原 文</span><div class="prose">{candidates.generating.original || '（新增段：此处原本没有内容）'}</div></article><div class="arrow">→</div><article><span class="label">正 在 生 成</span><div class="prose">{candidates.generating.text || '…'}</div></article></div>{/if}
+</div>
+<style>
+  .view { position: absolute; inset: 0; z-index: 20; overflow: auto; padding: 28px clamp(24px, 6vw, 84px); background: var(--paper); color: var(--ink); font-family: var(--ui-font); } header { display:flex; align-items:center; gap:12px; border-bottom:1px solid var(--line); padding-bottom:14px; margin-bottom:25px; } header span { color:var(--muted); font-size:12px; } header button { margin-left:auto; } button { border:1px solid var(--line); border-radius:6px; background:transparent; color:inherit; padding:7px 12px; cursor:pointer; } button.primary { background:var(--accent); color:white; border-color:var(--accent); } button:disabled { opacity:.45; } .meta { color:var(--muted); font-size:12px; margin-bottom:20px; } .meta b { color:var(--accent); } .diff { display:grid; grid-template-columns:minmax(0,1fr) 32px minmax(0,1fr); gap:18px; align-items:start; } .label { display:block; color:var(--muted); font-size:11px; letter-spacing:.12em; margin-bottom:9px; } .prose { white-space:pre-wrap; line-height:1.9; font-family:var(--prose-font,var(--ui-font)); font-size:16px; } .arrow { padding-top:24px; color:var(--accent); text-align:center; font-size:22px; } .ops { display:flex; gap:8px; margin-top:30px; } .pulse { animation:pulse 1.5s ease-in-out infinite; } @keyframes pulse { 50% { opacity:.55; } } @media (max-width:700px) { .diff { grid-template-columns:1fr; } .arrow { padding:0; } }
+</style>

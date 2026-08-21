@@ -72,6 +72,15 @@ export interface PostureView {
   activeScheme: string | null;
 }
 
+/** GET /v1/llm 的模型池与用途槽真值（契约镜像）。 */
+export interface LlmStatus {
+  mode: 'presets' | 'legacy';
+  presets: Array<{ id: string; baseUrl: string; model: string; apiKeyMasked: string }>;
+  assign: { writing?: string; background?: string; review?: string };
+  effective: Record<'writing' | 'background' | 'review', { presetId?: string; model?: string; error?: string }>;
+  legacy?: { baseUrl: string; model: string; modelCheap: string; apiKeyMasked: string; error?: string };
+}
+
 /** POST /v1/review 的贵档审阅发现（契约镜像）。 */
 export interface ReviewFinding {
   severity: 'BLOCKER' | 'MAJOR' | 'MODERATE';
@@ -159,6 +168,11 @@ export class CoreClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(args),
     });
+  }
+
+  /** 当前 core 实际生效的模型池、用途分配与三档模型。 */
+  getLlm(): Promise<LlmStatus> {
+    return this.request(`${API_PREFIX}/llm`);
   }
 
   /** 贵档冷读审阅当前章（一次性 JSON，非 SSE）；persisted.ids 与 findings 同序（落盘后的 CR id）。
