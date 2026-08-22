@@ -192,9 +192,11 @@ describe('首次运行释放', () => {
     const source = makeTmpDir();
     const target = makeTmpDir();
     writeTree(source, { 'chat.md': '修复后的新版聊天提示' });
-    const bundledChat = fs.readFileSync(path.resolve(import.meta.dirname, '..', 'prompts', 'chat.md'), 'utf8');
-    // 模拟 autocrlf 检出：LF → CRLF
-    writeTree(target, { 'chat.md': bundledChat.replace(/\n/g, '\r\n') });
+    // 先归一到 LF 再模拟 autocrlf 检出（CI 的 windows runner 检出本身已是 CRLF，直接替换会得到 \r\r\n）
+    const bundledChatLf = fs
+      .readFileSync(path.resolve(import.meta.dirname, '..', 'prompts', 'chat.md'), 'utf8')
+      .replace(/\r\n/g, '\n');
+    writeTree(target, { 'chat.md': bundledChatLf.replace(/\n/g, '\r\n') });
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     releasePrompts(target, source);
     expect(fs.readFileSync(path.join(target, 'chat.md'), 'utf8')).toBe('修复后的新版聊天提示');
