@@ -14,7 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { frontmatterEnd, parseFrontmatter } from './frontmatter.js';
-import { CHAPTER_NAME_RE, VOLUME_NAME_RE, assertWorkDir, collectMdFiles, compareNames, toPosix } from './fsutil.js';
+import { CHAPTER_NAME_RE, VOLUME_NAME_RE, assertWorkDir, collectMdFiles, compareNames, errText, toPosix, type SkippedEntry } from './fsutil.js';
 
 export type Severity = 'pass' | 'warn' | 'fail' | 'info';
 
@@ -69,6 +69,8 @@ export interface WorkScanResult {
   workDir: string;
   chapters: ChapterScan[];
   book: BookScan;
+  /** 可选加法：读取失败被跳过的章/目录清单（空时不出现）；作者据此知道哪些章没扫到。 */
+  skipped?: SkippedEntry[];
 }
 
 // ---------- 阈值常量（LAY 实际清单；改动需在报告里注明出处） ----------
@@ -616,15 +618,21 @@ function compareChapterFiles(a: string, b: string): number {
  */
 export function scanWork(workDir: string): WorkScanResult {
   const wd = assertWorkDir(workDir);
-  const files = collectMdFiles(path.join(wd, 'manuscript'));
+  const skipped: SkippedEntry[] = [];
+  const files = collectMdFiles(path.join(wd, 'manuscript'), (rel, err) => {
+    skipped.push({ path: toPosix(path.join('manuscript', rel || '.')), reason: errText(err) });
+  });
   // scan 前按编号感知阅读序重排章列表（字典序会在 >9 章/汉字编号时错序，见 compareChapterFiles）
   const raws: RawChapter[] = [];
   for (const f of [...files].sort((a, b) => compareChapterFiles(a.rel, b.rel))) {
     let content: string;
     try {
       content = fs.readFileSync(f.abs, 'utf8');
-    } catch {
-      continue; // 读取失败的文件跳过（与 search_content 一致）
+    } catch (err) {
+      // 不再静默漏章：warn + 记入 skipped，让作者知道哪些章没扫到
+      console.warn(`[scan_quality] 章读取失败已跳过: ${f.abs}（${errText(err)}）`);
+      skipped.push({ path: toPosix(path.join('manuscript', f.rel)), reason: errText(err) });
+      continue;
     }
     const fmEnd = frontmatterEnd(content);
     const body = content.slice(fmEnd);
@@ -637,6 +645,7 @@ export function scanWork(workDir: string): WorkScanResult {
     workDir: wd,
     chapters: raws.map((r) => ({ relPath: r.relPath, title: r.title, metrics: r.metrics })),
     book: computeBook(raws),
+    ...(skipped.length > 0 ? { skipped } : {}), // 可选加法：空时不出现，不改既有字段语义
   };
 }
 

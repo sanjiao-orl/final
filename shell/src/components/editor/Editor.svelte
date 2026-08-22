@@ -338,6 +338,9 @@
             <button class="continue-btn" disabled={candidates.continuing} onclick={() => void candidates.continueFromChapter()}>
               {candidates.continuing ? '续写中…' : '续写'}
             </button>
+            {#if candidates.continuing}
+              <button class="continue-btn" title="中止本次 AI 续写" onclick={() => candidates.abortContinue()}>取消续写</button>
+            {/if}
           {/if}
           <button
             class="continue-btn"

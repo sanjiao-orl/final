@@ -89,6 +89,7 @@
     </span>
     <div class="actions">
       {#if candidates.busy}<span class="busy">处理中…</span>{/if}
+      {#if candidates.rectifying}<button class="btn sm" onclick={() => candidates.abortRectify()} title="中止批量整改：剩余条目不再发起，已完成条目保留">取消整改</button>{/if}
       <label class="chk">
         <input
           type="checkbox"

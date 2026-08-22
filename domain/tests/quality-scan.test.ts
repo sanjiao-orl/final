@@ -1,7 +1,9 @@
 /**
  * quality_scan.test.ts —— LAY 量化指标扫描器：单项指标口径、阈值判定、书级指标、空作品。
  */
-import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import { describe, expect, it, vi } from 'vitest';
 import { isFilteredNgram, scanChapter, scanWork } from '../src/qualityScan.js';
 import { makeWorkDir, writeTree } from './helpers.js';
 
@@ -256,5 +258,64 @@ describe('scanWork 书级指标', () => {
     expect(res.book.sceneContinuity[0]!.chapters).toEqual(
       Array.from({ length: 12 }, (_, i) => `manuscript/卷一/第${i + 1}章.md`),
     );
+  });
+});
+
+describe('scanWork 静默漏章可见性（warn + skipped）', () => {
+  it('章读取失败：console.warn 带路径与错误，结果附 skipped，其余章照常扫描', () => {
+    const work = makeWorkDir();
+    writeTree(work, {
+      'manuscript/卷一/第1章.md': '第一章正文。',
+      'manuscript/卷一/第2章.md': '第二章正文。',
+      'manuscript/卷一/第3章.md': '第三章正文。',
+    });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const realRead = fs.readFileSync.bind(fs);
+    const spy = vi.spyOn(fs, 'readFileSync').mockImplementation(((file: fs.PathOrFileDescriptor) => {
+      if (String(file).includes('第2章')) throw new Error('模拟不可读');
+      return realRead(file, 'utf8');
+    }) as typeof fs.readFileSync);
+    try {
+      const res = scanWork(work);
+      expect(res.chapters.map((c) => c.relPath)).toEqual([
+        'manuscript/卷一/第1章.md',
+        'manuscript/卷一/第3章.md',
+      ]);
+      expect(res.skipped).toEqual([{ path: 'manuscript/卷一/第2章.md', reason: '模拟不可读' }]);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(String(warnSpy.mock.calls[0]?.[0])).toContain('第2章');
+    } finally {
+      spy.mockRestore();
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('卷目录不可读：collectMdFiles 不再静默（warn + 经 onSkip 上报进 skipped）', () => {
+    const work = makeWorkDir();
+    writeTree(work, { 'manuscript/卷一/第1章.md': '正文。' });
+    fs.mkdirSync(path.join(work, 'manuscript', '卷二'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const realReaddir = fs.readdirSync.bind(fs);
+    const spy = vi.spyOn(fs, 'readdirSync').mockImplementation(((p: fs.PathLike, options?: unknown) => {
+      if (String(p).endsWith('卷二')) {
+        throw Object.assign(new Error('模拟目录不可读'), { code: 'EPERM' });
+      }
+      return realReaddir(p, options as never) as never;
+    }) as typeof fs.readdirSync);
+    try {
+      const res = scanWork(work);
+      expect(res.chapters.map((c) => c.relPath)).toEqual(['manuscript/卷一/第1章.md']);
+      expect(res.skipped).toEqual([{ path: 'manuscript/卷二', reason: '模拟目录不可读' }]);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('全部可读时不出 skipped 字段（可选加法，不改既有字段语义）', () => {
+    const work = makeWorkDir();
+    writeTree(work, { 'manuscript/第1章.md': '正文。' });
+    expect(scanWork(work).skipped).toBeUndefined();
   });
 });

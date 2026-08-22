@@ -282,9 +282,16 @@
       </div>
     {/if}
   </span>
-  <button class="tb-btn" class:on={review.open} disabled={review.running} onclick={() => void review.toggle()} title="审阅：全书去AI味扫描 + 账本确定性诊断（零 LLM 成本）；BLOCKER 未清零时徽标常显">
+  <button
+    class="tb-btn"
+    class:on={review.open}
+    onclick={() => void review.toggle()}
+    title={review.running
+      ? '审阅正在后台进行：点击查看进度或取消；完成后结果保留'
+      : '审阅：全书去AI味扫描 + 账本确定性诊断（零 LLM 成本）；BLOCKER 未清零时徽标常显'}
+  >
     {@html iconSvg('search', 15)}
-    {review.running ? '扫描中…' : '审阅'}{#if review.blockerTotal > 0}<i class="tb-badge danger" title="BLOCKER 未清零">{review.blockerTotal}</i>{/if}
+    {review.running ? (review.open ? '扫描中…' : '后台扫描中…') : '审阅'}{#if review.blockerTotal > 0}<i class="tb-badge danger" title="BLOCKER 未清零">{review.blockerTotal}</i>{/if}
   </button>
   <button class="tb-btn" class:on={candidates.stagingTab} onclick={() => candidates.openStaging()} title="暂存区：AI 产出候选，批量采纳/整改/丢弃">
     {@html iconSvg('drawer', 15)}

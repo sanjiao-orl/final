@@ -2,7 +2,13 @@
   // 审阅报告（WS-17 壳内审阅出口）：全书 scan_quality + 账本确定性诊断的逐章报告。
   // 形态对齐暂存全览：右侧固定全览覆盖层，Esc/× 关闭；BLOCKER 标红，关掉后顶栏徽标仍在。
   import { iconSvg } from '../../lib/icons.js';
-  import { review, SCENE_POOL_MIN, type FindingSeverity, type ScanSeverity } from '../../lib/review.svelte.js';
+  import {
+    review,
+    REVIEW_LEVELS,
+    SCENE_POOL_MIN,
+    type FindingSeverity,
+    type ScanSeverity,
+  } from '../../lib/review.svelte.js';
   import { work } from '../../lib/work.svelte.js';
 
   const SEV_LABEL: Record<FindingSeverity, string> = {
@@ -58,12 +64,28 @@
       <span class="hint">全书扫描 + 账本诊断 · 确定性检查（零 LLM 成本）</span>
     {/if}
     <div class="actions">
+      <!-- R5 分级：跑之前选档（快速/标准/深度），跑之中锁定 -->
+      <div class="levels" role="group" aria-label="扫描级别">
+        {#each REVIEW_LEVELS as l (l.id)}
+          <button
+            class="lvl"
+            class:on={review.level === l.id}
+            disabled={review.running}
+            onclick={() => (review.level = l.id)}
+            title={l.desc}
+          >{l.label}</button>
+        {/each}
+      </div>
       {#if review.running}<span class="busy" title="处理完成前按钮暂不可用">{busyText}</span>{/if}
+      {#if review.running}
+        <!-- 取消入口：面板开着或后台态（重开面板）都可用；取消后锁立即释放，可马上重跑 -->
+        <button class="btn sm" onclick={() => review.cancel()} title="中止当前扫描/审阅请求（锁会立即释放）">取消</button>
+      {/if}
       <button
         class="btn sm"
         disabled={review.running}
         onclick={() => void review.run()}
-        title={review.running ? '正在处理，完成后可点击' : '重跑全书扫描与账本诊断（处理完问题后重跑，BLOCKER 清零徽标即消失）'}
+        title={review.running ? '正在处理，完成后可点击' : `按「${REVIEW_LEVELS.find((l) => l.id === review.level)?.label}」档重跑（处理完问题后重跑，BLOCKER 清零徽标即消失）`}
       >重跑</button>
       <button class="icon-btn" onclick={() => review.close()} aria-label="关闭审阅报告">{@html iconSvg('close', 14, 2)}</button>
     </div>
@@ -74,6 +96,7 @@
     <div class="tier"><b>① 全书扫描</b><span class="t-desc">scan_quality 逐章量化「去 AI 味」指标，纯本地确定性计算，免费。</span></div>
     <div class="tier"><b>② 账本诊断</b><span class="t-desc">ledger_diagnostics 四维账本确定性检查 + 问题日志 BLOCKER 计数，免费。</span></div>
     <div class="tier"><b>③ 贵档冷读</b><span class="t-desc">对当前章 LLM 冷读审阅（只注入单章 + 账本切片），走主笔模型，按章计费、需数秒至数十秒。</span></div>
+    <div class="tier"><b>级别</b><span class="t-desc">快速=仅①；标准=①+②（默认）；深度=①+②+自动对当前章跑③。扫描可关掉面板后台进行。</span></div>
   </div>
 
   <div class="body">
@@ -81,6 +104,24 @@
       <div class="err-zone" role="alert">
         <span>{review.error}</span>
         <button onclick={() => review.dismissError()} aria-label="关闭错误">×</button>
+      </div>
+    {/if}
+    {#if review.persistError}
+      <div class="warn-zone" role="alert">
+        审阅发现已返回，但落盘问题日志失败（{review.persistError}）——本条结果无法标记「已处理/已知」。
+      </div>
+    {/if}
+    <!-- 部分成功可见：每项扫描独立标记成功/失败，失败项带错误信息；skipped=当前档位未包含 -->
+    {#if review.items.scan?.status === 'fail' || review.items.diag?.status === 'fail' || review.items.diag?.status === 'skipped'}
+      <div class="items-zone">
+        {#if review.items.scan?.status === 'fail'}
+          <span class="item-chip fail" title={review.items.scan.error}>指标扫描失败：{review.items.scan.error}</span>
+        {/if}
+        {#if review.items.diag?.status === 'fail'}
+          <span class="item-chip fail" title={review.items.diag.error}>账本诊断失败：{review.items.diag.error}</span>
+        {:else if review.items.diag?.status === 'skipped'}
+          <span class="item-chip skip">账本诊断未运行（快速档）</span>
+        {/if}
       </div>
     {/if}
     {#if review.running && !review.report}
@@ -295,6 +336,67 @@
   .busy {
     color: var(--accent);
     font-size: 12px;
+  }
+  /* R5 分级选择器 + 部分成功 chips + 落盘失败提示 */
+  .levels {
+    display: inline-flex;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .levels .lvl {
+    height: 24px;
+    padding: 0 9px;
+    font-size: 11.5px;
+    color: var(--muted);
+    border-right: 1px solid var(--line);
+    transition: background var(--t-hover), color var(--t-hover);
+    white-space: nowrap;
+  }
+  .levels .lvl:last-child {
+    border-right: none;
+  }
+  .levels .lvl.on {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .levels .lvl:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  .items-zone {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .item-chip {
+    font-size: 11.5px;
+    line-height: 1.5;
+    padding: 3px 9px;
+    border-radius: 6px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+  }
+  .item-chip.fail {
+    color: var(--danger);
+    border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--line));
+    background: color-mix(in srgb, var(--danger) 7%, transparent);
+  }
+  .item-chip.skip {
+    color: var(--muted);
+    border: 1px dashed color-mix(in srgb, var(--muted) 40%, var(--line));
+  }
+  .warn-zone {
+    padding: 7px 10px;
+    border: 1px solid var(--status-draft);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--status-draft) 9%, var(--panel));
+    color: var(--status-draft);
+    font-size: 12px;
+    line-height: 1.6;
   }
   /* 反馈#4：三档说明 + 内嵌错误 + 处理中提示的排版 */
   .tiers {

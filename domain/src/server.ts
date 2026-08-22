@@ -112,7 +112,18 @@ server.registerTool(
       limit: z.number().int().positive().default(SEARCH_DEFAULT_LIMIT).describe(`最多返回条数，默认 ${SEARCH_DEFAULT_LIMIT}`),
     },
   },
-  async ({ workDir, query, limit }) => jsonResult(searchContent(workDir, query, limit)),
+  async ({ workDir, query, limit }) => {
+    const result = searchContent(workDir, query, limit);
+    const out = jsonResult([...result]);
+    // 静默漏章改可见（0822排查）：skipped 是数组附加属性，JSON 序列化会丢，展开为独立文本块透出。
+    if (result.skipped?.length) {
+      out.content.push({
+        type: 'text' as const,
+        text: `⚠️ ${result.skipped.length} 个文件读取失败，未纳入搜索：${result.skipped.map((s) => `${s.path}（${s.reason}）`).join('；')}`,
+      });
+    }
+    return out;
+  },
 );
 
 server.registerTool(
@@ -466,17 +477,31 @@ server.registerTool(
 );
 
 // 批一③ 碰撞模式：裁决留痕追加（第 28 个工具；一行一条留痕，追加式）
+
+/**
+ * 裁决词表别名归一：碰撞协议（core/prompts/collide.md 等）用「放行|打回|搁置」，
+ * 落盘规范词是「采纳/驳回/搁置」——登记时接受别名（放行→采纳、打回→驳回、搁置原样），
+ * 归一后仍走原枚举校验，decisions.md 落盘的规范词不变。
+ */
+function normalizeRuling(v: unknown): unknown {
+  if (v === '放行') return '采纳';
+  if (v === '打回') return '驳回';
+  return v;
+}
+
 server.registerTool(
   'decision_append',
   {
     title: '追加裁决留痕',
     description:
-      '把一条裁决追加进 workDir/editorial_notes/decisions.md（可选 path 覆盖，但必须是 editorial_notes/ 下的 .md）。编号 D-NNN 扫现有 D-(\\d+) 最大 +1 续号（3 位零填充），日期由服务端取当天；行格式 `- D-NNN | 日期 | 议题 | 立场 | 裁决 | 理由 | 章1,章2`，chapters 缺省/空数组输出 `-`。字段内 | 与换行统一替换为空格；topic/stance/reason 非空校验、ruling 用枚举校验（采纳/驳回/搁置）。返回 { appended, id, path }。追加式留痕：推翻旧裁决请新增条目并引用原 D 编号，不改旧行。',
+      '把一条裁决追加进 workDir/editorial_notes/decisions.md（可选 path 覆盖，但必须是 editorial_notes/ 下的 .md）。编号 D-NNN 扫现有 D-(\\d+) 最大 +1 续号（3 位零填充），日期由服务端取当天；行格式 `- D-NNN | 日期 | 议题 | 立场 | 裁决 | 理由 | 章1,章2`，chapters 缺省/空数组输出 `-`。字段内 | 与换行统一替换为空格；topic/stance/reason 非空校验、ruling 用枚举校验（采纳/驳回/搁置；也接受碰撞协议的 放行/打回，自动归一为 采纳/驳回 后落盘）。返回 { appended, id, path }。追加式留痕：推翻旧裁决请新增条目并引用原 D 编号，不改旧行。',
     inputSchema: {
       workDir: z.string().describe('作品文件夹的绝对路径'),
       topic: z.string().describe('议题：决定要裁决的事项'),
       stance: z.string().describe('立场：本次裁决的倾向/论据'),
-      ruling: z.enum(['采纳', '驳回', '搁置']).describe('裁决结论：采纳/驳回/搁置'),
+      ruling: z
+        .preprocess(normalizeRuling, z.enum(['采纳', '驳回', '搁置']))
+        .describe('裁决结论：采纳/驳回/搁置（登记时 放行/打回 也接受，自动归一为 采纳/驳回）'),
       reason: z.string().describe('理由：作出该裁决的原因'),
       chapters: z.array(z.string()).optional().describe('可选：涉及的章（章名如「第三章」或 relPath），缺省/空数组输出 -'),
       path: z.string().optional().describe('可选：裁决留痕相对 workDir 路径，必须 editorial_notes/ 下的 .md，默认 editorial_notes/decisions.md'),

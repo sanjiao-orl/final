@@ -85,18 +85,39 @@ export interface MdFile {
   abs: string;
 }
 
+/** 被跳过的文件/目录及其原因（扫描类工具的 skipped 列表元素；additive 字段，不改既有字段语义）。 */
+export interface SkippedEntry {
+  /** 被跳过者相对 workDir 的路径（正斜杠）。 */
+  path: string;
+  /** 跳过原因（错误消息文本）。 */
+  reason: string;
+}
+
+/** 错误 → 一句话消息文本（warn 与 skipped.reason 共用口径）。 */
+export function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 /**
  * 递归收集 manuscript 下的所有 .md 文件（符号链接一律跳过，防止链接逃逸），
  * 按 rel 排序保证输出稳定；manuscript 不存在时返回空数组。
+ * 目录不可读时不再静默：console.warn 带路径与错误，并通过可选 onSkip 上报
+ * （rel 相对 manuscriptDir，'' 表示 manuscript 根），供扫描类工具组装 skipped 列表。
  */
-export function collectMdFiles(manuscriptDir: string): MdFile[] {
+export function collectMdFiles(
+  manuscriptDir: string,
+  onSkip?: (rel: string, err: unknown) => void,
+): MdFile[] {
   const out: MdFile[] = [];
   const walk = (dir: string, rel: string): void => {
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return; // 目录不存在或不可读：当没有文件处理
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return; // 目录不存在：维持「当没有文件处理」的既有语义
+      console.warn(`[fsutil] 目录不可读已跳过: ${dir}（${errText(err)}）`);
+      onSkip?.(rel, err);
+      return;
     }
     for (const e of entries) {
       if (e.isSymbolicLink()) continue; // 防符号链接逃逸

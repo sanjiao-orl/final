@@ -114,6 +114,12 @@ export class CandidatesStore {
 
   /** 流式生成的 AbortController（取消按钮接这里）。 */
   private generateAbort: AbortController | null = null;
+  /** 触发式续写的 AbortController（续写按钮旁的取消入口）。 */
+  private continueAbort: AbortController | null = null;
+  /** 批量整改的 AbortController（全览头部的取消入口）。 */
+  private rectifyAbort: AbortController | null = null;
+  /** 批量整改在飞状态（取消按钮显隐）。 */
+  rectifying = $state(false);
   /** 流式生成期间是否在生成中（用于按钮态）。 */
   isGenerating = $derived(this.generating !== null);
 
@@ -124,6 +130,8 @@ export class CandidatesStore {
     const context = (work.editorApiText?.() ?? chapter.savedMd).slice(-CONTINUE_CONTEXT_CHARS);
     if (!context.trim()) return false;
     this.continuing = true;
+    const ac = new AbortController();
+    this.continueAbort = ac;
     let text = '';
     const failure: { err: Error | null } = { err: null };
     try {
@@ -134,18 +142,27 @@ export class CandidatesStore {
           onDone: ({ text: done }) => { text = done; },
           onError: (err) => { failure.err = err; },
         },
+        ac.signal,
       );
+      if (ac.signal.aborted) return false; // 已取消：迟到完成也不落候选、不报错
       if (failure.err) throw failure.err;
       if (!text.trim()) return false;
       const r = await this.client.createCandidate({ chapter: chapter.relPath, original: '', proposed: text, instruction: '续写', kind: 'append' });
       this.setItems([r.candidate, ...this.items]);
       return true;
     } catch (err) {
-      work.error = `AI 续写失败：${err instanceof Error ? err.message : String(err)}`;
+      if (!ac.signal.aborted) work.error = `AI 续写失败：${err instanceof Error ? err.message : String(err)}`;
       return false;
     } finally {
+      // 取消/失败都释放 continuing，不再永久锁死
+      this.continueAbort = null;
       this.continuing = false;
     }
+  }
+
+  /** 取消触发式续写（Editor 续写按钮旁的停止入口）。 */
+  abortContinue(): void {
+    this.continueAbort?.abort();
   }
 
   /** 取消当前流式生成（接在 selectionPopover/暂存区入口的停止按钮）。 */
@@ -192,6 +209,7 @@ export class CandidatesStore {
       );
       if (failure.err) throw failure.err;
       this.generating = null;
+      if (ac.signal.aborted) return false; // 已取消：迟到完成也不落候选、不报错
       const r = await this.client.createCandidate({ chapter, original, proposed: text, instruction });
       this.setItems([r.candidate, ...this.items]);
       return true;
@@ -391,50 +409,73 @@ export class CandidatesStore {
     await this.rectifyTargets([c], ask);
   }
 
-  /** 整改公共实现：逐条流式重写（目标卡 proposed 逐批更新），指令留痕。 */
+  /** 整改公共实现：逐条流式重写（目标卡 proposed 逐批更新），指令留痕。
+   *  缺陷修复：接 AbortSignal + 取消入口；单条失败逐条可见、不阻塞其余条目（原先整批抛出 → 全站禁用）。 */
   private async rectifyTargets(targets: Candidate[], ask: string): Promise<void> {
     if (targets.length === 0 || this.busy) return;
     this.busy = true;
+    this.rectifying = true;
+    const ac = new AbortController();
+    this.rectifyAbort = ac;
     try {
       const persona = scheme.channelPersona('rewrite');
+      const failures: string[] = [];
       for (const [n, c] of targets.entries()) {
+        if (ac.signal.aborted) break; // 取消：剩余条目不再发起，已完成条目保留
         let text = '';
         const failure: { err: Error | null } = { err: null };
-        await this.client.rewriteStream(
-          { original: c.original, instruction: `上一版改写：\n${c.proposed}\n\n整改要求：${ask}`, ...(work.workDir ? { workDir: work.workDir } : {}), ...(persona ? { persona } : {}) },
-          {
-            onDelta: (d) => {
-              text += d;
-              const next = { ...c, proposed: text };
-              // 流式整改：目标卡的 proposed 逐批更新（30–50ms 批次进 store）
-              this.setItems(this.items.map((i) => (i.id === c.id ? next : i)));
-              // 全览打开时（整改可能由全览发起）同步 allItems，全览内同样实时可见
-              if (this.overviewOpen) {
-                this.allItems = this.allItems.map((i) => (i.id === c.id ? next : i));
-              }
+        try {
+          await this.client.rewriteStream(
+            { original: c.original, instruction: `上一版改写：\n${c.proposed}\n\n整改要求：${ask}`, ...(work.workDir ? { workDir: work.workDir } : {}), ...(persona ? { persona } : {}) },
+            {
+              onDelta: (d) => {
+                text += d;
+                const next = { ...c, proposed: text };
+                // 流式整改：目标卡的 proposed 逐批更新（30–50ms 批次进 store）
+                this.setItems(this.items.map((i) => (i.id === c.id ? next : i)));
+                // 全览打开时（整改可能由全览发起）同步 allItems，全览内同样实时可见
+                if (this.overviewOpen) {
+                  this.allItems = this.allItems.map((i) => (i.id === c.id ? next : i));
+                }
+              },
+              onDone: ({ text: t }) => {
+                text = t;
+              },
+              onError: (err) => {
+                failure.err = err;
+              },
             },
-            onDone: ({ text: t }) => {
-              text = t;
-            },
-            onError: (err) => {
-              failure.err = err;
-            },
-          },
-        );
-        if (failure.err) throw new Error(`第 ${n + 1} 条整改失败：${failure.err.message}`);
-        await this.client.patchCandidate(c.id, {
-          proposed: text,
-          instruction: `${c.instruction || '润色'} / 整改：${ask}`,
-        });
-        // 本地即时更新（流式期间装饰已随旧 proposed 显示，整改后刷新）
-        this.setItems(this.items.map((i) => (i.id === c.id ? { ...i, proposed: text, instruction: `${c.instruction || '润色'} / 整改：${ask}` } : i)));
+            ac.signal,
+          );
+          if (ac.signal.aborted) break; // 取消发生在本条流式期间：迟到完成不落库
+          if (failure.err) throw failure.err;
+          await this.client.patchCandidate(c.id, {
+            proposed: text,
+            instruction: `${c.instruction || '润色'} / 整改：${ask}`,
+          });
+          // 本地即时更新（流式期间装饰已随旧 proposed 显示，整改后刷新）
+          this.setItems(this.items.map((i) => (i.id === c.id ? { ...i, proposed: text, instruction: `${c.instruction || '润色'} / 整改：${ask}` } : i)));
+        } catch (err) {
+          // 单条失败收集进汇总红条，继续处理其余条目
+          failures.push(`第 ${n + 1} 条整改失败：${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      // 汇总失败（逐条可见）：全部成功则不打扰
+      if (failures.length > 0) {
+        work.error = failures.join('；');
       }
       if (this.overviewOpen) void this.loadAll();
-    } catch (err) {
-      work.error = err instanceof Error ? err.message : String(err);
     } finally {
+      // 取消/失败都复位 busy + rectifying，采纳/丢弃不再全站禁用
+      this.rectifyAbort = null;
+      this.rectifying = false;
       this.busy = false;
     }
+  }
+
+  /** 取消批量整改（全览头部的停止入口）：中止剩余条目，已完成条目保留。 */
+  abortRectify(): void {
+    this.rectifyAbort?.abort();
   }
 
   /** 批量丢弃：状态落库 discarded，从暂存区移除（记录仍在库中可查）。 */

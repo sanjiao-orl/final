@@ -1,7 +1,8 @@
 /**
  * search_content.test.ts —— 大小写不敏感子串匹配、excerpt 截断、limit。
  */
-import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import { describe, expect, it, vi } from 'vitest';
 import { searchContent } from '../src/tools.js';
 import { makeWorkDir, writeTree } from './helpers.js';
 
@@ -67,5 +68,35 @@ describe('search_content', () => {
       { relPath: 'manuscript/卷一/第一章.md', line: 4, excerpt: '夜的第七章。' },
       { relPath: 'manuscript/卷一/第一章.md', line: 5, excerpt: '第二行也有第七章。' },
     ]);
+  });
+
+  it('文件读取失败不再静默跳过：console.warn 带路径与错误，返回数组附 skipped 属性', () => {
+    const work = makeWorkDir();
+    writeTree(work, {
+      'manuscript/第1章.md': '目标词在这里。',
+      'manuscript/第2章.md': '目标词在坏文件里。',
+    });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const realRead = fs.readFileSync.bind(fs);
+    const spy = vi.spyOn(fs, 'readFileSync').mockImplementation(((file: fs.PathOrFileDescriptor) => {
+      if (String(file).includes('第2章')) throw new Error('模拟不可读');
+      return realRead(file, 'utf8');
+    }) as typeof fs.readFileSync);
+    try {
+      const hits = searchContent(work, '目标词');
+      expect(hits.map((h) => h.relPath)).toEqual(['manuscript/第1章.md']);
+      expect(hits.skipped).toEqual([{ path: 'manuscript/第2章.md', reason: '模拟不可读' }]);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(String(warnSpy.mock.calls[0]?.[0])).toContain('第2章');
+    } finally {
+      spy.mockRestore();
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('全部可读时不出 skipped 属性（可选加法）', () => {
+    const work = makeWorkDir();
+    writeTree(work, { 'manuscript/第1章.md': '目标词在这里。' });
+    expect(searchContent(work, '目标词').skipped).toBeUndefined();
   });
 });

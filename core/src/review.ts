@@ -2,7 +2,9 @@
 // 一次性调用 main 档模型，用 generateText + Output.array 结构化输出（SDK 按 responseFormat 约束模型
 // 输出 { elements: [...] } 并解析 + zod 校验）返回 findings JSON（非 SSE）。
 // 纪律：core 不额外注入任何文件内容，单章正文只由 domain ledger_slice 注入（防全稿注入红线）。
-// 闭环：findings 非空时确定性经 MCP issue_append 追加进 issues.md（工具不可用/失败仅 warn 降级，不阻断返回）。
+// 闭环：findings 非空时确定性经 MCP issue_append 追加进 issues.md（带超时+随请求中止：
+// 工具不可用仅 warn 降级不阻断返回；执行失败/超时降级并在响应体 persistedError 里可见——
+// findings 已产出，绝不能让 issue_append 挂死把响应永远扣住）。
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   generateText,
@@ -41,7 +43,12 @@ export interface ReviewDeps {
   tools: ToolSet | undefined;
   /** MCP 当前是否可用；缺省视为可用（与工具代理口径一致）。 */
   toolsAvailable?: () => boolean;
+  /** issue_append 落盘超时毫秒（可选加法，缺省 DEFAULT_PERSIST_TIMEOUT_MS；测试注入小值用）。 */
+  persistTimeoutMs?: number;
 }
+
+/** issue_append 落盘超时缺省（几十秒量级）：domain 挂死时不让已产出的 findings 永远发不回响应。 */
+export const DEFAULT_PERSIST_TIMEOUT_MS = 30_000;
 
 export const reviewFindingSchema = z.object({
   severity: z.enum(['BLOCKER', 'MAJOR', 'MODERATE', 'MINOR']),
@@ -90,7 +97,9 @@ export async function handleReviewRequest(
     if (parsed.data.persona) {
       const personaBody = loadPersona(parsed.data.persona, workDir);
       if (personaBody) {
-        system += `\n\n## 当前角色\n${personaBody}`;
+        // 仲裁句（0822排查疑似项实证：责编 persona 自带的输出结构要求与 Output.array 的 JSON 契约直接冲突，
+        // 模型顺从 persona 即必 502）——显式声明契约优先，persona 只管评判姿态与关注点。
+        system += `\n\n## 当前角色\n以下角色设定只影响评判姿态与关注点；其任何输出结构要求与 findings JSON 契约冲突时，以 JSON 契约为准。\n\n${personaBody}`;
       }
     }
     const result = await generateText({
@@ -103,10 +112,12 @@ export async function handleReviewRequest(
     const findings = await result.output;
 
     // 闭环：findings 非空时确定性经 domain issue_append 追加进 issues.md；失败降级，不影响 findings 返回。
-    const payload: { findings: ReviewFinding[]; persisted?: { appended: number; ids: string[] } } = { findings };
+    const payload: { findings: ReviewFinding[]; persisted?: { appended: number; ids: string[] }; persistedError?: string } = { findings };
     if (findings.length > 0) {
-      const persisted = await persistFindings(deps, workDir, chapterRelPath, findings);
-      if (persisted) payload.persisted = persisted;
+      const persisted = await persistFindings(deps, workDir, chapterRelPath, findings, abort.signal);
+      if (persisted.ok) payload.persisted = persisted.value;
+      // 落盘失败要可见：执行失败/超时/取消时把原因带回给壳（工具不可用的预期降级仍只 warn）。
+      else if (persisted.error) payload.persistedError = persisted.error;
     }
     writeJson(res, 200, payload, req.headers.origin);
   } catch (err) {
@@ -191,36 +202,57 @@ function extractSlice(result: unknown): string {
 /**
  * 经 domain issue_append 工具把 findings 确定性追加进 issues.md（不靠模型自觉）。
  * chapter 由 core 统一注入请求的章相对路径；issueLogPath 缺省走 domain 默认。
- * 工具不可用（无 MCP 连接）或调用失败时 console.warn 降级返回 undefined，不影响 findings 返回。
+ * 带超时（persistTimeoutMs，缺省 30s）+ 随请求 abort：工具不可用（无 MCP 连接）按预期降级
+ * 返回 { ok:false }（只 warn）；执行失败/超时/客户端断连降级返回 { ok:false, error }——
+ * 调用方把 error 以 persistedError 放进响应体，findings 照常返回，响应绝不因落盘挂死。
  */
 async function persistFindings(
   deps: ReviewDeps,
   workDir: string,
   chapterRelPath: string,
   findings: ReviewFinding[],
-): Promise<{ appended: number; ids: string[] } | undefined> {
+  signal: AbortSignal,
+): Promise<{ ok: true; value: { appended: number; ids: string[] } } | { ok: false; error?: string }> {
   if (deps.toolsAvailable && !deps.toolsAvailable()) {
     console.warn('[review] issue_append 工具暂不可用（domain MCP 重连中），findings 未落盘');
-    return undefined;
+    return { ok: false };
   }
   const tool = deps.tools?.['issue_append'];
   if (!tool?.execute) {
     console.warn('[review] issue_append 工具不可用（domain MCP 未连接或工具不存在），findings 未落盘');
-    return undefined;
+    return { ok: false };
   }
-  try {
-    const result: unknown = await tool.execute(
+  const timeoutMs = deps.persistTimeoutMs ?? DEFAULT_PERSIST_TIMEOUT_MS;
+  const exec = Promise.resolve(
+    tool.execute(
       { workDir, findings: findings.map((f) => ({ ...f, chapter: chapterRelPath })) } as never,
-      {
-        toolCallId: 'review-issue-append',
-        messages: [],
-        context: undefined,
-      },
-    );
-    return extractPersisted(result);
+      { toolCallId: 'review-issue-append', messages: [], context: undefined, abortSignal: signal },
+    ),
+  );
+  // 防「超时/断连获胜后 execute 迟到拒绝」成为 unhandledRejection（race 的正常路径不受影响）。
+  exec.catch(() => {});
+  let timer: NodeJS.Timeout | undefined;
+  let onAbort: (() => void) | undefined;
+  try {
+    if (signal.aborted) throw new Error('issue_append 已随客户端断连取消');
+    const result: unknown = await Promise.race([
+      exec,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`issue_append 落盘超时（超过 ${Math.round(timeoutMs / 1000)} 秒）`)), timeoutMs);
+      }),
+      new Promise<never>((_, reject) => {
+        onAbort = () => reject(new Error('issue_append 已随客户端断连取消'));
+        signal.addEventListener('abort', onAbort, { once: true });
+      }),
+    ]);
+    const value = extractPersisted(result);
+    return value ? { ok: true, value } : { ok: false };
   } catch (err) {
     console.warn('[review] issue_append 落盘失败，findings 未落盘：', err instanceof Error ? err.message : err);
-    return undefined;
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    clearTimeout(timer);
+    if (onAbort) signal.removeEventListener('abort', onAbort);
   }
 }
 

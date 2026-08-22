@@ -6,7 +6,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { parseFrontmatter } from '../src/frontmatter.js';
 import {
   createChapter,
@@ -205,6 +205,46 @@ describe('rename_chapter', () => {
     expect(() => renameChapter(work, 'manuscript/第1章·客栈.md', '少年')).toThrow(/已存在/);
     expect(() => renameChapter(work, 'manuscript/第1章·客栈.md', '第9章·客栈')).toThrow(/编号前缀/);
     expect(() => renameChapter(work, 'manuscript/第1章·客栈.md', 'a/b')).toThrow(/分隔符/);
+  });
+
+  it('fm title 更新失败 → 回滚文件名并抛原始错误（不留「名改题未改」的半成品）', () => {
+    const work = makeWorkDir();
+    const content = '---\ntitle: 第2章·客栈\nstatus: 完稿\n---\n\n客栈正文。';
+    writeTree(work, { 'manuscript/第2章·客栈.md': content });
+    const spy = vi.spyOn(fs, 'writeFileSync').mockImplementation((() => {
+      throw new Error('模拟 fm 写入失败');
+    }) as typeof fs.writeFileSync);
+    try {
+      expect(() => renameChapter(work, 'manuscript/第2章·客栈.md', '少年')).toThrow(/模拟 fm 写入失败/);
+    } finally {
+      spy.mockRestore();
+    }
+    // 文件名已回滚、内容原样（frontmatter title 未被半途改动）
+    expect(fs.existsSync(path.join(work, 'manuscript/第2章·少年.md'))).toBe(false);
+    expect(fs.existsSync(path.join(work, 'manuscript/第2章·客栈.md'))).toBe(true);
+    expect(fs.readFileSync(path.join(work, 'manuscript/第2章·客栈.md'), 'utf8')).toBe(content);
+  });
+
+  it('回滚也失败 → 抛「rename_chapter 回滚失败」（不掩盖回滚失败）', () => {
+    const work = makeWorkDir();
+    writeTree(work, { 'manuscript/第2章·客栈.md': '---\ntitle: 第2章·客栈\n---\n\n正文。' });
+    // fm 更新失败（atomicWrite 的 writeFileSync 抛错，走不到其内部 tmp-rename）
+    const writeSpy = vi.spyOn(fs, 'writeFileSync').mockImplementation((() => {
+      throw new Error('模拟 fm 写入失败');
+    }) as typeof fs.writeFileSync);
+    const realRename = fs.renameSync.bind(fs);
+    let renames = 0;
+    const renameSpy = vi.spyOn(fs, 'renameSync').mockImplementation(((from: fs.PathLike, to: fs.PathLike) => {
+      renames += 1;
+      if (renames === 2) throw new Error('模拟回滚失败'); // 第一次=改名成功，第二次=回滚失败
+      return realRename(from, to);
+    }) as typeof fs.renameSync);
+    try {
+      expect(() => renameChapter(work, 'manuscript/第2章·客栈.md', '少年')).toThrow(/rename_chapter 回滚失败/);
+    } finally {
+      writeSpy.mockRestore();
+      renameSpy.mockRestore();
+    }
   });
 });
 

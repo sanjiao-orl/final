@@ -43,6 +43,33 @@ describe('core HTTP 服务', () => {
     }
   });
 
+  it('GET /v1/health 暴露 MCP 连通状态：toolsAvailable 注入与否三态', async () => {
+    const readMcp = async (s: { baseUrl: string }): Promise<{ mcp?: { connected: boolean } }> => {
+      const res = await fetch(`${s.baseUrl}/v1/health`);
+      expect(res.status).toBe(200);
+      return (await res.json()) as { mcp?: { connected: boolean } };
+    };
+    const down = await startTestServer({ toolsAvailable: () => false });
+    try {
+      expect((await readMcp(down)).mcp).toEqual({ connected: false });
+    } finally {
+      await down.close();
+    }
+    const up = await startTestServer({ toolsAvailable: () => true });
+    try {
+      expect((await readMcp(up)).mcp).toEqual({ connected: true });
+    } finally {
+      await up.close();
+    }
+    // 未装配 MCP：不下发字段（向后兼容，消费方按缺省视为不适用）
+    const bare = await startTestServer();
+    try {
+      expect((await readMcp(bare)).mcp).toBeUndefined();
+    } finally {
+      await bare.close();
+    }
+  });
+
   it('协议已版本化：无 /v1/ 前缀的旧路径一律 404（带迁移提示）', async () => {
     const s = await startTestServer();
     try {

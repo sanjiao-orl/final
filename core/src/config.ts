@@ -1,5 +1,6 @@
 // 模块职责：集中读取进程环境配置（LLM 预设/用途分配 + legacy 双档回退、.novel 目录、MCP 命令、runtime 文件路径），缺失即抛错，不静默降级。
-// 另含进程版本门禁（D2）：Node 版本下限校验、git commit 自报（供握手文件/ready 行携带）。
+// 另含进程版本门禁（D2）：Node 版本下限校验、git commit 自报（供握手文件/ready 行携带）、启动期 sqlite 冷备份。
+import { copyFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import corePkg from '../package.json' with { type: 'json' };
@@ -25,6 +26,38 @@ export interface LlmConfig {
 
 /** LLM 服务端超时秒数缺省值：provider 挂起时请求最多挂这么久；多步工具轮在慢 provider 下耗时可能很长，取 10 分钟。 */
 export const DEFAULT_LLM_TIMEOUT_SECONDS = 600;
+
+/**
+ * 确定性工具超时秒数缺省值：domain 工具（读写文件/扫描/账本）是本地确定性操作，量级几十秒足够；
+ * 与贵档 LLM 的 600s 长超时分开口径——修复台账 config.ts:27「贵档 LLM 600s 才超时、便宜档确定性工具零超时」的倒挂。
+ */
+export const DEFAULT_TOOL_TIMEOUT_SECONDS = 45;
+
+/** 确定性工具超时秒数：TOOL_TIMEOUT_SECONDS 可覆盖，缺省 DEFAULT_TOOL_TIMEOUT_SECONDS；取值口径同 getLlmTimeoutSeconds。 */
+export function getToolTimeoutSeconds(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.TOOL_TIMEOUT_SECONDS;
+  if (!raw) return DEFAULT_TOOL_TIMEOUT_SECONDS;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`TOOL_TIMEOUT_SECONDS 取值非法: ${raw}（需为正数秒数）`);
+  }
+  return value;
+}
+
+/**
+ * 启动期 sqlite 冷备份（现状.md 弱点：sessions.sqlite 无备份）：打开库之前把已存在的库文件
+ * 覆盖式拷贝一份滚动备份 <dbPath>.bak（单份滚动）。拷贝失败只 warn 不抛错，不阻断启动。
+ */
+export function backupSqliteFile(dbPath: string, log: Pick<Console, 'warn'> = console): boolean {
+  if (!existsSync(dbPath)) return false;
+  try {
+    copyFileSync(dbPath, `${dbPath}.bak`);
+    return true;
+  } catch (err) {
+    log.warn(`[core] 数据库备份失败（不阻断启动）: ${dbPath} → ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
 
 /** 构造即校验：LLM_BASE_URL / LLM_API_KEY / LLM_MODEL 缺任一即抛错。 */
 export function loadLlmConfig(env: NodeJS.ProcessEnv = process.env): LlmConfig {

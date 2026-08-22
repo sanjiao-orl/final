@@ -4,7 +4,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { decisionAppend, decisionTail } from '../src/ledger.js';
 import { makeWorkDir, writeTree } from './helpers.js';
 
@@ -81,6 +81,32 @@ describe('decisionAppend', () => {
     const res = decisionAppend(work, appendParams({ path: 'editorial_notes/决策.md' }));
     expect(res.path).toBe('editorial_notes/决策.md');
     expect(fs.existsSync(path.join(work, 'editorial_notes', '决策.md'))).toBe(true);
+  });
+
+  it('读改之间留痕被外部改写 → 抛「裁决留痕已被其他进程修改」且不覆盖（CAS 复核）', () => {
+    const work = makeWorkDir();
+    writeTree(work, {
+      'editorial_notes/decisions.md': '# 裁决留痕\n\n- D-007 | 2026-08-20 | a | b | 采纳 | c | -',
+    });
+    const abs = path.join(work, 'editorial_notes', 'decisions.md');
+    const realStat = fs.statSync;
+    let calls = 0;
+    const spy = vi.spyOn(fs, 'statSync').mockImplementation(((p: fs.PathLike) => {
+      calls += 1;
+      if (calls === 2) {
+        // 模拟外部进程在「读旧留痕之后、追加写入之前」改写了文件
+        fs.writeFileSync(abs, fs.readFileSync(abs, 'utf8') + '\n<!-- external write -->\n', 'utf8');
+      }
+      return realStat(p);
+    }) as typeof fs.statSync);
+    try {
+      expect(() => decisionAppend(work, appendParams())).toThrow(/裁决留痕已被其他进程修改/);
+      const after = fs.readFileSync(abs, 'utf8');
+      expect(after).toContain('external write'); // 外部改写内容原样保留
+      expect(after).not.toContain('D-008'); // 本次追加未写入（编号不静默重复）
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

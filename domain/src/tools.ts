@@ -14,11 +14,13 @@ import {
   VOLUME_NAME_RE,
   collectMdFiles,
   compareNames,
+  errText,
   numOf,
   resolveInside,
   resolveInsidePosix,
   toPosix,
   type MdFile,
+  type SkippedEntry,
 } from './fsutil.js';
 // 旧公共面保持（改名后质量扫描等仍可从 tools.js 引入，避免破坏既有导入）
 export { CHAPTER_NAME_RE, VOLUME_NAME_RE, compareNames } from './fsutil.js';
@@ -78,10 +80,13 @@ const SCENE_RE = /^###[ \t]+(.+)$/;
 /** 一级标题：单个 # 开头；##、### 不误匹配。 */
 const H1_RE = /^#(?!#)[ \t]+(.+)$/;
 
-/** 收集 manuscript 下全部 .md 章文件（相对 manuscript 的 rel 与绝对路径）。 */
-function collectManuscriptFiles(workDir: string): { files: MdFile[] } {
+/** 收集 manuscript 下全部 .md 章文件（相对 manuscript 的 rel 与绝对路径）；onSkip 上报不可读目录（可选）。 */
+function collectManuscriptFiles(
+  workDir: string,
+  onSkip?: (rel: string, err: unknown) => void,
+): { files: MdFile[] } {
   const msDir = path.join(assertWorkDir(workDir), 'manuscript');
-  return { files: collectMdFiles(msDir) };
+  return { files: collectMdFiles(msDir, onSkip) };
 }
 
 /**
@@ -242,21 +247,38 @@ export const SEARCH_DEFAULT_LIMIT = 20;
 export const SEARCH_EXCERPT_CHARS = 30;
 
 /**
+ * search_content 返回的命中数组；读取失败被跳过的文件/目录以可选 skipped 属性附加在数组上
+ * （additive：不改命中元素结构；空时不出现）。
+ */
+export type SearchContentResult = SearchHit[] & { skipped?: SkippedEntry[] };
+
+/**
  * search_content：大小写不敏感子串匹配，只搜 manuscript/** /*.md，最多 limit 条。
  * 口径（0004 定稿）：只搜正文——frontmatter 是结构元数据不参与搜索；命中行号按文件实际行号（含 fm 行）。
+ * 文件/目录不可读不再静默跳过：console.warn 带路径与错误，并把被跳过者记入返回值的 skipped 属性。
  */
-export function searchContent(workDir: string, query: string, limit = SEARCH_DEFAULT_LIMIT): SearchHit[] {
+export function searchContent(workDir: string, query: string, limit = SEARCH_DEFAULT_LIMIT): SearchContentResult {
   const q = query.toLowerCase();
   if (q === '') return [];
   const lim = Number.isFinite(limit) && limit >= 1 ? Math.floor(limit) : SEARCH_DEFAULT_LIMIT;
-  const { files } = collectManuscriptFiles(workDir);
+  const skipped: SkippedEntry[] = [];
+  const { files } = collectManuscriptFiles(workDir, (rel, err) => {
+    skipped.push({ path: toPosix(path.join('manuscript', rel || '.')), reason: errText(err) });
+  });
   const hits: SearchHit[] = [];
+  // skipped 非空时附加在返回数组上（可选加法）；JSON 序列化由调用方负责透出
+  const withSkipped = (out: SearchContentResult): SearchContentResult => {
+    if (skipped.length > 0) out.skipped = skipped;
+    return out;
+  };
   for (const f of files) {
     let content: string;
     try {
       content = fs.readFileSync(f.abs, 'utf8');
-    } catch {
-      continue; // 读取失败的文件跳过
+    } catch (err) {
+      console.warn(`[search_content] 文件读取失败已跳过: ${f.abs}（${errText(err)}）`);
+      skipped.push({ path: toPosix(path.join('manuscript', f.rel)), reason: errText(err) });
+      continue;
     }
     const fmLen = frontmatterEnd(content);
     // 正文首行在文件中的行号（无 fm 时为 1；fm 块含闭合行、末尾换行）
@@ -271,10 +293,10 @@ export function searchContent(workDir: string, query: string, limit = SEARCH_DEF
       const excerpt =
         (start > 0 ? '…' : '') + line.slice(start, end) + (end < line.length ? '…' : '');
       hits.push({ relPath: toPosix(path.join('manuscript', f.rel)), line: bodyStartLine + i, excerpt });
-      if (hits.length >= lim) return hits;
+      if (hits.length >= lim) return withSkipped(hits);
     }
   }
-  return hits;
+  return withSkipped(hits);
 }
 
 // ---------- 字数统计工具 ----------
@@ -676,8 +698,18 @@ export function renameChapter(
     throw new Error(`rename_chapter 目标同名已存在（不覆盖）: ${toPosix(path.relative(workDir, newAbs))}`);
   }
   const updated = setFrontmatterTitle(fs.readFileSync(abs, 'utf8'), newBase);
-  fs.renameSync(abs, newAbs); // 文件不存在时抛错
-  atomicWrite(newAbs, updated);
+  try {
+    fs.renameSync(abs, newAbs); // 文件不存在时抛错
+    atomicWrite(newAbs, updated);
+  } catch (err) {
+    // fm title 更新失败 → 回滚文件名（学 move 系 rollbackRenames 口径），不留「名已改题未改」的半成品；回滚失败响亮报错不掩盖
+    try {
+      fs.renameSync(newAbs, abs);
+    } catch (rollbackErr) {
+      throw new Error(`rename_chapter 回滚失败（${newBase}.md → ${base}.md）: ${String(rollbackErr)}`);
+    }
+    throw err;
+  }
   return { ok: true, relPath: toPosix(path.join(path.dirname(posix), `${newBase}.md`)) };
 }
 

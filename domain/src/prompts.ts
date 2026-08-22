@@ -1,6 +1,7 @@
 /**
  * domain/src/prompts.ts —— 提示词/skill 文件的最小加载器，与 core/src/prompts.ts 互为镜像（口径一致）：
  * frontmatter 格式、目录解析顺序（NOVEL_PROMPT_DIR > 随包/仓库 core/prompts）、坏文件跳过并 warn。
+ * prompt 按 mtime 热重载（改文件即生效，与 core 侧同口径），skill/scheme 每次现扫。
  * domain 侧消费的提示词事实源：cold-read.md（冷读契约，见 ledger.ts）、kind:skill 文件（skill_read 按需拉正文）
  * 与写作方案文件（scheme_set_active 校验/写入激活指针）。
  */
@@ -47,15 +48,34 @@ export function resolvePromptRoot(env: NodeJS.ProcessEnv = process.env): string 
   return path.resolve(import.meta.dirname, '..', 'core', 'prompts');
 }
 
-const promptCache = new Map<string, string | null>();
+/**
+ * mtime 感知的 prompt 缓存：改文件即生效（决策 0008「单一事实源是 md 文件」，与 core/src/prompts.ts 同口径），
+ * 不要求重启。缓存键带 {mtimeMs, size} 双因子：仅 mtime 有可能同值不同内容，size 兜底判变。
+ */
+const promptCache = new Map<string, { mtimeMs: number; size: number; value: string | null }>();
 
-/** 读提示词正文；文件缺失/损坏返回 null（调用方自行决定兜底），并 warn 不抛错。 */
+/**
+ * 读提示词正文；文件缺失/损坏返回 null（调用方自行决定兜底），并 warn 不抛错。
+ * 热重载：每次调用先 stat，文件 {mtimeMs, size} 任一变化（改内容/替换）、或文件出现/消失（stat 失败按 0 记）
+ * 都触发重读并刷新缓存；两者都相同则直接命中缓存。
+ */
 export function loadPrompt(kind: PromptKind, rootDir: string = resolvePromptRoot()): string | null {
   const root = path.resolve(rootDir);
   const key = `${root}\n${kind}`;
-  if (promptCache.has(key)) return promptCache.get(key)!;
+  const file = path.join(root, PROMPT_FILENAMES[kind]);
+  let mtimeMs = 0;
+  let size = 0;
+  try {
+    const st = fs.statSync(file);
+    mtimeMs = st.mtimeMs;
+    size = st.size;
+  } catch {
+    // 文件缺失/不可读：按 0 记，缓存里的真实 mtime/size 一旦存在即视为变化 → 重读（走兜底）。
+  }
+  const cached = promptCache.get(key);
+  if (cached !== undefined && cached.mtimeMs === mtimeMs && cached.size === size) return cached.value;
   const value = readPromptUncached(kind, root);
-  promptCache.set(key, value);
+  promptCache.set(key, { mtimeMs, size, value });
   return value;
 }
 

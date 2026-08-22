@@ -84,6 +84,34 @@ const DECISION_TAIL_TOOL = 'decision_tail';
 /** 讨论沉淀注入字符预算（决策 0013：裁决全量不进上下文，只进检索摘要）。 */
 const DECISION_INJECT_MAX_CHARS = 1500;
 
+/**
+ * 契约层注入字符预算：skill 清单 / persona 正文 / 碰撞协议各自上限。
+ * 与数据层截断口径对齐——远超上下文无益且挤占对话预算，超限截断并加省略标注，不再零预算零截断。
+ */
+const SKILL_LIST_INJECT_MAX_CHARS = 2000;
+const PERSONA_INJECT_MAX_CHARS = 2000;
+const COLLIDE_PROMPT_INJECT_MAX_CHARS = 2000;
+
+/** 注入预算截断：超限截到 max 并追加省略标注（buildDecisionTailSection 同风格）。 */
+function truncateInjection(text: string, max: number, label: string): string {
+  return text.length > max ? `${text.slice(0, max)}\n…（${label}超 ${max} 字符，已截断）` : text;
+}
+
+/** 数据层注入（ledger_chapter_slice/decision_tail 的 MCP 工具调用）独立超时秒数缺省值：
+ *  domain 挂起时不拖满 LLM 超时（600s）干等，到点降级跳过注入。DATA_INJECT_TIMEOUT_SECONDS 可覆盖，需为正数秒数。 */
+const DEFAULT_DATA_INJECT_TIMEOUT_SECONDS = 15;
+
+/** 读数据层注入独立超时秒数（config.ts 口径的本地版：env 可覆盖，非法即抛错）。 */
+function getDataInjectTimeoutSeconds(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.DATA_INJECT_TIMEOUT_SECONDS;
+  if (!raw) return DEFAULT_DATA_INJECT_TIMEOUT_SECONDS;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`DATA_INJECT_TIMEOUT_SECONDS 取值非法: ${raw}（需为正数秒数）`);
+  }
+  return value;
+}
+
 interface ChapterSlice {
   found: boolean;
   slice: string;
@@ -116,19 +144,23 @@ async function systemPrompt(
     prompt += `\n当前打开的作品文件夹：${workDir}。调用领域工具时 workDir 参数一律使用这个路径。`;
     const skills = listSkills(workDir);
     if (skills.length > 0) {
-      const lines = skills.map((s) => `- ${s.name}:${s.description}`).join('\n');
+      const lines = truncateInjection(
+        skills.map((s) => `- ${s.name}:${s.description}`).join('\n'),
+        SKILL_LIST_INJECT_MAX_CHARS,
+        'skill 清单'
+      );
       prompt += `\n\n## 可用 skill\n${lines}\n需要时调用领域工具 skill_read 传入 name 获取该 skill 正文并按其执行。`;
     }
     // 碰撞模式：契约层加「## 碰撞协议」（决策 0013）——skill 清单之后、姿态层之前，为姿态层角色提供碰撞流程与格式契约
     if (collide) {
-      prompt += `\n\n## 碰撞协议\n${loadPrompt('collide')}`;
+      prompt += `\n\n## 碰撞协议\n${truncateInjection(loadPrompt('collide'), COLLIDE_PROMPT_INJECT_MAX_CHARS, '碰撞协议')}`;
     }
   }
   // 姿态层：角色注入（决策 0010）——request 带 persona 且按名能找到才注正文段；找不到/无 persona = 零注入
   if (persona) {
     const personaBody = loadPersona(persona, workDir);
     if (personaBody) {
-      prompt += `\n\n## 当前角色\n${personaBody}`;
+      prompt += `\n\n## 当前角色\n${truncateInjection(personaBody, PERSONA_INJECT_MAX_CHARS, '角色正文')}`;
     }
   }
 
@@ -158,7 +190,9 @@ async function systemPrompt(
 
 /**
  * 数据层账本切片：仿 review.ts 的 MCP 工具调用模式调 ledger_chapter_slice。
- * 工具缺失/调用失败（含超时）→ console.warn 并返回 undefined（跳过注入，不阻断聊天）。
+ * 挂独立注入超时（AbortSignal.any[断连/整体信号, 注入定时]）：domain 挂起时最多等 DATA_INJECT_TIMEOUT_SECONDS
+ * （缺省 15s），到点降级跳过——不拖满 LLM 超时干等，也不会被误归因为「LLM 请求超时」。
+ * 工具缺失/调用失败（含注入超时）→ console.warn 并返回 undefined（跳过注入，不阻断聊天）。
  */
 async function fetchChapterSlice(
   workDir: string,
@@ -171,15 +205,24 @@ async function fetchChapterSlice(
     console.warn('[chat] ledger_chapter_slice 工具不可用（domain MCP 未连接或工具不存在），跳过本章账本切片注入');
     return undefined;
   }
+  const injectSeconds = getDataInjectTimeoutSeconds();
+  const injectSignal = AbortSignal.any([abortSignal, AbortSignal.timeout(injectSeconds * 1000)]);
   try {
     const result: unknown = await tool.execute({ workDir, chapterRelPath: chapter } as never, {
       toolCallId: 'chat-ledger-chapter-slice',
       messages: [],
       context: undefined,
-      abortSignal,
+      abortSignal: injectSignal,
     });
     return extractChapterSlice(result);
   } catch (err) {
+    if (abortSignal.aborted) return undefined; // 客户端断连/整体超时：静默跳过（外层已有归因）
+    if (injectSignal.aborted) {
+      console.warn(
+        `[chat] 数据层注入超时：ledger_chapter_slice ${injectSeconds} 秒无响应（domain 数据层挂起），跳过本章账本切片注入（非 LLM 请求超时）`
+      );
+      return undefined;
+    }
     console.warn(
       '[chat] ledger_chapter_slice 调用失败，跳过本章账本切片注入：',
       err instanceof Error ? err.message : err
@@ -237,7 +280,8 @@ function extractChapterSlice(result: unknown): ChapterSlice | undefined {
 
 /**
  * 数据层讨论沉淀：碰撞模式才注（mode=collide 且有 workDir）。仿 fetchChapterSlice 调 decision_tail 取最近裁决摘要。
- * 入参 { workDir, limit: 20 }，挂载章（chapter）缺省不传；工具缺失/调用失败（含超时）→ console.warn 并返回 undefined（跳过注入，不阻断聊天）。
+ * 入参 { workDir, limit: 20 }，挂载章（chapter）缺省不传；与账本切片同口径：独立注入超时（缺省 15s），
+ * 到点 warn 明确归因为数据层超时（非 LLM 请求超时）并返回 undefined（跳过注入，不阻断聊天）。
  */
 async function fetchDecisionTail(
   workDir: string,
@@ -250,6 +294,8 @@ async function fetchDecisionTail(
     console.warn('[chat] decision_tail 工具不可用（domain MCP 未连接或工具不存在），跳过讨论沉淀注入');
     return undefined;
   }
+  const injectSeconds = getDataInjectTimeoutSeconds();
+  const injectSignal = AbortSignal.any([abortSignal, AbortSignal.timeout(injectSeconds * 1000)]);
   try {
     const input: Record<string, unknown> = { workDir, limit: 20 };
     if (chapter) input.chapter = chapter;
@@ -257,10 +303,17 @@ async function fetchDecisionTail(
       toolCallId: 'chat-decision-tail',
       messages: [],
       context: undefined,
-      abortSignal,
+      abortSignal: injectSignal,
     });
     return extractDecisionTail(result);
   } catch (err) {
+    if (abortSignal.aborted) return undefined; // 客户端断连/整体超时：静默跳过（外层已有归因）
+    if (injectSignal.aborted) {
+      console.warn(
+        `[chat] 数据层注入超时：decision_tail ${injectSeconds} 秒无响应（domain 数据层挂起），跳过讨论沉淀注入（非 LLM 请求超时）`
+      );
+      return undefined;
+    }
     console.warn(
       '[chat] decision_tail 调用失败，跳过讨论沉淀注入：',
       err instanceof Error ? err.message : err
@@ -594,7 +647,8 @@ export async function handleChatRequest(
   };
   try {
     const model = deps.modelForTier(tier);
-    // 统一中止信号：服务端超时 + 客户端断连，先于 streamText 的数据层账本切片调用也挂在这里（超时即中止）。
+    // 统一中止信号：服务端超时 + 客户端断连；先于 streamText 的数据层注入调用另挂更短的独立注入超时
+    // （见 fetchChapterSlice/fetchDecisionTail——domain 挂起时按注入超时降级，不占用 LLM 超时预算）。
     const combinedSignal = AbortSignal.any([abort.signal, timeoutSignal]);
     // 本地暂存提案工具（非 MCP）：AI 产出先进暂存区，作者批量采纳后才落盘（铁律回归）。只在本次请求里构造——
     // 闭包当前会话 id 与挂载章（body.chapter）；MCP 断连时本地工具仍可用（见下方 options.tools 合并）。

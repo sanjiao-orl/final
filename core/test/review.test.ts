@@ -4,8 +4,10 @@
 // 注：Output.array 由 SDK 按 responseFormat 约束模型输出 { elements: [...] } 并解析 + zod 校验，
 // 旧 streamText + 手剥 ```json 围栏的容错（parseFindings）已随批三-2 移除，故「带围栏与前后废话」用例删除。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { ToolSet } from 'ai';
 import { startTestServer, generateModel } from './helpers.js';
+import { DEFAULT_PERSIST_TIMEOUT_MS, handleReviewRequest } from '../src/review.js';
 
 function postReview(baseUrl: string, token: string, body: unknown): Promise<Response> {
   return fetch(`${baseUrl}/v1/review`, {
@@ -248,5 +250,115 @@ describe('POST /v1/review 贵档审阅', () => {
     } finally {
       await s.close();
     }
+  });
+});
+
+// ---------- persistFindings 超时/中止（直调 handler，fake req/res） ----------
+
+/** 只暴露 handleReviewRequest 关心的面：writeJson 的 writeHead/end + close 事件面。 */
+function fakeReqRes() {
+  const captured: { status?: number; body?: string } = {};
+  let ended = false;
+  const listeners = new Map<string, Array<() => void>>();
+  const res = {
+    destroyed: false,
+    get writableEnded() {
+      return ended;
+    },
+    writeHead(status: number) {
+      captured.status = status;
+      return res;
+    },
+    end(body?: string) {
+      captured.body = body ?? '';
+      ended = true;
+    },
+    on(event: string, listener: () => void) {
+      const arr = listeners.get(event) ?? [];
+      arr.push(listener);
+      listeners.set(event, arr);
+      return res;
+    },
+    off(event: string, listener: () => void) {
+      listeners.set(event, (listeners.get(event) ?? []).filter((l) => l !== listener));
+      return res;
+    },
+  } as unknown as ServerResponse;
+  const req = { headers: {} } as unknown as IncomingMessage;
+  return {
+    req,
+    res,
+    /** 模拟客户端断连（真实 res 上 'close' 即连接关闭，destroyed 置位）。 */
+    fireClose(): void {
+      (res as { destroyed: boolean }).destroyed = true;
+      for (const l of [...(listeners.get('close') ?? [])]) l();
+    },
+    written: (): { status?: number; body?: string } | null => (ended ? captured : null),
+  };
+}
+
+describe('persistFindings 超时与随请求取消', () => {
+  beforeEach(() => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('缺省落盘超时为几十秒量级（挂死的 domain 不能让响应永挂）', () => {
+    expect(DEFAULT_PERSIST_TIMEOUT_MS).toBeGreaterThanOrEqual(10_000);
+    expect(DEFAULT_PERSIST_TIMEOUT_MS).toBeLessThanOrEqual(120_000);
+  });
+
+  it('issue_append 永挂：persistTimeoutMs 到点降级，仍 200 返回 findings，persistedError 可见；迟到 resolve 不炸', async () => {
+    const { req, res, fireClose, written } = fakeReqRes();
+    let release!: () => void;
+    const hang = new Promise<{ appended: number; ids: string[] }>((r) => (release = () => r({ appended: 1, ids: ['cr-late'] })));
+    const issueAppendExecute = vi.fn(() => hang);
+    const p = handleReviewRequest(
+      GOOD_BODY,
+      {
+        modelForTier: () => generateModel([JSON.stringify({ elements: GOOD_FINDINGS })]),
+        tools: ledgerSliceTools('slice', undefined, issueAppendExecute),
+        persistTimeoutMs: 20,
+      },
+      req,
+      res,
+    );
+    await vi.waitFor(() => expect(issueAppendExecute).toHaveBeenCalled());
+    await p; // 不因落盘永挂
+    const out = written();
+    expect(out?.status).toBe(200);
+    const body = JSON.parse(out!.body!) as { findings: unknown[]; persisted?: unknown; persistedError?: string };
+    expect(body.findings).toEqual(GOOD_FINDINGS);
+    expect(body.persisted).toBeUndefined();
+    expect(body.persistedError).toContain('超时');
+    // 超时获胜后 execute 才完成：不得产生 unhandledRejection（vitest 会把未处理拒绝算失败）
+    release();
+    await new Promise((r) => setTimeout(r, 0));
+  });
+
+  it('客户端断连：issue_append 收到的 abortSignal 被中止，handler 正常收尾不写响应', async () => {
+    const { req, res, fireClose, written } = fakeReqRes();
+    let observed: AbortSignal | undefined;
+    const issueAppendExecute = vi.fn((_input: unknown, opts: { abortSignal?: AbortSignal }) => {
+      observed = opts.abortSignal;
+      return new Promise(() => {});
+    }) as unknown as (input: unknown) => Promise<unknown>;
+    const p = handleReviewRequest(
+      GOOD_BODY,
+      {
+        modelForTier: () => generateModel([JSON.stringify({ elements: GOOD_FINDINGS })]),
+        tools: ledgerSliceTools('slice', undefined, issueAppendExecute),
+        persistTimeoutMs: 30_000,
+      },
+      req,
+      res,
+    );
+    await vi.waitFor(() => expect(observed).toBeDefined());
+    fireClose();
+    await p;
+    expect(observed!.aborted).toBe(true);
+    expect(written()).toBeNull(); // 断连后不再写响应
   });
 });

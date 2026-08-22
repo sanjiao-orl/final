@@ -18,7 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
-import { atomicWrite, assertWorkDir, collectMdFiles, resolveInside, sortMdFilesNumberAware, toPosix } from './fsutil.js';
+import { atomicWrite, assertWorkDir, collectMdFiles, errText, resolveInside, sortMdFilesNumberAware, toPosix, type SkippedEntry } from './fsutil.js';
 import { frontmatterEnd, parseFrontmatter } from './frontmatter.js';
 import { loadPrompt } from './prompts.js';
 import { SNAPSHOT_KEEP } from './tools.js';
@@ -1075,11 +1075,18 @@ function ledgerFileState(abs: string): { exists: boolean; mtimeMs: number; conte
   }
 }
 
-/** 写前复核：文件状态与读时一致才放行；被其他进程改动（存在性/mtimeMs/内容摘要任一变化）则抛错且不写入。 */
-function assertLedgerUnchanged(abs: string, before: { exists: boolean; mtimeMs: number; content: string }): void {
+/**
+ * 写前复核：文件状态与读时一致才放行；被其他进程改动（存在性/mtimeMs/内容摘要任一变化）则抛错且不写入。
+ * noun 为报错主体名（账本/问题日志/裁决留痕），append 路径复用同款 CAS 口径。
+ */
+function assertLedgerUnchanged(
+  abs: string,
+  before: { exists: boolean; mtimeMs: number; content: string },
+  noun = '账本',
+): void {
   const now = ledgerFileState(abs);
   if (now.exists !== before.exists || now.mtimeMs !== before.mtimeMs || now.content !== before.content) {
-    throw new Error('账本已被其他进程修改，请重读后再试');
+    throw new Error(`${noun}已被其他进程修改，请重读后再试`);
   }
 }
 
@@ -1563,6 +1570,8 @@ export interface WorkDiagnostics {
   hasBlockers: boolean;
   /** 问题日志（issues.md，CR 格式）里 severity 列为 BLOCKER 且 status 列缺失/为空/open 的条数（已处置 done/known 不计）；未提供 issueLogPath 或日志缺失时为 0。 */
   blockerCount: number;
+  /** 可选加法：读取失败被跳过的章/目录清单（空时不出现）；作者据此知道哪些章没诊断到。 */
+  skipped?: SkippedEntry[];
 }
 
 /**
@@ -1574,14 +1583,22 @@ export function diagnosticsForWork(workDir: string, ledgerPath?: string, issueLo
   const wd = assertWorkDir(workDir);
   const { ledger } = readLedger(wd, ledgerPath);
 
-  const files = sortMdFilesNumberAware(collectMdFiles(path.join(wd, 'manuscript')));
+  const skipped: SkippedEntry[] = [];
+  const files = sortMdFilesNumberAware(
+    collectMdFiles(path.join(wd, 'manuscript'), (rel, err) => {
+      skipped.push({ path: toPosix(path.join('manuscript', rel || '.')), reason: errText(err) });
+    }),
+  );
   const chapterOrder: ChapterRef[] = [];
   const bodies: Array<{ relPath: string; title: string; body: string }> = [];
   for (const f of files) {
     let content: string;
     try {
       content = fs.readFileSync(f.abs, 'utf8');
-    } catch {
+    } catch (err) {
+      // 不再静默漏章：warn + 记入 skipped，让作者知道哪些章没诊断到
+      console.warn(`[diagnostics] 章读取失败已跳过: ${f.abs}（${errText(err)}）`);
+      skipped.push({ path: toPosix(path.join('manuscript', f.rel)), reason: errText(err) });
       continue;
     }
     const fm = parseFrontmatter(content);
@@ -1625,7 +1642,7 @@ export function diagnosticsForWork(workDir: string, ledgerPath?: string, issueLo
     }
   }
   const hasBlockers = findings.some((f) => f.severity === 'BLOCKER') || blockerCount > 0;
-  return { workDir: wd, findings, hasBlockers, blockerCount };
+  return { workDir: wd, findings, hasBlockers, blockerCount, ...(skipped.length > 0 ? { skipped } : {}) };
 }
 
 // ---------- BLOCKER 清零提示出口 ----------
@@ -1723,7 +1740,9 @@ function locateQuoteLine(workDir: string, chapterRelPath: string, quote: string)
  *   chapter 不存在或 quote 找不到则 line 段写 `?`；
  * - CR 行：scope 列固定 `-`、status 列固定 open（批三-1 新增状态列）；why/suggestion 分列 why 与 fix，
  *   suggestion 缺则 fix 列填 `-`；行内禁止换行，`|` 统一替换为空格；
- * - 文件不存在则创建（含父目录，带 `# 问题日志` 头行）；白名单（.novel/ 根下或 editorial_notes/ 下 .md）外抛错。
+ * - 文件不存在则创建（含父目录，带 `# 问题日志` 头行）；白名单（.novel/ 根下或 editorial_notes/ 下 .md）外抛错；
+ * - 写前 CAS 复核（同 ledger_upsert 的 assertLedgerUnchanged）：读-改之间日志被外部改动则抛「问题日志已被其他进程修改」且不写入，
+ *   防并发追加静默丢条目。
  */
 export function issueAppend(
   workDir: string,
@@ -1736,6 +1755,7 @@ export function issueAppend(
   if (!Array.isArray(findings)) throw new Error('issue_append 的 findings 必须是数组');
   if (findings.length === 0) return { appended: 0, ids: [], path: rel }; // 空追加幂等 no-op，不建文件
 
+  const before = ledgerFileState(abs); // 记录读时状态，写前复核用
   let existing = '';
   try {
     existing = fs.readFileSync(abs, 'utf8');
@@ -1778,6 +1798,7 @@ export function issueAppend(
   const header = existing.trim() === '' ? '# 问题日志\n\n' : '';
   const sep = existing === '' || existing.endsWith('\n') ? '' : '\n';
   const next = existing + sep + header + rows.join('\n') + '\n';
+  assertLedgerUnchanged(abs, before, '问题日志'); // 写前 CAS 复核：被外部改动则响亮报错，不静默丢条目
   atomicWrite(abs, next);
   return { appended: rows.length, ids, path: rel };
 }
@@ -1848,7 +1869,8 @@ const DECISION_RULING_SCHEMA = z.enum(['采纳', '驳回', '搁置']);
  * - chapters 缺省/空数组输出 `-`，非空则逐项清洗后逗号拼接；
  * - 字段清洗：topic/stance/reason/chapters 内 `[\r\n|]` 全换空格并 trim（crField，行内防破坏 `|` 分隔）；
  *   topic/stance/reason 非空校验、空抛中文错；ruling 用 z.enum 校验、枚举外抛中文错；
- * - 文件不存在（或空内容）时先写 `# 裁决留痕` 头再追加；白名单外抛错；原子写回。
+ * - 文件不存在（或空内容）时先写 `# 裁决留痕` 头再追加；白名单外抛错；原子写回；
+ * - 写前 CAS 复核（同 ledger_upsert 口径）：读-改之间留痕被外部改动则抛「裁决留痕已被其他进程修改」且不写入。
  * 追加式留痕：推翻旧裁决请新增条目并引用原 D 编号，不改旧行。
  */
 export function decisionAppend(
@@ -1882,6 +1904,7 @@ export function decisionAppend(
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
+  const before = ledgerFileState(abs); // 记录读时状态，写前复核用
 
   // 扫现有 `D-(\d+)` 取最大编号 +1 续号（3 位零填充）
   let nextNo = 0;
@@ -1897,6 +1920,7 @@ export function decisionAppend(
   // 拼接：文件不存在（或空内容）时带头行；已有内容原样保留（末尾补换行分隔）
   const header = existing.trim() === '' ? '# 裁决留痕\n\n' : '';
   const sep = existing === '' || existing.endsWith('\n') ? '' : '\n';
+  assertLedgerUnchanged(abs, before, '裁决留痕'); // 写前 CAS 复核：被外部改动则响亮报错，不静默丢条目
   atomicWrite(abs, existing + sep + header + row + '\n');
   return { appended: 1, id, path: rel };
 }

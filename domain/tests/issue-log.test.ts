@@ -3,7 +3,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { countBlockers, issueAppend, issueSetStatus, type IssueFinding } from '../src/ledger.js';
 import { makeWorkDir, writeTree } from './helpers.js';
 
@@ -113,6 +113,33 @@ describe('issueAppend', () => {
     const res = issueAppend(work, []);
     expect(res).toEqual({ appended: 0, ids: [], path: 'editorial_notes/issues.md' });
     expect(fs.existsSync(path.join(work, 'editorial_notes', 'issues.md'))).toBe(false);
+  });
+
+  it('读改之间问题日志被外部改写 → 抛「问题日志已被其他进程修改」且不覆盖（CAS 复核）', () => {
+    const work = makeWorkDir();
+    writeTree(work, {
+      'manuscript/第1章.md': '---\ntitle: 第1章\n---\n正文含关键句子。',
+      'editorial_notes/issues.md': '# 问题日志\n\nCR-001 | ch1:1 | MINOR | CONT | "x" | why | fix | LINE | open',
+    });
+    const abs = path.join(work, 'editorial_notes', 'issues.md');
+    const realStat = fs.statSync;
+    let calls = 0;
+    const spy = vi.spyOn(fs, 'statSync').mockImplementation(((p: fs.PathLike) => {
+      calls += 1;
+      if (calls === 2) {
+        // 模拟外部进程在「读旧日志之后、追加写入之前」改写了文件
+        fs.writeFileSync(abs, fs.readFileSync(abs, 'utf8') + '\n<!-- external write -->\n', 'utf8');
+      }
+      return realStat(p);
+    }) as typeof fs.statSync);
+    try {
+      expect(() => issueAppend(work, [finding()])).toThrow(/问题日志已被其他进程修改/);
+      const after = fs.readFileSync(abs, 'utf8');
+      expect(after).toContain('external write'); // 外部改写内容原样保留
+      expect(after).not.toContain('CR-002'); // 本次追加未写入（不静默丢/不覆盖）
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

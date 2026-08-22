@@ -46,20 +46,24 @@
   let applying = $state(false);
   let rounds = $state<Array<{ instruction: string; text: string }>>([]);
   let seq = 0;
+  /** 在飞打磨的 AbortController：Esc / 关浮层 / 组件卸载时 abort 底层流（缺陷修复）。 */
+  let polishAbort: AbortController | null = null;
+  /** 组件是否已销毁：迟到 resolve 的结果不得写回已销毁组件。 */
+  let disposed = false;
 
   // Esc 关浮层；click outside 落在 mousedown 阶段判断（输入框/按钮/浮层自身内吞掉）
   onMount(() => {
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') {
         e.stopPropagation();
-        onClose();
+        requestClose();
       }
     };
     const onDocMouseDown = (e: MouseEvent): void => {
       const t = e.target as Node | null;
       if (!t) return;
       if (rootEl?.contains(t)) return; // 浮层内：吞掉
-      onClose();
+      requestClose();
     };
     window.addEventListener('keydown', onKey);
     // capture 阶段拦截，绕过编辑器内 mousedown 的 preventDefault；只对浮层外有效
@@ -67,15 +71,25 @@
     return () => {
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('mousedown', onDocMouseDown, true);
+      // 卸载兜底：abort 在飞流 + 标记销毁（迟到结果不再写入）
+      disposed = true;
+      polishAbort?.abort();
     };
   });
+
+  /** 统一关浮层入口：先 abort 底层打磨流再回调 onClose（× 按钮 / Esc / 点外部共用）。 */
+  function requestClose(): void {
+    polishAbort?.abort();
+    onClose();
+  }
 
   // 打开即生成第一版（提交改写时已带首次指令；空指令=润色）
   $effect(() => {
     if (cands.length === 0 && !polishing) void polish();
   });
 
-  /** 打磨：带指令=按指令出新版；空指令=换一版（与上一版风格/节奏明显不同）。 */
+  /** 打磨：带指令=按指令出新版；空指令=换一版（与上一版风格/节奏明显不同）。
+   *  缺陷修复：本地 AbortController 接取消；迟到 resolve 不写已销毁组件。 */
   async function polish(): Promise<void> {
     if (polishing) return;
     const ask = instruction.trim();
@@ -87,18 +101,25 @@
     polishing = true;
     progress = 0;
     draft = '';
-    const text = await candidates.rewriteText(original, variant, (t) => {
-      progress = t.length;
-      draft = t; // 增量追加显示（30–50ms 批次）
-    }, work.workDir);
-    polishing = false;
-    draft = '';
-    if (text === null) return;
-    seq += 1;
-    rounds = appendPolishRound(rounds, polishInstruction(ask, variant), text);
-    cands = [...cands, { id: seq, text, label: `候选 ${cn(cands.length + 1)}` }];
-    active = cands.length - 1;
-    instruction = '';
+    const ac = new AbortController();
+    polishAbort = ac;
+    try {
+      const text = await candidates.rewriteText(original, variant, (t) => {
+        progress = t.length;
+        draft = t; // 增量追加显示（30–50ms 批次）
+      }, work.workDir, ac.signal);
+      if (disposed || ac.signal.aborted) return; // Esc/关浮层后迟到 resolve：不写候选、不报错
+      if (text === null) return;
+      seq += 1;
+      rounds = appendPolishRound(rounds, polishInstruction(ask, variant), text);
+      cands = [...cands, { id: seq, text, label: `候选 ${cn(cands.length + 1)}` }];
+      active = cands.length - 1;
+      instruction = '';
+    } finally {
+      polishAbort = null;
+      polishing = false;
+      if (!disposed) draft = '';
+    }
   }
 
   function cn(n: number): string {
@@ -157,7 +178,7 @@
         <button class="tab">候选 一</button>
       {/if}
     </div>
-    <button class="icon-btn" onclick={onClose} title="关闭浮层 (Esc)" aria-label="关闭浮层">{@html iconSvg('close', 14, 2)}</button>
+    <button class="icon-btn" onclick={requestClose} title="关闭浮层 (Esc)" aria-label="关闭浮层">{@html iconSvg('close', 14, 2)}</button>
   </div>
 
   <div class="src">

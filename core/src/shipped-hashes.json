@@ -1,0 +1,44 @@
+{
+  "chat.md": [
+    "2e2423392e39c7f14d29bdf7332891298301264f012374480ff763588f3e786f"
+  ],
+  "review.md": [
+    "e8ab170942a3a3fda45868495b09b7487adb87b8c6ba9833cda839a10976aab4"
+  ],
+  "rewrite.md": [
+    "ab31aa8f7a892804448e260e6bf1dbd4513c93f7e81e5f76c41fc80956f3f813"
+  ],
+  "cold-read.md": [
+    "6dc469e6bea50583285f2d7bb74206cba9ada8bf2412ae4958e76bd4df5043ea"
+  ],
+  "collide.md": [
+    "75e5129aecac690a44197f2465139b1915b3b758d5a9896ff21b34b201e86e89"
+  ],
+  "continue.md": [
+    "b3c9423011b28157aca55229a9fd80c09ebf1b9d4845388cd74f55b947fec7f1"
+  ],
+  "skill-deai-polish.md": [
+    "f9886cdb187e6a4cbc81ae48337314877aca328e374662ec9fd6935a53f8b3e3"
+  ],
+  "skill-chapter-checkup.md": [
+    "0b02230c697cc3ff50dda92fd2064b78b1a4c240bd75a0efdb25fb1981e9ca1f"
+  ],
+  "personas/责编.md": [
+    "5c19744324798e8d7e025fcb75795bab31cdb75479e60f774555f6e2effefe33"
+  ],
+  "personas/讨论陪练.md": [
+    "b90ae19aa864f2b0b17e5fa96068edf0b7704636c5b6bfa6bf8aed52fa458f6b"
+  ],
+  "personas/毒舌书评人.md": [
+    "44b1128afdfc34f6a1b834201ce2912ad5f7b89c9fae09da7e76fb2bcbcd18d2"
+  ],
+  "personas/小白读者.md": [
+    "a9be34abf0403beeee960a51715857ccab81b0b95e770106f3ab9a10335a706d"
+  ],
+  "schemes/结构对抗型.md": [
+    "670e5c5d9f2f452768ffb4722233027bdfb06605e74ec193b3afc48906a42437"
+  ],
+  "schemes/体验优先型.md": [
+    "76a944bad8d5a4ec415c7b84cb773239f6146f3bcde31d739b87ec6572f77240"
+  ]
+}

@@ -183,11 +183,11 @@ describe('ReviewStore', () => {
     const s = new ReviewStore();
     s.init(mockClient(callTool), 'C:/works/demo');
     await s.run();
-    expect(callTool).toHaveBeenCalledWith('scan_quality', { workDir: 'C:/works/demo' });
+    expect(callTool).toHaveBeenCalledWith('scan_quality', { workDir: 'C:/works/demo' }, expect.objectContaining({ signal: expect.any(AbortSignal) }));
     expect(callTool).toHaveBeenCalledWith('ledger_diagnostics', {
       workDir: 'C:/works/demo',
       issueLogPath: ISSUE_LOG_DEFAULT,
-    });
+    }, expect.objectContaining({ signal: expect.any(AbortSignal) }));
     expect(s.report).not.toBeNull();
     expect(s.blockerTotal).toBe(2);
     expect(s.hasBlockers).toBe(true);
@@ -248,7 +248,7 @@ describe('ReviewStore', () => {
     const before = s.blockerTotal;
 
     await s.runPremium('manuscript/卷一/第1章.md');
-    expect(review).toHaveBeenCalledWith('C:/works/demo', 'manuscript/卷一/第1章.md');
+    expect(review).toHaveBeenCalledWith('C:/works/demo', 'manuscript/卷一/第1章.md', undefined, expect.objectContaining({ signal: expect.any(AbortSignal) }));
     const row = s.report!.chapters.find((c) => c.relPath === 'manuscript/卷一/第1章.md')!;
     expect(row.premium).toHaveLength(1);
     expect(row.premium[0]!.severity).toBe('BLOCKER');
@@ -271,7 +271,7 @@ describe('ReviewStore', () => {
     work.workDir = 'C:/works/demo';
     await scheme.load(); // activeScheme='S' → review 通道 persona='刺猬'
     await s.runPremium('manuscript/卷一/第1章.md');
-    expect(review).toHaveBeenCalledWith('C:/works/demo', 'manuscript/卷一/第1章.md', '刺猬');
+    expect(review).toHaveBeenCalledWith('C:/works/demo', 'manuscript/卷一/第1章.md', '刺猬', expect.objectContaining({ signal: expect.any(AbortSignal) }));
   });
 
   it('runPremium：不先跑便宜档也能单独展示贵档结果', async () => {
@@ -399,7 +399,7 @@ describe('ReviewStore 处置闭环', () => {
       issueLogPath: ISSUE_LOG_DEFAULT,
       id: 'cr-1',
       status: 'done',
-    });
+    }, { signal: expect.any(AbortSignal) });
     expect(s.disposalOf('manuscript/卷一/第1章.md', 0)).toBe('done');
     expect(s.blockerTotal).toBe(0); // 本地 BLOCKER 计数减一
     expect(s.running).toBe(false);
@@ -417,7 +417,7 @@ describe('ReviewStore 处置闭环', () => {
 
     const ok = await s.dispose('manuscript/第1章.md', 0, 'known');
     expect(ok).toBe(true);
-    expect(callTool).toHaveBeenCalledWith('issue_set_status', expect.objectContaining({ id: 'cr-k', status: 'known' }));
+    expect(callTool).toHaveBeenCalledWith('issue_set_status', expect.objectContaining({ id: 'cr-k', status: 'known' }), { signal: expect.any(AbortSignal) });
     expect(s.disposalOf('manuscript/第1章.md', 0)).toBe('known');
     expect(s.blockerTotal).toBe(0); // MAJOR 处置不减 BLOCKER 计数
   });
@@ -472,5 +472,216 @@ describe('ReviewStore 处置闭环', () => {
     expect(work.error).toContain('domain MCP 未连接');
     expect(s.disposalOf('manuscript/第1章.md', 0)).toBeUndefined();
     expect(s.blockerTotal).toBe(1); // 失败不扣减
+  });
+  it('dispose：取消后静默返回 false，不进红条，锁释放', async () => {
+    let release!: () => void;
+    const callTool = vi.fn((name: string) => {
+      if (name === 'issue_set_status') return new Promise<{ ok: boolean }>((r) => (release = () => r({ ok: true })));
+      return Promise.resolve(name === 'scan_quality' ? scanFixture() : diagFixture());
+    });
+    const reviewFn = vi.fn().mockResolvedValue({
+      findings: [{ severity: 'BLOCKER', quote: 'q', why: 'w' }],
+      persisted: { appended: 1, ids: ['cr-c'] },
+    });
+    const s = new ReviewStore();
+    s.init(mockClient(callTool, reviewFn), 'd');
+    await s.runPremium('manuscript/第1章.md');
+
+    const p = s.dispose('manuscript/第1章.md', 0, 'done');
+    await vi.waitFor(() => expect(callTool).toHaveBeenCalledWith('issue_set_status', expect.anything(), expect.anything()));
+    s.cancel();
+    expect(await p).toBe(false);
+    release();
+    expect(work.error).toBeNull(); // 取消不算失败
+    expect(s.disposalOf('manuscript/第1章.md', 0)).toBeUndefined();
+  });
+});
+
+// ---------- R5：取消 / 分级 / 部分成功 ----------
+
+describe('ReviewStore 取消', () => {
+  it('run 中取消：锁立即释放、不进红条，迟到的结果不进报告', async () => {
+    let resolveScan!: (v: WorkScanResult) => void;
+    const callTool = vi.fn((name: string) => {
+      if (name === 'scan_quality') return new Promise<WorkScanResult>((r) => (resolveScan = r));
+      return Promise.resolve(diagFixture());
+    });
+    const s = new ReviewStore();
+    s.init(mockClient(callTool), 'd');
+    const p = s.run();
+    await vi.waitFor(() => expect(callTool).toHaveBeenCalled());
+    s.cancel();
+    await p;
+    expect(s.running).toBe(false);
+    expect(s.error).toBeNull();
+    expect(work.error).toBeNull();
+    // 迟到 resolve 不得改写状态
+    resolveScan(scanFixture());
+    await new Promise((r) => setTimeout(r, 0));
+    expect(s.report).toBeNull();
+  });
+
+  it('runPremium 中取消：锁释放、无红条，报告不变', async () => {
+    let resolveReview!: (v: { findings: PremiumFinding[] }) => void;
+    const reviewFn = vi.fn(
+      () => new Promise<{ findings: PremiumFinding[] }>((r) => (resolveReview = r)),
+    );
+    const s = new ReviewStore();
+    s.init(mockClient(vi.fn(), reviewFn), 'd');
+    const p = s.runPremium('manuscript/第1章.md');
+    await vi.waitFor(() => expect(reviewFn).toHaveBeenCalled());
+    s.cancel();
+    await p;
+    expect(s.running).toBe(false);
+    expect(s.error).toBeNull();
+    expect(s.report).toBeNull();
+    resolveReview({ findings: [{ severity: 'BLOCKER', quote: 'q', why: 'w' }] });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(s.report).toBeNull(); // 迟到的贵档结果被忽略
+  });
+
+  it('后台态取消入口：面板关着也能 cancel（close 不终止扫描，重开 toggle 不重跑）', async () => {
+    let resolveScan!: (v: WorkScanResult) => void;
+    const callTool = vi.fn((name: string) => {
+      if (name === 'scan_quality') return new Promise<WorkScanResult>((r) => (resolveScan = r));
+      return Promise.resolve(diagFixture());
+    });
+    const s = new ReviewStore();
+    s.init(mockClient(callTool), 'd');
+    void s.toggle(); // 开视图并开跑
+    await vi.waitFor(() => expect(s.running).toBe(true));
+    s.close(); // 关掉面板：扫描继续
+    expect(s.running).toBe(true);
+    await s.toggle(); // 重开：只看进度，不重跑
+    expect(callTool).toHaveBeenCalledTimes(2); // scan + diag 各一次，未追加
+    s.cancel();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(s.running).toBe(false);
+  });
+});
+
+describe('ReviewStore 部分成功（逐项结算）', () => {
+  it('scan 失败 diag 成功：报告由 diag 出，失败项带错误信息，不进全局红条', async () => {
+    const callTool = vi.fn((name: string) =>
+      name === 'scan_quality' ? Promise.reject(new Error('domain 僵死')) : Promise.resolve(diagFixture({ blockerCount: 1 })),
+    );
+    const s = new ReviewStore();
+    s.init(mockClient(callTool), 'd');
+    await s.run();
+    expect(s.items.scan).toEqual({ status: 'fail', error: 'domain 僵死' });
+    expect(s.items.diag).toEqual({ status: 'ok' });
+    expect(s.error).toBeNull(); // 部分成功不算整体失败
+    expect(work.error).toBeNull();
+    expect(s.report).not.toBeNull();
+    expect(s.report!.issueLogBlockers).toBe(1);
+    expect(s.running).toBe(false);
+  });
+
+  it('scan 成功 diag 失败：逐章指标照常出，diag 失败项带错误信息', async () => {
+    const callTool = vi.fn((name: string) =>
+      name === 'scan_quality' ? Promise.resolve(scanFixture()) : Promise.reject(new Error('账本读取超时')),
+    );
+    const s = new ReviewStore();
+    s.init(mockClient(callTool), 'd');
+    await s.run();
+    expect(s.items.scan).toEqual({ status: 'ok' });
+    expect(s.items.diag).toEqual({ status: 'fail', error: '账本读取超时' });
+    expect(s.report!.chapters.map((c) => c.relPath)).toContain('manuscript/卷一/第1章.md');
+    expect(s.running).toBe(false);
+  });
+
+  it('全失败：保持旧口径——面板红条 + work.error 红条 + report 不变 + 锁释放', async () => {
+    const callTool = vi.fn().mockRejectedValue(new Error('core 掉线'));
+    const s = new ReviewStore();
+    s.init(mockClient(callTool), 'd');
+    await s.run();
+    expect(s.items.scan?.status).toBe('fail');
+    expect(s.items.diag?.status).toBe('fail');
+    expect(s.error).toContain('审阅扫描失败');
+    expect(work.error).toContain('审阅扫描失败');
+    expect(s.report).toBeNull();
+    expect(s.running).toBe(false);
+  });
+
+  it('落盘失败可见：review 带 persistedError → store.persistError 透出；下次跑前清', async () => {
+    const reviewFn = vi.fn().mockResolvedValue({
+      findings: [{ severity: 'MAJOR', quote: 'q', why: 'w' }],
+      persistedError: 'issue_append 落盘超时（超过 30 秒）',
+    });
+    const s = new ReviewStore();
+    s.init(mockClient(vi.fn(), reviewFn), 'd');
+    await s.runPremium('manuscript/第1章.md');
+    expect(s.persistError).toContain('落盘超时');
+
+    reviewFn.mockResolvedValueOnce({ findings: [] }); // 下次跑前清
+    await s.runPremium('manuscript/第2章.md');
+    expect(s.persistError).toBeNull();
+  });
+});
+
+describe('ReviewStore 分级扫描（R5）', () => {
+  it('quick 档：只调 scan_quality，diag 标 skipped', async () => {
+    const callTool = vi.fn((name: string) =>
+      Promise.resolve(name === 'scan_quality' ? scanFixture() : diagFixture()),
+    );
+    const s = new ReviewStore();
+    s.level = 'quick';
+    s.init(mockClient(callTool), 'd');
+    await s.run();
+    expect(callTool).toHaveBeenCalledTimes(1);
+    expect(callTool).toHaveBeenCalledWith('scan_quality', { workDir: 'd' }, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(s.items.scan).toEqual({ status: 'ok' });
+    expect(s.items.diag).toEqual({ status: 'skipped' });
+  });
+
+  it('standard 档（默认）：scan_quality + ledger_diagnostics 都跑', async () => {
+    const callTool = vi.fn((name: string) =>
+      Promise.resolve(name === 'scan_quality' ? scanFixture() : diagFixture()),
+    );
+    const s = new ReviewStore();
+    expect(s.level).toBe('standard'); // 默认档=现状行为
+    s.init(mockClient(callTool), 'd');
+    await s.run();
+    expect(callTool).toHaveBeenCalledTimes(2);
+  });
+
+  it('deep 档：确定性检查完成后自动对当前章追加贵档冷读', async () => {
+    const callTool = vi.fn((name: string) =>
+      Promise.resolve(name === 'scan_quality' ? scanFixture() : diagFixture()),
+    );
+    const reviewFn = vi.fn().mockResolvedValue({
+      findings: [{ severity: 'BLOCKER', quote: '他死了。', why: '与账本冲突' }],
+    });
+    const s = new ReviewStore();
+    s.level = 'deep';
+    s.init(mockClient(callTool, reviewFn), 'C:/works/demo');
+    work.current = { relPath: 'manuscript/卷一/第1章.md', title: '第1章', frontmatter: {}, frontmatterRaw: '', savedMd: '' };
+    try {
+      await s.run();
+      expect(callTool).toHaveBeenCalledTimes(2);
+      expect(reviewFn).toHaveBeenCalledWith('C:/works/demo', 'manuscript/卷一/第1章.md', undefined, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+      expect(s.mode).toBe('premium');
+      const row = s.report!.chapters.find((c) => c.relPath === 'manuscript/卷一/第1章.md')!;
+      expect(row.premium).toHaveLength(1);
+      expect(s.running).toBe(false);
+    } finally {
+      work.current = null;
+    }
+  });
+
+  it('deep 档无当前章：确定性结果照常出，面板提示需先打开章节', async () => {
+    const callTool = vi.fn((name: string) =>
+      Promise.resolve(name === 'scan_quality' ? scanFixture() : diagFixture()),
+    );
+    const reviewFn = vi.fn();
+    const s = new ReviewStore();
+    s.level = 'deep';
+    s.init(mockClient(callTool, reviewFn), 'd');
+    work.current = null;
+    await s.run();
+    expect(reviewFn).not.toHaveBeenCalled();
+    expect(s.error).toContain('深度档需要先打开一个章节');
+    expect(s.report).not.toBeNull();
+    expect(s.running).toBe(false);
   });
 });

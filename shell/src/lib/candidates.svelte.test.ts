@@ -549,3 +549,128 @@ describe('CandidatesStore · 批量采纳部分失败不中断（逐条收集 + 
     expect(store.busy).toBe(false);
   });
 });
+
+describe('CandidatesStore · 取消管道（续写 / 流式生成 / 批量整改）', () => {
+  it('continueFromChapter：abortContinue 取消 → signal 中止、continuing 复位、迟到完成也不落候选不报错', async () => {
+    const signals: AbortSignal[] = [];
+    let finish!: () => void;
+    // 模拟 postSse 的取消语义：abort 后流干净收尾（正常 resolve，无 error）
+    const continueText = vi.fn().mockImplementation((_b: unknown, _h: unknown, signal?: AbortSignal) => {
+      signals.push(signal!);
+      return new Promise<void>((resolve) => { finish = resolve; });
+    });
+    const createCandidate = vi.fn();
+    const store = new CandidatesStore();
+    store.init(clientOf({ continueText, createCandidate }));
+    work.current = { relPath: '章节A.md', title: '章节A', frontmatter: {}, frontmatterRaw: '', savedMd: '正文' };
+    work.registerEditor({ getMd: () => '当前正文', applyEdit: () => 'ok', appendMd: () => 'ok', replaceBodyMd: () => 'ok' });
+
+    const p = store.continueFromChapter();
+    expect(store.continuing).toBe(true);
+    expect(signals[0]).toBeInstanceOf(AbortSignal); // 续写请求已接 signal
+    store.abortContinue();
+    finish(); // 迟到完成：abort 后流才收尾
+    expect(await p).toBe(false);
+    expect(signals[0]!.aborted).toBe(true);
+    expect(store.continuing).toBe(false); // 取消释放锁死
+    expect(createCandidate).not.toHaveBeenCalled(); // 取消后不落候选
+    expect(work.error).toBeNull(); // 取消不算失败，不打红条
+    // 复位后可再次发起（不再永久锁死）
+    const p2 = store.continueFromChapter();
+    expect(store.continuing).toBe(true);
+    expect(continueText).toHaveBeenCalledTimes(2);
+    store.abortContinue();
+    finish();
+    expect(await p2).toBe(false);
+  });
+
+  it('createFromSelection：abortGenerate 取消 → 不落候选、无红条、generating 复位', async () => {
+    const signals: AbortSignal[] = [];
+    let finish!: () => void;
+    const rewriteStream = vi.fn().mockImplementation((_b: unknown, _h: RewriteStreamHandlers, signal?: AbortSignal) => {
+      signals.push(signal!);
+      return new Promise<void>((resolve) => { finish = resolve; });
+    });
+    const createCandidate = vi.fn();
+    const store = new CandidatesStore();
+    store.init(clientOf({ rewriteStream, createCandidate }));
+
+    const p = store.createFromSelection('章节A.md', '原文X', '润色');
+    expect(store.generating).not.toBeNull();
+    store.abortGenerate();
+    finish();
+    expect(await p).toBe(false);
+    expect(signals[0]!.aborted).toBe(true);
+    expect(store.generating).toBeNull();
+    expect(createCandidate).not.toHaveBeenCalled();
+    expect(work.error).toBeNull();
+  });
+
+  it('rectifyTargets：单条整改失败逐条可见、不阻塞其余条目、busy 正常复位', async () => {
+    let calls = 0;
+    const rewriteStream = vi.fn().mockImplementation(async (_b: unknown, h: RewriteStreamHandlers) => {
+      calls += 1;
+      if (calls === 1) {
+        h.onError?.(new Error('输出护栏拒绝'));
+        return;
+      }
+      h.onDelta?.('整改后文本');
+      h.onDone?.({ text: '整改后文本' });
+    });
+    const patchCandidate = vi.fn().mockResolvedValue({ candidate: CAND });
+    const client = clientOf({ rewriteStream, patchCandidate });
+    const store = new CandidatesStore();
+    store.init(client);
+    store.items = [CAND, { ...CAND, id: 'c2' }];
+    store.toggleSelect('c1');
+    store.toggleSelect('c2');
+    await store.rectifySelected('换成爽文节奏');
+    expect(calls).toBe(2); // 第 1 条失败后第 2 条照常发起
+    expect(patchCandidate).toHaveBeenCalledTimes(1);
+    expect(patchCandidate).toHaveBeenCalledWith('c2', { proposed: '整改后文本', instruction: '润色 / 整改：换成爽文节奏' });
+    expect(work.error).toContain('第 1 条整改失败');
+    expect(work.error).toContain('输出护栏拒绝');
+    expect(store.items[0]?.proposed).toBe('改写X'); // 失败条目保留原 proposed
+    expect(store.items[1]?.proposed).toBe('整改后文本'); // 成功条目照常更新
+    expect(store.busy).toBe(false);
+    expect(store.rectifying).toBe(false);
+  });
+
+  it('rectifyTargets：abortRectify 取消 → 剩余条目不再发起、在飞条目不落库、busy 复位', async () => {
+    const signals: AbortSignal[] = [];
+    let release!: (h: RewriteStreamHandlers) => void;
+    const rewriteStream = vi.fn().mockImplementation((_b: unknown, h: RewriteStreamHandlers, signal?: AbortSignal) => {
+      signals.push(signal!);
+      if (signals.length === 1) {
+        return new Promise<void>((resolve) => { release = (hh) => { hh.onDone?.({ text: '部分文本' }); resolve(); }; });
+      }
+      return Promise.resolve();
+    });
+    const patchCandidate = vi.fn().mockResolvedValue({ candidate: CAND });
+    const client = clientOf({ rewriteStream, patchCandidate });
+    const store = new CandidatesStore();
+    store.init(client);
+    store.items = [CAND, { ...CAND, id: 'c2' }];
+    store.toggleSelect('c1');
+    store.toggleSelect('c2');
+
+    const p = store.rectifySelected('加细节');
+    expect(store.rectifying).toBe(true);
+    store.abortRectify(); // 第 1 条仍在飞时取消
+    release({ onDelta: () => {}, onDone: () => {} }); // 迟到完成
+    await p;
+    expect(signals[0]!.aborted).toBe(true);
+    expect(rewriteStream).toHaveBeenCalledTimes(1); // 第 2 条未发起
+    expect(patchCandidate).not.toHaveBeenCalled(); // 在飞条目取消后不落库
+    expect(store.busy).toBe(false);
+    expect(store.rectifying).toBe(false);
+  });
+
+  it('abortContinue / abortRectify 无在飞任务时安全 no-op', () => {
+    const store = new CandidatesStore();
+    store.init(clientOf());
+    expect(() => store.abortContinue()).not.toThrow();
+    expect(() => store.abortGenerate()).not.toThrow();
+    expect(() => store.abortRectify()).not.toThrow();
+  });
+});

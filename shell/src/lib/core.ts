@@ -10,6 +10,21 @@ import type { Candidate, SessionRow, StoredMessage } from './types.js';
 const API_PREFIX = '/v1';
 
 /**
+ * request 默认超时（毫秒）：与 core 侧确定性工具超时口径协调（30s 量级），
+ * 长任务（review / stats 扫描等）由调用方经 opts 覆盖或传显式 signal 取消。
+ */
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
+/** boot 握手专用短超时：core 进程活着但 HTTP 僵死时启动页能报错而不是永转。 */
+const HEALTH_TIMEOUT_MS = 5_000;
+
+/** request 的可选控制（可选参数加法，不影响既有调用）：timeoutMs 覆盖默认超时；signal 由调用方持有用于取消。 */
+export interface RequestOptions {
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+/**
  * 网络层失败（fetch 连不上 / 流中途断连）专用错误：区别于业务 4xx/5xx 响应。
  * 错误信息自带可行动提示（core 可能已退出），让 chat / work 的错误展示不用逐处拼；
  * 业务错误（SSE error 事件、HTTP 状态码）走普通 Error，不带这句。
@@ -147,46 +162,77 @@ export class CoreClient {
     private readonly token: string,
   ) {}
 
-  private async request<T>(path: string, init?: RequestInit): Promise<T> {
-    let res: Response;
+  private async request<T>(path: string, init?: RequestInit, opts?: RequestOptions): Promise<T> {
+    const timeoutMs = opts?.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    const ac = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      ac.abort();
+    }, timeoutMs);
+    // 调用方显式 signal（如 review 取消）：透传进内部 controller，超时与取消共用一条 abort 通道
+    const onOuterAbort = (): void => ac.abort(opts?.signal?.reason);
+    if (opts?.signal) {
+      if (opts.signal.aborted) onOuterAbort();
+      else opts.signal.addEventListener('abort', onOuterAbort, { once: true });
+    }
     try {
-      res = await fetch(this.baseUrl + path, {
-        ...init,
-        headers: { Authorization: `Bearer ${this.token}`, ...init?.headers },
-      });
-    } catch (err) {
-      // 连不上 / DNS 失败等网络层错误：带可行动提示（core 可能已退出）
-      throw new CoreNetworkError(err);
+      let res: Response;
+      try {
+        res = await fetch(this.baseUrl + path, {
+          ...init,
+          signal: ac.signal,
+          headers: { Authorization: `Bearer ${this.token}`, ...init?.headers },
+        });
+      } catch (err) {
+        // 调用方取消 / 超时：抛清晰错误（区别于连不上的网络层错误）
+        if (opts?.signal?.aborted) throw new Error('请求已取消');
+        if (timedOut) throw new Error(`请求超时（超过 ${Math.round(timeoutMs / 1000)} 秒无响应）`);
+        // 连不上 / DNS 失败等网络层错误：带可行动提示（core 可能已退出）
+        throw new CoreNetworkError(err);
+      }
+      let body: unknown;
+      try {
+        body = await res.json();
+      } catch (err) {
+        // 响应体读取阶段被取消/超时中断：同上抛清晰错误；其余（空响应等）按原口径回落 {}
+        if (opts?.signal?.aborted) throw new Error('请求已取消');
+        if (timedOut) throw new Error(`请求超时（超过 ${Math.round(timeoutMs / 1000)} 秒无响应）`);
+        void err;
+        body = {};
+      }
+      if (!res.ok) {
+        const msg = (body as { error?: string }).error ?? `${res.status} ${res.statusText}`;
+        throw new Error(msg);
+      }
+      return body as T;
+    } finally {
+      clearTimeout(timer);
+      if (opts?.signal) opts.signal.removeEventListener('abort', onOuterAbort);
     }
-    const body: unknown = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      const msg = (body as { error?: string }).error ?? `${res.status} ${res.statusText}`;
-      throw new Error(msg);
-    }
-    return body as T;
   }
 
   async health(): Promise<{ ok: boolean; version: string; protocol?: number }> {
-    const res = await fetch(`${this.baseUrl}${API_PREFIX}/health`);
-    if (!res.ok) throw new Error(`core 健康检查失败: ${res.status}`);
-    return (await res.json()) as { ok: boolean; version: string; protocol?: number };
+    // boot 握手走短超时：HTTP 僵死时启动页 5s 内报错，不再永转
+    return this.request(`${API_PREFIX}/health`, undefined, { timeoutMs: HEALTH_TIMEOUT_MS });
   }
 
-  /** 调 domain 工具（经 core 代理）。失败抛出带服务端 message 的 Error。 */
-  callTool<T>(name: string, args: Record<string, unknown>): Promise<T> {
+  /** 调 domain 工具（经 core 代理）。失败抛出带服务端 message 的 Error。
+   *  长任务工具（scan_quality / word_count 等全量遍历）可传 opts 放大超时或带取消 signal。 */
+  callTool<T>(name: string, args: Record<string, unknown>, opts?: RequestOptions): Promise<T> {
     return this.request<T>(`${API_PREFIX}/tools/${encodeURIComponent(name)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(args),
-    });
+    }, opts);
   }
 
-  recordStatsSnapshot(workDir: string): Promise<StatsSnapshot> {
+  recordStatsSnapshot(workDir: string, opts?: RequestOptions): Promise<StatsSnapshot> {
     return this.request(`${API_PREFIX}/stats/snapshot`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ workDir }),
-    });
+    }, opts);
   }
 
   getDailyStats(workDir: string): Promise<DailyStats> {
@@ -204,12 +250,13 @@ export class CoreClient {
     workDir: string,
     chapterRelPath: string,
     persona?: string,
+    opts?: RequestOptions,
   ): Promise<{ findings: ReviewFinding[]; persisted?: { appended: number; ids: string[] } }> {
     return this.request(`${API_PREFIX}/review`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ workDir, chapterRelPath, ...(persona ? { persona } : {}) }),
-    });
+    }, opts);
   }
 
   /** 角色与方案（GET /v1/posture，决策 0010）：personas/schemes/activeScheme；workDir 省略时不筛。 */
@@ -369,6 +416,7 @@ export class CoreClient {
     let buf = '';
     const batcher = new DeltaBatcher(onDelta);
     let aborted = false;
+    let sawTerminal = false; // 收到 done/error 帧才算干净收尾
     const onAbort = (): void => {
       aborted = true;
       reader.cancel().catch(() => {});
@@ -396,6 +444,7 @@ export class CoreClient {
             const delta = frame.data as { text?: string; delta?: string };
             batcher.push(String(delta.text ?? delta.delta ?? ''));
           } else {
+            if (frame.event === 'done' || frame.event === 'error') sawTerminal = true;
             onEvent(frame.event, frame.data, () => batcher.flushNow());
           }
         }
@@ -404,6 +453,10 @@ export class CoreClient {
     } finally {
       if (signal) signal.removeEventListener('abort', onAbort);
       batcher.dispose(); // 兜底 flush，末尾不丢 token
+    }
+    // 干净断尾（core 关连但没发 done/error）不算成功：静默当成功会让调用方卡死零信号
+    if (!aborted && !sawTerminal) {
+      throw new Error('SSE 流在完成前被关闭（未收到 done/error 帧）');
     }
   }
 }

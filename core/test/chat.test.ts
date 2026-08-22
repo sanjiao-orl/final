@@ -1246,6 +1246,147 @@ describe('/v1/chat SSE 管道', () => {
     }
   });
 
+  it('契约层预算：skill 清单超 2000 字符 → 截断加省略标注（不再零预算零截断）', async () => {
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model });
+    const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'core-chat-skills-'));
+    fs.mkdirSync(path.join(workDir, '.novel', 'skills'), { recursive: true });
+    const bigDescription = '长'.repeat(3_000);
+    fs.writeFileSync(
+      path.join(workDir, '.novel', 'skills', 'big.md'),
+      `---\nkind: skill\nname: 大技能\ndescription: ${bigDescription}\n---\n正文`,
+      'utf8'
+    );
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: 'hi', workDir });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      const sysText = promptText(sys!);
+      expect(sysText).toContain('## 可用 skill');
+      expect(sysText).toContain('…（skill 清单超 2000 字符，已截断）');
+      // 截断按整段清单字符数计（app 级预置 skill 行在前，精确余量随环境变）：大段正文只保留前缀片段
+      expect(sysText.includes('长'.repeat(1_000))).toBe(true);
+      expect(sysText.includes('长'.repeat(2_501))).toBe(false);
+    } finally {
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('姿态层预算：persona 正文超 2000 字符 → 截断加省略标注', async () => {
+    const workDir = makeWorkDir();
+    fs.mkdirSync(path.join(workDir, '.novel', 'personas'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workDir, '.novel', 'personas', '大角色.md'),
+      `---\nkind: persona\nname: 大角色\n---\n${'角'.repeat(3_000)}`,
+      'utf8'
+    );
+    const model = stepModel([textResult(['好的。'])]);
+    const s = await startTestServer({ modelForTier: () => model });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: 'hi', workDir, persona: '大角色' });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      const sysText = promptText(sys!);
+      expect(sysText).toContain('## 当前角色');
+      expect(sysText).toContain('…（角色正文超 2000 字符，已截断）');
+      // 截断后正文不超预算上限：2000 连「角」在，2001 连「角」不在
+      expect(sysText.includes('角'.repeat(2_000))).toBe(true);
+      expect(sysText.includes('角'.repeat(2_001))).toBe(false);
+    } finally {
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  /** 永挂直到收到 abort 的账本切片工具（domain 数据层挂起仿真，与 @ai-sdk/mcp 同款中止行为：reject）；记录收到的信号供断言。 */
+  function hangingSliceTools(seen: { abortSignal?: AbortSignal | undefined }): ToolSet {
+    return {
+      ledger_chapter_slice: {
+        description: '按章裁剪账本切片',
+        inputSchema: z.object({ workDir: z.string(), chapterRelPath: z.string() }),
+        execute: async (_input: unknown, options: { abortSignal?: AbortSignal }) => {
+          seen.abortSignal = options?.abortSignal;
+          return new Promise((_resolve, reject) => {
+            options?.abortSignal?.addEventListener('abort', () => reject(options.abortSignal!.reason));
+          });
+        },
+      },
+    } as unknown as ToolSet;
+  }
+
+  it('数据层注入挂起：按独立注入超时降级跳过（不等满 LLM 超时），warn 归因为数据层而非 LLM 请求超时', async () => {
+    vi.stubEnv('DATA_INJECT_TIMEOUT_SECONDS', '0.3');
+    vi.stubEnv('LLM_TIMEOUT_SECONDS', '600');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const workDir = makeWorkDir('## 摘要\n\n冷峻克制。');
+    const seen: { abortSignal?: AbortSignal } = {};
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model, tools: hangingSliceTools(seen) });
+    try {
+      const startedAt = Date.now();
+      const res = await postChat(s.baseUrl, s.token, { text: '这章如何', workDir, chapter: 'manuscript/第1章.md' });
+      expect(res.status).toBe(200);
+      const events = await readSse(res);
+      // 聊天照常完成（done 而非 error），且远快于 LLM 超时——注入挂起只损失该节
+      expect(events.at(-1)!.event).toBe('done');
+      expect(Date.now() - startedAt).toBeLessThan(10_000);
+
+      // 独立注入信号确实送达 MCP 工具调用（@ai-sdk/mcp 透传 abortSignal 的同款入参形态）
+      expect(seen.abortSignal).toBeDefined();
+
+      const warned = warn.mock.calls.map((c) => c.map(String).join(' ')).join('\n');
+      expect(warned).toContain('数据层注入超时');
+      // 误归因口径是「LLM 请求超时（超过 N 秒）」——注入挂起不得再走这个文案
+      expect(warned).not.toMatch(/LLM 请求超时（超过/);
+
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      expect(promptText(sys!)).not.toContain('## 本章账本切片');
+      expect(promptText(sys!)).toContain('## 声口摘要'); // 声口摘要不依赖工具，照常注入
+    } finally {
+      warn.mockRestore();
+      vi.unstubAllEnvs();
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('数据层注入挂起（decision_tail）：同口径独立超时降级，warn 归因数据层', async () => {
+    vi.stubEnv('DATA_INJECT_TIMEOUT_SECONDS', '0.3');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const workDir = makeWorkDir();
+    const tools: ToolSet = {
+      decision_tail: {
+        description: '检索最近裁决摘要',
+        inputSchema: z.object({ workDir: z.string(), limit: z.number().optional() }),
+        execute: async (_input: unknown, options: { abortSignal?: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            options?.abortSignal?.addEventListener('abort', () => reject(options.abortSignal!.reason));
+          }),
+      },
+    } as unknown as ToolSet;
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model, tools });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '碰撞', workDir, mode: 'collide' });
+      expect(res.status).toBe(200);
+      const events = await readSse(res);
+      expect(events.at(-1)!.event).toBe('done');
+      const warned = warn.mock.calls.map((c) => c.map(String).join(' ')).join('\n');
+      expect(warned).toContain('decision_tail');
+      expect(warned).toContain('数据层注入超时');
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      expect(promptText(sys!)).not.toContain('## 讨论沉淀');
+    } finally {
+      warn.mockRestore();
+      vi.unstubAllEnvs();
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
   it('同 session 并发：第二个 409；第一个完成后同会话可再发；不同 session 并发互不影响（P2 在飞锁）', async () => {
     let aborted = 0;
     const s = await startTestServer({ modelForTier: () => hangingModel(() => aborted++) });

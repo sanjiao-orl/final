@@ -4,7 +4,7 @@ import { createServer as createHttpServer, type IncomingMessage, type Server, ty
 import { asSchema, type FlexibleSchema } from 'ai';
 import { z } from 'zod';
 import { handleChatRequest, type ChatDeps } from './chat.js';
-import { describeLlm, getGitCommit } from './config.js';
+import { describeLlm, getGitCommit, getToolTimeoutSeconds } from './config.js';
 import { devPage } from './dev.js';
 import { corsHeadersFor, HttpError, readJsonBody, toPublicErrorMessage, writeJson, writeJson413 } from './http.js';
 import { handleReviewRequest } from './review.js';
@@ -97,7 +97,16 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
 
   // 公开端点（免鉴权）
   if (req.method === 'GET' && pathname === '/v1/health') {
-    writeJson(res, 200, { ok: true, version: deps.version, protocol: PROTOCOL_VERSION, commit: CORE_COMMIT }, req.headers.origin);
+    // MCP 连通状态（缺陷台账 P2）：chat.toolsAvailable 由 main 装配为 domain MCP 真实活性
+    //（管道存活 + 定时活性探测），domain 僵死时这里如实回 connected:false；未装配（无 MCP 场景）不下发字段。
+    const toolsAvailable = deps.chat.toolsAvailable;
+    writeJson(res, 200, {
+      ok: true,
+      version: deps.version,
+      protocol: PROTOCOL_VERSION,
+      commit: CORE_COMMIT,
+      ...(toolsAvailable ? { mcp: { connected: toolsAvailable() } } : {}),
+    }, req.headers.origin);
     return;
   }
   if (req.method === 'GET' && pathname === '/v1/dev') {
@@ -176,10 +185,10 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
     if (!tool?.execute) throw new HttpError(502, 'word_count 工具不可用');
     let result: unknown;
     try {
-      result = await tool.execute({ workDir } as never, {
-        toolCallId: 'stats-snapshot', messages: [], context: undefined,
-      });
+      result = await executeToolGuarded('word_count', 'stats-snapshot', tool.execute, { workDir }, res);
     } catch (err) {
+      // 超时 504/断连 499 已由守卫定型；其余执行失败按原口径包成 502。
+      if (err instanceof HttpError) throw err;
       throw new HttpError(502, `word_count 工具执行失败: ${err instanceof Error ? err.message : String(err)}`);
     }
     const parsed = extractWordCountTotal(result);
@@ -208,11 +217,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
     if (!validated.ok) {
       throw new HttpError(400, '请求体不合法: ' + validated.error);
     }
-    const result: unknown = await tool.execute(validated.value as never, {
-      toolCallId: 'http-proxy',
-      messages: [],
-      context: undefined,
-    });
+    const result: unknown = await executeToolGuarded(name, 'http-proxy', tool.execute, validated.value, res);
     writeJson(res, 200, unwrapToolResult(result), req.headers.origin);
     return;
   }
@@ -257,6 +262,48 @@ function localDate(): string {
   const now = new Date();
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
+/**
+ * 工具执行守卫（/v1/tools/:name 与 /v1/stats/snapshot 共用，缺陷台账 server.ts:195/179）：
+ * 沿用 chat 发送路径同款模式——客户端断连即 abort（body 已被路由层读完，只挂 res 'close'），
+ * 叠加服务端超时强制中止（确定性工具口径 config.getToolTimeoutSeconds，几十秒量级；LLM 长超时另算）。
+ * 超时回 504 带清晰文案；客户端断连回 499 占位（writeJson 对已销毁连接是 no-op，仅作统一错误出口）；其余错误原样上抛。
+ */
+async function executeToolGuarded(
+  name: string,
+  toolCallId: string,
+  execute: unknown,
+  input: unknown,
+  res: ServerResponse
+): Promise<unknown> {
+  const timeoutSeconds = getToolTimeoutSeconds();
+  const timeoutSignal = AbortSignal.timeout(timeoutSeconds * 1000);
+  const disconnect = new AbortController();
+  const onClose = (): void => disconnect.abort();
+  res.once('close', onClose);
+  try {
+    const run = execute as (
+      input: never,
+      options: { toolCallId: string; messages: []; context: undefined; abortSignal: AbortSignal }
+    ) => Promise<unknown>;
+    return await run(input as never, {
+      toolCallId,
+      messages: [],
+      context: undefined,
+      abortSignal: AbortSignal.any([disconnect.signal, timeoutSignal]),
+    });
+  } catch (err) {
+    if (timeoutSignal.aborted) {
+      throw new HttpError(504, `工具 ${name} 执行超时（超过 ${timeoutSeconds} 秒），已中止`);
+    }
+    if (disconnect.signal.aborted) {
+      throw new HttpError(499, '客户端已断连，工具执行已中止');
+    }
+    throw err;
+  } finally {
+    res.off('close', onClose);
+  }
 }
 
 function extractWordCountTotal(result: unknown): number | undefined {

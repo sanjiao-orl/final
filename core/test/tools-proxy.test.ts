@@ -1,6 +1,8 @@
 // 测试：POST /v1/tools/:name —— core 对 domain MCP 工具的 HTTP 代理（壳的数据面）。
-// 覆盖：JSON 文本结果解析回对象、structuredContent 优先、isError → 502、工具缺失/未注入 → 404、非 JSON 文本原样返回。
-import { describe, expect, it } from 'vitest';
+// 覆盖：JSON 文本结果解析回对象、structuredContent 优先、isError → 502、工具缺失/未注入 → 404、非 JSON 文本原样返回、
+// 执行超时 → 504、客户端断连 → abort。
+import * as http from 'node:http';
+import { describe, expect, it, vi } from 'vitest';
 import { jsonSchema, tool, type ToolSet } from 'ai';
 import { z } from 'zod';
 import { startTestServer } from './helpers.js';
@@ -164,6 +166,61 @@ describe('POST /v1/tools/:name 工具代理', () => {
       const body = (await res.json()) as { error: string };
       expect(body.error).not.toContain('C:\\secret');
       expect(body.error).toContain('内部错误');
+    } finally {
+      await s.close();
+    }
+  });
+
+  /** 挂起直到 abortSignal 触发才 reject 的工具（模拟 domain 僵死/请求永挂）。 */
+  function hangingTool(onAbort?: () => void): ToolSet {
+    return {
+      hanging: {
+        execute: (_input: unknown, options: { abortSignal?: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            options.abortSignal?.addEventListener('abort', () => {
+              onAbort?.();
+              reject(options.abortSignal!.reason);
+            });
+          }),
+      },
+    } as unknown as ToolSet;
+  }
+
+  it('execute 挂起超过确定性工具超时 → 504 带清晰文案', async () => {
+    vi.stubEnv('TOOL_TIMEOUT_SECONDS', '0.05');
+    let aborted = false;
+    const s = await startTestServer({ tools: hangingTool(() => { aborted = true; }) });
+    try {
+      const res = await postTool(s.baseUrl, s.token, 'hanging', {});
+      expect(res.status).toBe(504);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain('执行超时');
+      expect(aborted).toBe(true);
+    } finally {
+      await s.close();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('客户端断连 → abort 工具执行（abortSignal 触发），服务端不崩', async () => {
+    let aborted = false;
+    const s = await startTestServer({ tools: hangingTool(() => { aborted = true; }) });
+    try {
+      await new Promise<void>((resolve) => {
+        const req = http.request(
+          `${s.baseUrl}/v1/tools/hanging`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.token}` },
+          },
+          () => resolve()
+        );
+        // 服务端 abort 后销毁 socket，客户端收到 ECONNRESET 也算到达断连路径
+        req.on('error', () => resolve());
+        req.end('{}');
+        setTimeout(() => req.destroy(), 25);
+      });
+      await vi.waitFor(() => expect(aborted).toBe(true));
     } finally {
       await s.close();
     }

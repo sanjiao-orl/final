@@ -1,8 +1,11 @@
 // 模块职责：提示词与 skill 的统一文件机制（docs/decisions/0008）——解析 prompt 根目录、
-// 首次运行把随包缺省文件释放进 app 数据目录（缺才拷、永不覆盖）、按 kind 加载提示词正文、扫描 skill 清单。
+// 首次运行把随包缺省文件释放进 app 数据目录（缺才拷；已有但作者未改过的按 hash 清单升级为新版，
+// 本地改过的永不覆盖）、按 kind 加载提示词正文、扫描 skill 清单。
 // 单一事实源是 md 文件；文件缺失/损坏回退一行兜底提示，不崩。prompt 按 mtime 热重载（改文件即生效），skill 每次现扫。
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
+import shippedHashes from './shipped-hashes.json' with { type: 'json' };
 
 export type PromptKind = 'chat' | 'review' | 'rewrite' | 'cold_read' | 'collide' | 'continue';
 
@@ -52,17 +55,80 @@ export interface PromptFile {
 /** 匹配文件开头的 `---` 包裹块；无 frontmatter 时 body 即全文、hasFrontmatter=false。 */
 const FM_RE = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 
-/** 解析提示词/skill 文件的简单 frontmatter（key: value 每行一个）。 */
+/** 单行键值：`key: value`（key 字母开头，字母数字下划线连字符）。 */
+const KV_RE = /^([A-Za-z_][A-Za-z0-9_-]*):[ \t]*(.*)$/;
+
+/** 块标量头：`key: |` / `key: >`（可带 chomping 指示符 `+`/`-`）。 */
+const BLOCK_SCALAR_RE = /^([|>])([+-]?)\s*$/;
+
+/**
+ * 解析提示词/skill 文件的简单 frontmatter（轻量手写，不引 YAML 依赖）：
+ * - 容忍 UTF-8 BOM（书级手写文件常带 BOM，此前会凭空解析不出 frontmatter）；
+ * - 单行 `key: value`；
+ * - 块标量 `key: |`（保留换行）与 `key: >`（折叠为空格），按比键行更深的缩进收集续行、剥公共缩进；
+ * - 纯量缩进续行：不匹配键值且以空白开头的行折进上一个单行值（空格连接，YAML 折叠口径的简化）。
+ */
 export function parsePromptFile(content: string): PromptFile {
-  const m = FM_RE.exec(content);
-  if (!m) return { frontmatter: {}, body: content, hasFrontmatter: false };
+  const text = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+  const m = FM_RE.exec(text);
+  if (!m) return { frontmatter: {}, body: text, hasFrontmatter: false };
   const frontmatter: Record<string, string> = {};
-  for (const line of (m[1] ?? '').split(/\r?\n/)) {
-    const kv = /^([A-Za-z_][A-Za-z0-9_-]*):[ \t]*(.*)$/.exec(line);
-    if (!kv) continue;
-    frontmatter[kv[1]!] = kv[2] ?? '';
+  const lines = (m[1] ?? '').split(/\r?\n/);
+  let i = 0;
+  /** 上一个单行键（纯量缩进续行的归属）；块标量行与非缩进的杂行都会清掉它。 */
+  let lastKey: string | undefined;
+  while (i < lines.length) {
+    const line = lines[i]!;
+    const kv = KV_RE.exec(line);
+    if (!kv) {
+      // 缩进续行：折进上一个单行值；非缩进杂行静默跳过并断开续行归属（同旧版容错口径）。
+      if (lastKey !== undefined && /^[ \t]/.test(line)) {
+        frontmatter[lastKey] += ` ${line.trim()}`;
+      } else if (!/^[ \t]/.test(line)) {
+        lastKey = undefined;
+      }
+      i++;
+      continue;
+    }
+    const key = kv[1]!;
+    const rest = kv[2] ?? '';
+    const block = BLOCK_SCALAR_RE.exec(rest);
+    if (block) {
+      const parsed = parseBlockScalar(lines, i, block[1] === '>');
+      frontmatter[key] = parsed.value;
+      i = parsed.nextIndex;
+      lastKey = undefined;
+      continue;
+    }
+    frontmatter[key] = rest;
+    lastKey = key;
+    i++;
   }
-  return { frontmatter, body: content.slice(m[0].length), hasFrontmatter: true };
+  return { frontmatter, body: text.slice(m[0].length), hasFrontmatter: true };
+}
+
+/** 收集块标量值：从 header 行的下一行起收比其更深缩进的行（空行归入块内），剥公共缩进；
+ *  folded=true（`>`）把行折叠为空格连接，false（`|`）保留换行。简化点：`>` 的空行也折叠成单个空格、不做段间换行。
+ *  返回值连同消费到的行号（nextIndex=块后第一行），调用方据此续扫。 */
+function parseBlockScalar(lines: string[], headerIndex: number, folded: boolean): { value: string; nextIndex: number } {
+  const headerLine = lines[headerIndex]!;
+  const baseIndent = headerLine.length - headerLine.trimStart().length;
+  const chunk: string[] = [];
+  let i = headerIndex + 1;
+  for (; i < lines.length; i++) {
+    const cur = lines[i]!;
+    if (cur.trim() === '') {
+      chunk.push('');
+      continue;
+    }
+    if (cur.length - cur.trimStart().length <= baseIndent) break;
+    chunk.push(cur);
+  }
+  while (chunk.length > 0 && chunk[chunk.length - 1] === '') chunk.pop();
+  const indents = chunk.filter((l) => l !== '').map((l) => l.length - l.trimStart().length);
+  const minIndent = indents.length > 0 ? Math.min(...indents) : 0;
+  const stripped = chunk.map((l) => (l === '' ? '' : l.slice(minIndent)));
+  return { value: folded ? stripped.filter((l) => l !== '').join(' ') : stripped.join('\n'), nextIndex: i };
 }
 
 /**
@@ -83,9 +149,24 @@ export function resolvePromptRoot(env: NodeJS.ProcessEnv = process.env): string 
   return bundledPromptDir();
 }
 
+/** 计算内容 sha256（十六进制小写，utf8 编码），与随包 hash 清单同一口径。 */
+export function contentHash(content: string): string {
+  return createHash('sha256').update(content, 'utf8').digest('hex');
+}
+
 /**
- * 首次运行释放：把随包目录里的规范文件补缺到目标目录（app 数据目录 prompts/）。
- * 已有文件永不覆盖；随包缺某个文件只 warn 跳过。无 env 的 dev 裸跑不走这里，直接用 core/prompts。
+ * 随包预置文件历史内容 hash 清单（core/src/shipped-hashes.json）：key=相对路径，
+ * value=该文件历次随包版本的 sha256（含当前版；作者改提示词后须把新版 hash 追加进去）。
+ * 释放升级通道用：目标文件内容 hash 在清单内 = 作者没改过 → 可安全覆盖为新版。
+ */
+export const SHIPPED_FILE_HASHES: Record<string, string[]> = shippedHashes;
+
+/**
+ * 首次运行释放 + 升级通道：把随包目录里的规范文件送达目标目录（app 数据目录 prompts/）。
+ * - 目标缺文件 → 拷贝；
+ * - 目标已有且内容 hash ∈ 历史 shipped hash（作者没改过）→ 覆盖为新版（修复后的内容能送达存量安装）;
+ * - 目标已被本地改过 → 跳过并 warn 提示，永不覆盖。
+ * 随包缺某个文件只 warn 跳过。无 env 的 dev 裸跑不走这里，直接用 core/prompts。
  */
 export function releasePrompts(targetDir: string, sourceDir: string = bundledPromptDir()): void {
   try {
@@ -96,11 +177,24 @@ export function releasePrompts(targetDir: string, sourceDir: string = bundledPro
   }
   for (const file of CANONICAL_FILES) {
     const target = path.join(targetDir, file);
-    if (fs.existsSync(target)) continue;
     const source = path.join(sourceDir, file);
     if (!fs.existsSync(source)) {
       console.warn(`[prompts] 随包提示词缺失，跳过释放: ${source}`);
       continue;
+    }
+    if (fs.existsSync(target)) {
+      // 升级通道：只在目标仍是任一历史随包版本时覆盖（作者没动过才安全替换）。
+      let current: string;
+      try {
+        current = fs.readFileSync(target, 'utf8');
+      } catch {
+        console.warn(`[prompts] 预置文件不可读，跳过升级（保留现状）: ${target}`);
+        continue;
+      }
+      if (!(SHIPPED_FILE_HASHES[file] ?? []).includes(contentHash(current))) {
+        console.warn(`[prompts] 预置文件被本地修改过，跳过升级（保留本地版）: ${target}`);
+        continue;
+      }
     }
     try {
       // 子目录预置（personas/、schemes/）目标父目录可能尚不存在，先补建。

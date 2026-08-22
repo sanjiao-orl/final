@@ -2,6 +2,8 @@
  * prompts.test.ts —— domain 最小提示词/skill 加载器（与 core/src/prompts.ts 互为镜像）。
  * 覆盖：cold-read 正常/缺文件/坏 frontmatter、skill_read 命中与未命中、ledgerSlice 从 cold-read.md 加载模板。
  */
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { ledgerSlice } from '../src/ledger.js';
 import { findSkillByName, loadPrompt, readSkillBody } from '../src/prompts.js';
@@ -39,9 +41,31 @@ describe('domain prompt 加载器', () => {
 
   it('缺文件返回 null，坏 frontmatter（缺 kind / applies_to 不匹配）返回 null', () => {
     const dir = makeWorkDir();
+    writeTree(dir, { 'cold-read.md': '---\nkind: skill\nname: 润色\n---\n不是 prompt' });
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     expect(loadPrompt('cold_read', dir)).toBeNull();
-    writeTree(dir, { 'cold-read.md': '---\nkind: skill\nname: 润色\n---\n不是 prompt' });
+    writeTree(dir, { 'cold-read.md': '---\napplies_to: cold_read\n---\n不是 prompt' });
+    expect(loadPrompt('cold_read', dir)).toBeNull();
+  });
+
+  it('改文件（mtime/size 变化）后重读即生效，不要求重启（mtime 热重载）', () => {
+    const dir = makeWorkDir();
+    const file = path.join(dir, 'cold-read.md');
+    writeTree(dir, { 'cold-read.md': COLD_READ_TEMPLATE });
+    expect(loadPrompt('cold_read', dir)).toContain('来自文件的读者契约');
+    // 改内容并强制 mtime 前移（Windows mtime 粒度可能粗于连续写入间隔，utimes 兜底保证判变）
+    fs.writeFileSync(file, COLD_READ_TEMPLATE.replace('来自文件的读者契约', '热重载后的读者契约'), 'utf8');
+    const future = new Date(Date.now() + 5000);
+    fs.utimesSync(file, future, future);
+    expect(loadPrompt('cold_read', dir)).toContain('热重载后的读者契约');
+  });
+
+  it('文件被删除后重读返回 null（缓存按出现/消失失效）', () => {
+    const dir = makeWorkDir();
+    writeTree(dir, { 'cold-read.md': COLD_READ_TEMPLATE });
+    expect(loadPrompt('cold_read', dir)).toContain('来自文件的读者契约');
+    fs.rmSync(path.join(dir, 'cold-read.md'));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
     expect(loadPrompt('cold_read', dir)).toBeNull();
   });
 });

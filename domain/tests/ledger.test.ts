@@ -1066,6 +1066,32 @@ describe('diagnosticsForWork（端到端）', () => {
     expect(res.blockerCount).toBe(0);
   });
 
+  it('章读取失败不静默：console.warn 带路径与错误，结果附 skipped 清单', () => {
+    const work = makeWorkDir();
+    writeTree(work, {
+      'manuscript/第1章.md': '---\ntitle: 第1章\n---\n正文。',
+      'manuscript/第2章.md': '---\ntitle: 第2章\n---\n初春的风。盛夏的日。',
+    });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const realRead = fs.readFileSync.bind(fs);
+    const spy = vi.spyOn(fs, 'readFileSync').mockImplementation(((file: fs.PathOrFileDescriptor) => {
+      // 只拦第2章的读取；账本文件不存在走 ENOENT 分支不受影响
+      if (String(file).includes('第2章')) throw new Error('模拟不可读');
+      return realRead(file, 'utf8');
+    }) as typeof fs.readFileSync);
+    try {
+      const res = diagnosticsForWork(work);
+      // 第2章没读到 → 其季节冲突不产生，且明确记入 skipped
+      expect(res.findings.some((f) => f.code === 'season-conflict')).toBe(false);
+      expect(res.skipped).toEqual([{ path: 'manuscript/第2章.md', reason: '模拟不可读' }]);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(String(warnSpy.mock.calls[0]?.[0])).toContain('第2章');
+    } finally {
+      spy.mockRestore();
+      warnSpy.mockRestore();
+    }
+  });
+
   it('问题日志的 BLOCKER 计数折叠进 hasBlockers', () => {
     const work = makeWorkDir();
     writeTree(work, {

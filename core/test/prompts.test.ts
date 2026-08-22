@@ -1,10 +1,11 @@
 // 测试：core 提示词/skill 文件加载器（docs/decisions/0008）——
-// 正常加载、缺文件回退、坏 frontmatter 跳过、首次释放（缺则拷/有则不覆盖）、skill 清单同名遮蔽。
+// 正常加载、缺文件回退、坏 frontmatter 跳过、BOM 容忍、多行 frontmatter、首次释放
+// （缺则拷 / 未改动升级为新版 / 本地改过永不覆盖）、skill 清单同名遮蔽。
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { collectPersonas, collectSchemes, collectSkills, loadPersona, loadPrompt, loadStyleSummary, parsePromptFile, readActiveScheme, releasePrompts, scanPersonas, scanSchemes, scanSkills } from '../src/prompts.js';
+import { collectPersonas, collectSchemes, collectSkills, contentHash, loadPersona, loadPrompt, loadStyleSummary, parsePromptFile, readActiveScheme, releasePrompts, scanPersonas, scanSchemes, scanSkills, SHIPPED_FILE_HASHES } from '../src/prompts.js';
 
 const tmpDirs: string[] = [];
 
@@ -66,6 +67,48 @@ describe('core prompt 加载器', () => {
     expect(parsed.body).toBe('就是正文');
   });
 
+  it('frontmatter 容忍 UTF-8 BOM：带 BOM 的文件照常解析出键值与正文（书级手写文件常见）', () => {
+    const parsed = parsePromptFile('\uFEFF---\nkind: skill\nname: 润色\ndescription: 去 AI 味\n---\n正文');
+    expect(parsed.hasFrontmatter).toBe(true);
+    expect(parsed.frontmatter.kind).toBe('skill');
+    expect(parsed.frontmatter.name).toBe('润色');
+    expect(parsed.body).toBe('正文');
+
+    // 端到端：带 BOM 的书级手写 skill/persona 不再凭空消失
+    const dir = makeTmpDir();
+    writeTree(dir, {
+      'bom-skill.md': '\uFEFF---\nkind: skill\nname: 带BOM技能\ndescription: d\n---\n正文',
+      'personas/bom.md': '\uFEFF---\nkind: persona\nname: 带BOM角色\ndescription: d\n---\n正文',
+    });
+    expect(scanSkills(dir)).toEqual([{ name: '带BOM技能', description: 'd' }]);
+    expect(collectPersonas(dir)).toEqual([{ name: '带BOM角色', description: 'd' }]);
+  });
+
+  it('多行 frontmatter：`key: |` 块标量保留换行，`key: >` 折叠为空格，缩进续行折进上一个单行值', () => {
+    const block = parsePromptFile(
+      '---\nkind: persona\nname: 责编\ndescription: |\n  第一行说明。\n  第二行说明。\n---\n正文'
+    );
+    expect(block.frontmatter.description).toBe('第一行说明。\n第二行说明。');
+
+    const folded = parsePromptFile(
+      '---\nkind: skill\nname: 润色\ndescription: >\n  长句被折叠成\n  一整行。\n---\n正文'
+    );
+    expect(folded.frontmatter.description).toBe('长句被折叠成 一整行。');
+
+    const continued = parsePromptFile(
+      '---\nkind: skill\nname: 润色\ndescription: 首行说明\n  缩进续行接上。\n---\n正文'
+    );
+    expect(continued.frontmatter.description).toBe('首行说明 缩进续行接上。');
+
+    // 块标量之后回到普通键值；块内更深缩进剥公共前导空白
+    const mixed = parsePromptFile(
+      '---\nkind: skill\nname: 润色\ndescription: |\n  深一层\n    更深一层\nother: x\n---\n正文'
+    );
+    expect(mixed.frontmatter.description).toBe('深一层\n  更深一层');
+    expect(mixed.frontmatter.other).toBe('x');
+    expect(mixed.body).toBe('正文');
+  });
+
   it('热重载：改文件后 loadPrompt 拿到新内容（决策 0008「改文件即生效」）', () => {
     const dir = makeTmpDir();
     const file = path.join(dir, 'chat.md');
@@ -122,6 +165,39 @@ describe('首次运行释放', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     releasePrompts(target, source);
     expect(fs.readFileSync(path.join(target, 'chat.md'), 'utf8')).toBe('用户改过的聊天提示');
+  });
+
+  it('升级通道：hash 清单覆盖当前随包正本（改提示词须同步再生 manifest，防清单陈旧失守）', () => {
+    // 真实随包目录里的规范文件，每个都应在清单里且当前内容 hash 在列——否则升级通道对它失效。
+    const promptsDir = path.resolve(import.meta.dirname, '..', 'prompts');
+    for (const rel of ['chat.md', 'review.md', 'collide.md', 'personas/责编.md', 'schemes/结构对抗型.md']) {
+      expect(SHIPPED_FILE_HASHES[rel]).toBeDefined();
+      expect(SHIPPED_FILE_HASHES[rel]!).toContain(contentHash(fs.readFileSync(path.join(promptsDir, rel), 'utf8')));
+    }
+  });
+
+  it('升级通道：目标仍是历史随包版（作者没改过）→ 覆盖为新版，修复能送达存量安装', () => {
+    const source = makeTmpDir();
+    const target = makeTmpDir();
+    writeTree(source, { 'chat.md': '修复后的新版聊天提示' });
+    // 目标放真实随包正本的逐字节拷贝（其 hash 在清单内）
+    const bundledChat = fs.readFileSync(path.resolve(import.meta.dirname, '..', 'prompts', 'chat.md'), 'utf8');
+    writeTree(target, { 'chat.md': bundledChat });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    releasePrompts(target, source);
+    expect(fs.readFileSync(path.join(target, 'chat.md'), 'utf8')).toBe('修复后的新版聊天提示');
+  });
+
+  it('升级通道：目标被本地改过 → 跳过覆盖并 warn 提示，永不覆盖', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const source = makeTmpDir();
+    const target = makeTmpDir();
+    writeTree(source, { 'chat.md': '新版聊天提示' });
+    writeTree(target, { 'chat.md': '---\nkind: prompt\napplies_to: chat\n---\n作者精心改过的本地版' });
+    releasePrompts(target, source);
+    expect(fs.readFileSync(path.join(target, 'chat.md'), 'utf8')).toContain('作者精心改过的本地版');
+    const warned = warn.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(warned).toContain('被本地修改过');
   });
 });
 

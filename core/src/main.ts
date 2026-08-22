@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { Server } from 'node:http';
 import {
   assertNodeVersion,
+  backupSqliteFile,
   getGitCommit,
   getNovelDir,
   getRuntimeFilePath,
@@ -57,6 +58,8 @@ async function main(): Promise<void> {
   modelForPurpose(process.env, 'background');
   modelForPurpose(process.env, 'review');
   const dbPath = path.join(getNovelDir(), 'sessions.sqlite');
+  // 启动冷备份（打开库之前）：库已存在则滚动拷贝一份 sessions.sqlite.bak（单份覆盖）；失败只 warn 不阻断启动。
+  backupSqliteFile(dbPath);
   const store = new SessionStore(dbPath);
   const candidates = new CandidateStore(dbPath); // 与 sessions 同库（FK 到 sessions）
   const stats = new StatsStore(dbPath);

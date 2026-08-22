@@ -1,16 +1,21 @@
 // 测试：环境配置——缺失抛错、双档模型映射、默认/覆盖取值；D2 握手门禁——Node 版本下限、git commit 自报。
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import { describe, expect, it, vi } from 'vitest';
 import {
   assertNodeVersion,
+  backupSqliteFile,
   createModelForTier,
   DEFAULT_LLM_TIMEOUT_SECONDS,
+  DEFAULT_TOOL_TIMEOUT_SECONDS,
   describeLlm,
   getDomainMcpCommand,
   getGitCommit,
   getLlmTimeoutSeconds,
   getNovelDir,
   getRuntimeFilePath,
+  getToolTimeoutSeconds,
   loadLlmConfig,
   MIN_NODE_MAJOR,
   modelForPurpose,
@@ -210,5 +215,39 @@ describe('config', () => {
     expect(commit).toMatch(/^(unknown|[0-9a-f]{4,})$/);
     const fallback = getGitCommit(path.join(process.cwd(), '不存在的目录'));
     expect(fallback).toBe('unknown');
+  });
+
+  it('确定性工具超时秒数：默认几十秒档（与 LLM 600s 分开），可覆盖，非法取值抛错', () => {
+    expect(DEFAULT_TOOL_TIMEOUT_SECONDS).toBeLessThan(DEFAULT_LLM_TIMEOUT_SECONDS);
+    expect(getToolTimeoutSeconds({})).toBe(DEFAULT_TOOL_TIMEOUT_SECONDS);
+    expect(getToolTimeoutSeconds({ TOOL_TIMEOUT_SECONDS: '30' })).toBe(30);
+    expect(() => getToolTimeoutSeconds({ TOOL_TIMEOUT_SECONDS: '0' })).toThrow(/TOOL_TIMEOUT_SECONDS 取值非法/);
+    expect(() => getToolTimeoutSeconds({ TOOL_TIMEOUT_SECONDS: '-1' })).toThrow(/TOOL_TIMEOUT_SECONDS 取值非法/);
+    expect(() => getToolTimeoutSeconds({ TOOL_TIMEOUT_SECONDS: 'abc' })).toThrow(/TOOL_TIMEOUT_SECONDS 取值非法/);
+  });
+
+  it('sqlite 冷备份：库存在时滚动拷贝 .bak，不存在不动，拷贝失败只 warn 不抛错', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'novel-config-test-'));
+    const dbPath = path.join(dir, 'sessions.sqlite');
+    // 库不存在：无动作
+    expect(backupSqliteFile(dbPath)).toBe(false);
+
+    writeFileSync(dbPath, 'v1');
+    expect(backupSqliteFile(dbPath)).toBe(true);
+    expect(readFileSync(`${dbPath}.bak`, 'utf8')).toBe('v1');
+    // 单份滚动：再次备份覆盖旧 .bak
+    writeFileSync(dbPath, 'v2');
+    backupSqliteFile(dbPath);
+    expect(readFileSync(`${dbPath}.bak`, 'utf8')).toBe('v2');
+
+    // 拷贝失败（源是目录）只 warn 返回 false，不阻断
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(backupSqliteFile(dir)).toBe(false);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]![0])).toContain('数据库备份失败');
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
