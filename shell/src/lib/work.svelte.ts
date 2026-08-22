@@ -3,7 +3,7 @@
  * 壳零产品逻辑的落点：结构/字数/快照/软删/导出全部调 domain 工具（经 core 代理），这里只搬数据。
  */
 import type { CoreClient, DailyStats } from './core.js';
-import type { ChapterNode, ReadChapterResult, VolumeNode } from './types.js';
+import type { ChapterNode, ReadChapterResult, TrashEntry, VolumeNode } from './types.js';
 import { setFrontmatterStatus, nextChapterStatus } from './frontmatter.js';
 import { writeClipboardText } from './clipboard.js';
 
@@ -17,53 +17,6 @@ export interface EditorApi {
   replaceBodyMd: (md: string) => 'ok' | 'not-found';
   /** B1 插入其后：proposed 插入 original 之后（原文保留）。 */
   insertAfter?: (original: string, proposed: string) => 'ok' | 'not-found' | 'ambiguous';
-}
-
-/** 软删条目：原章节路径与 trash 副本路径。domain 没有 list_trash，壳在 localStorage 跟踪。 */
-export interface TrashEntry {
-  /** 原章节相对 workDir 路径（manuscript/.../*.md），找回时写回此路径。 */
-  relPath: string;
-  /** 软删后 trash 副本路径（.novel/trash/<...>.md）。 */
-  trashPath: string;
-  /** 删除时间戳（ms）。 */
-  deletedAt: number;
-}
-
-/** localStorage key（per-workDir）。 */
-function trashKey(workDir: string): string {
-  return `novel.trash.${workDir}`;
-}
-
-function loadTrashEntries(workDir: string): TrashEntry[] {
-  if (!workDir || typeof localStorage === 'undefined') return [];
-  try {
-    const raw = localStorage.getItem(trashKey(workDir));
-    if (!raw) return [];
-    const arr = JSON.parse(raw) as TrashEntry[];
-    return Array.isArray(arr) ? arr : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveTrashEntries(workDir: string, entries: TrashEntry[]): void {
-  if (typeof localStorage === 'undefined') return;
-  try {
-    localStorage.setItem(trashKey(workDir), JSON.stringify(entries));
-  } catch {
-    // 隐私模式等：内存态生效即可（回收站列表与 setTier/setCollide 同款）
-  }
-}
-
-function recordTrashEntry(workDir: string, relPath: string, trashPath: string): void {
-  const entries = loadTrashEntries(workDir);
-  entries.unshift({ relPath, trashPath, deletedAt: Date.now() });
-  saveTrashEntries(workDir, entries);
-}
-
-function removeTrashEntry(workDir: string, trashPath: string): void {
-  const entries = loadTrashEntries(workDir).filter((e) => e.trashPath !== trashPath);
-  saveTrashEntries(workDir, entries);
 }
 
 export interface OpenChapter {
@@ -99,10 +52,21 @@ export class WorkStore {
   error = $state<string | null>(null);
   /** 成功提示（导出路径、软删去向等）。 */
   notice = $state<string | null>(null);
+  /**
+   * 回收站条目（domain list_trash 工具为真相源，TreeView 面板读这里）。
+   * 初始空；refreshTrash 拉取，失败静默保留现状（core 旧版无 list_trash 时即恒空列表）。
+   */
+  trashEntries = $state<TrashEntry[]>([]);
 
   private client!: CoreClient;
   /** 编辑器现场入口（Editor 挂载时注册，卸载时清空）：序列化 md + 候选文本替换。 */
   private editorApi: EditorApi | null = null;
+  /**
+   * 旧壳侧 localStorage 回收站残留 key 是否已清理（一次性迁移清理标记）：
+   * 历史上壳在 localStorage（novel.trash.<workDir>）自跟踪软删条目，现改由 domain list_trash
+   * 提供真相；首次 list_trash 成功后清掉旧 key 作废残留数据，之后不再重复删。
+   */
+  private trashLegacyCleaned = false;
   /** 开章代际：防竞态——快速连开两章时，先发的 read_chapter 后 resolve 不覆盖后点的章。 */
   private openSeq = 0;
   /** 在飞保存 promise（并发 saveCurrent 等在飞的完成再重入，防吞脏保存）；无在飞为 null。 */
@@ -332,7 +296,7 @@ export class WorkStore {
         this.current = null;
         this.dirty = false;
       }
-      recordTrashEntry(this.workDir, relPath, r.trashPath);
+      void this.refreshTrash(); // 回收站列表以 domain 为真相源，删除成功后后台重拉（失败静默）
       this.notice = `已移入回收站 ${r.trashPath}（移回原路径即找回）`;
       await this.loadStructure();
     } catch (err) {
@@ -457,17 +421,41 @@ export class WorkStore {
     return this.editorApi.insertAfter(original, proposed);
   }
 
-  // ---------- 回收站：localStorage 跟踪软删条目，listTrash/restoreTrash 供 TreeView 面板用 ----------
-  // 约束：domain 没有 list_trash 工具（本任务不新加 domain 工具），回收站面板用壳私有 localStorage 跟踪已软删过的章；
-  // 找回复用 read_chapter（特许读 .novel/trash/）→ write_chapter 写回原路径，参照 chat.svelte.ts 的删章补偿逻辑。
-  listTrash(): TrashEntry[] {
-    return loadTrashEntries(this.workDir);
+  // ---------- 回收站：domain list_trash 为真相源，refreshTrash 拉取；找回=读 trash 写回 originalPath ----------
+  // 兼容窗口期：core 旧版没有 list_trash 工具时 refreshTrash 失败 → 静默保留空列表，面板显示为空。
+  /**
+   * 拉取回收站条目写入 trashEntries。失败静默（console.warn 留痕），不打扰界面。
+   * 首次成功后清掉旧壳侧 localStorage 残留 key（novel.trash.<workDir>，一次性迁移清理）。
+   */
+  async refreshTrash(): Promise<void> {
+    try {
+      const r = await this.client.callTool<{ entries: TrashEntry[] }>('list_trash', {
+        workDir: this.workDir,
+      });
+      this.trashEntries = r.entries ?? [];
+      if (!this.trashLegacyCleaned && typeof localStorage !== 'undefined') {
+        this.trashLegacyCleaned = true;
+        try {
+          // 迁移清理：壳侧旧跟踪数据与 domain 真相源可能不一致（换设备/清库等），直接作废删除
+          localStorage.removeItem(`novel.trash.${this.workDir}`);
+        } catch {
+          // 隐私模式等 removeItem 失败：忽略，不影响列表展示
+        }
+      }
+    } catch (err) {
+      console.warn('[trash] list_trash 失败，保留当前回收站列表：', err);
+    }
   }
 
   async restoreTrash(trashPath: string): Promise<boolean> {
-    const entry = loadTrashEntries(this.workDir).find((e) => e.trashPath === trashPath);
+    const entry = this.trashEntries.find((e) => e.trashPath === trashPath);
     if (!entry) {
       this.error = '回收站条目不存在（可能已被恢复）';
+      return false;
+    }
+    if (!entry.originalPath) {
+      // 无时间戳垃圾文件等拿不到原路径：无法自动写回，提示手动处理
+      this.notice = `该条目无法还原原路径，请到 .novel/trash/ 手动处理（${entry.name}）`;
       return false;
     }
     this.error = null;
@@ -478,11 +466,11 @@ export class WorkStore {
       });
       await this.client.callTool('write_chapter', {
         workDir: this.workDir,
-        relPath: entry.relPath,
+        relPath: entry.originalPath,
         content: r.content,
       });
-      removeTrashEntry(this.workDir, entry.trashPath);
-      this.notice = `已找回 ${entry.relPath}（trash 副本移回）`;
+      void this.refreshTrash(); // 后台重拉列表（失败静默）。注意：找回=读回写非移动，trash 副本仍在回收站里
+      this.notice = `已找回 ${entry.originalPath}（写回原路径；trash 副本仍保留，可从回收站手动清理）`;
       await this.loadStructure();
       return true;
     } catch (err) {

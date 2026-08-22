@@ -299,15 +299,18 @@
     return n.toLocaleString('zh-CN');
   }
 
-  // ---------- 回收站：domain 无 list_trash，壳走 localStorage 跟踪；找回=读 trash 写回原路径 ----------
+  // ---------- 回收站：domain list_trash 为真相源（work.trashEntries），展开时拉取；找回=读 trash 写回原路径 ----------
   let trashOpen = $state(false);
   let trashBusy = $state(false);
-  const trashEntries = $derived(work.listTrash());
+  const trashEntries = $derived(work.trashEntries);
 
-  function trashNameOf(trashPath: string): string {
-    return trashPath.split('/').pop()?.replace(/-\d+\.md$/, '.md') ?? trashPath;
+  function toggleTrash(): void {
+    trashOpen = !trashOpen;
+    if (trashOpen) void work.refreshTrash(); // 展开时重拉 domain 列表（失败静默保留现状）
   }
-  function trashTimeOf(deletedAt: number): string {
+  /** ISO 时间串 → 短日期（MM-DD HH:mm）；无时间戳返回空串。 */
+  function trashTimeOf(deletedAt?: string): string {
+    if (!deletedAt) return '';
     const d = new Date(deletedAt);
     if (Number.isNaN(d.getTime())) return '';
     const p = (n: number) => String(n).padStart(2, '0');
@@ -494,7 +497,7 @@
     <button
       class="trash-row"
       class:open={trashOpen}
-      onclick={() => (trashOpen = !trashOpen)}
+      onclick={() => toggleTrash()}
       aria-expanded={trashOpen}
       title={`软删章在这里（${TRASH_DIR}），可一键找回`}
     >
@@ -510,10 +513,10 @@
           {#each trashEntries as e (e.trashPath)}
             <div class="trash-item">
               <div class="ti-meta">
-                <span class="ti-name" title={e.relPath}>{trashNameOf(e.trashPath)}</span>
+                <span class="ti-name" title={e.originalPath ?? e.trashPath}>{e.name}</span>
                 <span class="ti-time">{trashTimeOf(e.deletedAt)}</span>
               </div>
-              <button class="ti-btn" disabled={trashBusy} onclick={() => void restoreOne(e.trashPath)} title={`找回：写回 ${e.relPath}`}>找回</button>
+              <button class="ti-btn" disabled={trashBusy} onclick={() => void restoreOne(e.trashPath)} title={e.originalPath ? `找回：写回 ${e.originalPath}` : '该条目无原路径记录，需手动处理'}>找回</button>
             </div>
           {/each}
         {/if}

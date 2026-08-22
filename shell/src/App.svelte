@@ -7,6 +7,7 @@
   import { work } from './lib/work.svelte.js';
   import { chat } from './lib/chat.svelte.js';
   import { candidates } from './lib/candidates.svelte.js';
+  import { quality } from './lib/quality.svelte.js';
   import { settings } from './lib/settings.svelte.js';
   import { snapshot } from './lib/snapshot.svelte.js';
   import { review } from './lib/review.svelte.js';
@@ -43,6 +44,7 @@
     work.init(client, workDir);
     chat.init(client);
     candidates.init(client);
+    quality.init(client);
     snapshot.init(client, workDir);
     review.init(client, workDir);
     scheme.init(client); // work.init 已就位 workDir，load 直接按新作品拉 posture

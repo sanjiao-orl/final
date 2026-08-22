@@ -25,6 +25,10 @@ export async function startTestServer(overrides: {
   tools?: ChatDeps['tools'];
   toolsAvailable?: ChatDeps['toolsAvailable'];
   devEnabled?: boolean;
+  /** 章摘要生成管道依赖覆盖；缺省沿用 chat 的模型档与工具集。 */
+  summary?: { modelForTier?: ChatDeps['modelForTier']; tools?: ChatDeps['tools'] };
+  /** 发布前质检管道依赖覆盖；缺省沿用 chat 的模型档与工具集。 */
+  qualityCheck?: { modelForTier?: ChatDeps['modelForTier']; tools?: ChatDeps['tools'] };
 } = {}): Promise<TestServer> {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'novel-core-test-'));
   const dbPath = path.join(dir, 'sessions.sqlite');
@@ -51,6 +55,14 @@ export async function startTestServer(overrides: {
     stats,
     rewrite: { modelForTier: chat.modelForTier },
     continue: { modelForTier: () => chat.modelForTier('background') },
+    summary: {
+      modelForTier: overrides.summary?.modelForTier ?? chat.modelForTier,
+      tools: overrides.summary?.tools ?? chat.tools,
+    },
+    qualityCheck: {
+      modelForTier: overrides.qualityCheck?.modelForTier ?? chat.modelForTier,
+      tools: overrides.qualityCheck?.tools ?? chat.tools,
+    },
     version: 'test',
     ...(overrides.devEnabled !== undefined ? { devEnabled: overrides.devEnabled } : {}),
   });

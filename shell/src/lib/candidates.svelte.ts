@@ -18,6 +18,13 @@ interface LedgerDiagnosticsNotice {
   blockerCount?: number;
 }
 
+/** ledger_reconcile 返回的对账结果（契约镜像，只消费 anchors 异常计数；lineDrift 提示级不计入提醒）。 */
+interface LedgerReconcileNotice {
+  anchors?: { checked: number; ok: number; chapterMissing: number; quoteMissing: number; lineDrift: number };
+  findings?: Array<{ code?: string; severity?: string; category?: string; message?: string }>;
+  skipped?: string;
+}
+
 export class CandidatesStore {
   /** 待处理候选（status=pending，按更新时间倒序）。 */
   items = $state<Candidate[]>([]);
@@ -288,6 +295,8 @@ export class CandidatesStore {
       let adoptedAny = false;
       let patchFailures = 0;
       let firstPatchErrMsg: string | null = null;
+      /** 实际采纳了候选的章 relPath 集合（章摘要生成触发范围）。 */
+      const affectedChapters = new Set<string>();
       for (const [chapter, group] of byChapter) {
         if (work.current?.relPath !== chapter) {
           const node = work.findChapter(chapter);
@@ -332,6 +341,7 @@ export class CandidatesStore {
         }
         if (applied.length === 0) continue;
         adoptedAny = true;
+        affectedChapters.add(chapter);
 
         // 采纳是作者决策：替换成功即落状态；保存失败另有红条+脏标记兜底
         // 逐条落库：单条 patch 失败收集计数继续，不中断其余已应用候选（成功的照常 adopted，不整批回滚）
@@ -354,9 +364,15 @@ export class CandidatesStore {
       if (errs.length > 0) {
         work.error = `部分候选未能采纳：${errs.join('；')}`;
       }
-      // 批三-3：采纳落定（PATCH 完成、保存触发）后机械层自动跑账本诊断；有发现弹轻提示，无发现/失败静默。
-      // 单一收口点在这里：StagingDrawer / StagingOverview / Editor 内联 ✓ 三个入口全部走 adopt()。
-      if (adoptedAny) void this.notifyDiagnosticsAfterAdopt();
+      // 批三-3：采纳落定（PATCH 完成、保存触发）后机械层自动跑账本诊断 + 对账，有发现弹一次合并轻提示，
+      // 无发现/失败静默。单一收口点在这里：StagingDrawer / StagingOverview / Editor 内联 ✓ 三个入口全部走 adopt()。
+      if (adoptedAny) {
+        // 章摘要（导生缓存）逐章重建：fire-and-forget，失败静默——摘要只是加速读取的缓存，下次采纳会重建
+        for (const relPath of affectedChapters) {
+          void this.client.generateSummary(work.workDir, relPath).catch(() => {});
+        }
+        void this.notifyDiagnosticsAfterAdopt();
+      }
     } catch (err) {
       work.error = `采纳失败：${err instanceof Error ? err.message : String(err)}`;
     } finally {
@@ -372,25 +388,29 @@ export class CandidatesStore {
   }
 
   /**
-   * 采纳落定后的自动账本诊断（确定性工具，零 LLM 成本；fire-and-forget，不阻塞采纳主链路）：
-   * findings>0 → 复用 SnapshotToast 机制弹无还原动作的轻提示（提示作者在审阅面板查看）；findings==0 / 调用失败 → 不打扰。
+   * 采纳落定后的自动账本体检（fire-and-forget，不阻塞采纳主链路）：ledger_diagnostics 机械诊断 +
+   * ledger_reconcile 锚点对账并行跑，两者都完成后合并计数弹一次轻提示；任一失败不影响另一个，
+   * 双双无异常 / 失败 → 不打扰（全静默）。对账计数口径用 chapterMissing+quoteMissing（lineDrift 提示级不计）。
    */
   private async notifyDiagnosticsAfterAdopt(): Promise<void> {
     if (!this.client || !work.workDir) return;
-    try {
-      const diag = (await this.client.callTool<LedgerDiagnosticsNotice>('ledger_diagnostics', {
+    const diagP = this.client
+      .callTool<LedgerDiagnosticsNotice>('ledger_diagnostics', {
         workDir: work.workDir,
         issueLogPath: ISSUE_LOG_DEFAULT,
-      })) ?? {};
-      const findings = diag.findings ?? [];
-      if (findings.length === 0) return;
-      const severe = findings.filter((f) => f.severity === 'MAJOR' || f.severity === 'BLOCKER').length;
-      snapshot.showNotice(
-        `诊断现存 ${findings.length} 条（含 ${severe} 条 MAJOR/BLOCKER）· 审阅面板查看；若采纳改变了剧情事实，让 AI 同步账本`,
-      );
-    } catch {
-      // 诊断失败静默：不打扰采纳主链路
-    }
+      })
+      .catch(() => null); // 单边失败静默降级为 null，不让它拖垮另一边的结果
+    const reconcileP = this.client
+      .callTool<LedgerReconcileNotice>('ledger_reconcile', { workDir: work.workDir })
+      .catch(() => null);
+    const [diag, rec] = await Promise.all([diagP, reconcileP]);
+    const findings = diag?.findings ?? [];
+    const anchorIssues = (rec?.anchors?.chapterMissing ?? 0) + (rec?.anchors?.quoteMissing ?? 0);
+    if (findings.length === 0 && anchorIssues === 0) return;
+    const parts: string[] = [];
+    if (findings.length > 0) parts.push(`诊断 ${findings.length} 条`);
+    if (anchorIssues > 0) parts.push(`对账 ${anchorIssues} 处锚异常`);
+    snapshot.showNotice(`${parts.join(' · ')} · 审阅面板查看；若采纳改变了剧情事实，让 AI 同步账本`);
   }
 
   /** 批量整改：选中候选按整改要求重新改写，proposed 与指令留痕更新，状态保持 pending。 */

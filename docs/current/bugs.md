@@ -16,3 +16,9 @@
 
 - [块0遗留] core `mcp.ts` abort 只在客户端侧拒绝该次请求：domain 子进程里已开始的全量扫描继续跑完，stdio 单通道被占住直到结束——彻底取消需 domain 侧支持请求 cancellation，属加法改造，暂未动。
 - [块0遗留] 壳 `shell/src/lib/types.ts` ReviewFinding 镜像缺 domain 侧已有的 category/MINOR 字段——类型漂移债务，下次触及审阅链路时补齐。
+
+## P3（遗留，块 1 新登记）
+
+- [块1遗留] 找回章=read_chapter+write_chapter 读回写、非移动：trash 副本残留在 `.novel/trash/` 仍被 list_trash 列出（真相源=目录内容）。需 domain 加 trash 清理/move-back 工具才能闭环，触发式再做；壳找回 notice 文案已如实说明副本保留。
+- [块1遗留] `shell/src/lib/candidates.svelte.test.ts` 是 CRLF/LF 混合行尾文件（历史遗留；编辑时注意保持所在区域一致，git 的 LF→CRLF 提示是既有状态非新引入）。
+- [块1遗留] 回收站里无时间戳的垃圾文件（非 delete_chapter/delete_volume 产物）list_trash 列得出但无 originalPath，壳侧一键找回不可用（提示手动处理）——设计内容错，列此备查。

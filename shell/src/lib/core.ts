@@ -4,7 +4,7 @@
  * 只消费版本化契约（/v1/ 前缀，docs/decisions/0007），不依赖引擎内部类型。
  */
 import { DeltaBatcher, parseSseFrames } from './sse.js';
-import type { Candidate, SessionRow, StoredMessage } from './types.js';
+import type { Candidate, QualityFinding, SessionRow, StoredMessage } from './types.js';
 
 /** 协议契约前缀（core 全部业务端点）。 */
 const API_PREFIX = '/v1';
@@ -113,6 +113,16 @@ export interface ReviewFinding {
   quote: string;
   why: string;
   suggestion?: string;
+}
+
+/** POST /v1/summary/generate 的章摘要记录（契约镜像；机检字段冻结由 domain 保证，壳只搬运）。 */
+export interface SummaryRecord {
+  relPath: string;
+  summary: string;
+  tension?: number;
+  sceneType?: string;
+  wordCount?: number;
+  generatedAt?: string;
 }
 
 /** 裸联调参数记忆用 localStorage key（Tauri 路径不受影响）。 */
@@ -308,6 +318,29 @@ export class CoreClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
     });
+  }
+
+  /** 为指定章生成/重建摘要（POST /v1/summary/generate；LLM 活，120s 超时）。调用方 fire-and-forget。 */
+  generateSummary(workDir: string, relPath: string): Promise<{ ok: boolean; frozen: boolean; record: SummaryRecord }> {
+    return this.request(`${API_PREFIX}/summary/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workDir, relPath }),
+    }, { timeoutMs: 120_000 });
+  }
+
+  /** 章节质检=发布前风险提示（POST /v1/quality/check；便宜模型 LLM 活，180s 超时），不自动改、不拦截流转。 */
+  qualityCheck(workDir: string, relPath: string): Promise<{
+    ok: boolean;
+    chapterTitle?: string;
+    truncated?: boolean;
+    findings: QualityFinding[];
+  }> {
+    return this.request(`${API_PREFIX}/quality/check`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workDir, relPath }),
+    }, { timeoutMs: 180_000 });
   }
 
   /** POST /v1/chat 的 SSE 流：手工解析帧，text-delta 经 DeltaBatcher 批次后才进 onDelta。 */

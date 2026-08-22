@@ -90,6 +90,14 @@ async function main(): Promise<void> {
     continue: {
       modelForTier: () => modelForPurpose(process.env, 'background'),
     },
+    summary: {
+      modelForTier: () => modelForPurpose(process.env, 'background'),
+      tools: mcp.tools,
+    },
+    qualityCheck: {
+      modelForTier: () => modelForPurpose(process.env, 'background'),
+      tools: mcp.tools,
+    },
   });
 
   // listen 失败（如端口占用）会走 main().catch 直接 process.exit——而此时 runtime 文件尚未写入

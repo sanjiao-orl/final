@@ -7,7 +7,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import shippedHashes from './shipped-hashes.json' with { type: 'json' };
 
-export type PromptKind = 'chat' | 'review' | 'rewrite' | 'cold_read' | 'collide' | 'continue';
+export type PromptKind = 'chat' | 'review' | 'rewrite' | 'cold_read' | 'collide' | 'continue' | 'summary' | 'quality_check';
 
 /** 规范文件名契约（flat 布局，文件名 ASCII）。 */
 export const PROMPT_FILENAMES: Record<PromptKind, string> = {
@@ -17,6 +17,8 @@ export const PROMPT_FILENAMES: Record<PromptKind, string> = {
   cold_read: 'cold-read.md',
   collide: 'collide.md',
   continue: 'continue.md',
+  summary: 'summary.md',
+  quality_check: 'quality-check.md',
 };
 
 /** 规范预置 skill 文件名（随包释放时与 prompt 一起补缺）。 */
@@ -44,6 +46,8 @@ const PROMPT_FALLBACKS: Record<PromptKind, string> = {
   cold_read: '你是小说冷读审阅员。',
   collide: '你是小说写作工作台的碰撞陪练：按碰撞协议为作者的构想做有据、有对立、有后果的思考碰撞。',
   continue: '你是续写助手：只输出续接后的小说正文。',
+  summary: '你是网文章节摘要员：只输出章摘要 JSON object（summary/tension/sceneType）。',
+  quality_check: '你是网文发布前质检员：只输出问题 JSON 数组，没问题返回空数组。',
 };
 
 export interface PromptFile {

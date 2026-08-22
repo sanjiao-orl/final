@@ -53,6 +53,8 @@ export interface CustodyStep {
   line?: number;
   /** 持有者。 */
   holder?: string;
+  /** 原文引用，可截断，供证据（决策 0013 证据锚统一 schema）。 */
+  quote?: string;
   note?: string;
 }
 
@@ -83,6 +85,8 @@ export interface PromiseSetup {
 export interface PromisePayoff {
   chapter: string;
   line?: number;
+  /** 原文引用，可截断，供证据（决策 0013 证据锚统一 schema）。 */
+  quote?: string;
 }
 
 /** 承诺登记：一个伏笔/承诺实体。 */
@@ -109,6 +113,8 @@ export interface KnowledgeFact {
   since?: string;
   /** 回指的伏笔 id 列表（如 F-001）。 */
   refs?: string[];
+  /** 原文引用，可截断，供证据（决策 0013 证据锚统一 schema）。 */
+  quote?: string;
 }
 
 /** 知情地图：一个角色的知情范围（T2 knowledge 轴 public/selective/secret）。 */
@@ -427,6 +433,7 @@ function assertKnowledge(entry: unknown): asserts entry is KnowledgeEntry {
     }
     const kf: KnowledgeFact = { fact: o.fact.trim() };
     if (typeof o.since === 'string' && o.since.trim() !== '') kf.since = o.since.trim();
+    if (typeof o.quote === 'string' && o.quote.trim() !== '') kf.quote = o.quote.trim();
     if (Array.isArray(o.refs)) {
       const refs = o.refs.filter((r): r is string => typeof r === 'string' && r.trim() !== '').map((r) => r.trim());
       if (refs.length > 0) kf.refs = refs;
@@ -713,6 +720,8 @@ function knowledgeFacts(v: unknown): KnowledgeFact[] {
         ? o.refs.filter((r): r is string => typeof r === 'string' && r.trim() !== '').map((r) => r.trim())
         : undefined;
       if (refs !== undefined && refs.length > 0) kf.refs = refs;
+      const quote = typeof o.quote === 'string' && o.quote.trim() !== '' ? o.quote.trim() : undefined;
+      if (quote !== undefined) kf.quote = quote;
       out.push(kf);
     }
   }
@@ -761,6 +770,8 @@ function normalizeLedger(raw: unknown): Ledger {
         if (line !== undefined) step.line = line;
         const holder = str(so.holder);
         if (holder !== undefined) step.holder = holder;
+        const quote = str(so.quote);
+        if (quote !== undefined) step.quote = quote;
         const note = str(so.note);
         if (note !== undefined) step.note = note;
         return step;
@@ -798,6 +809,8 @@ function normalizeLedger(raw: unknown): Ledger {
         const payoff: PromisePayoff = { chapter: str(xo.chapter) ?? '' };
         const line = num(xo.line);
         if (line !== undefined) payoff.line = line;
+        const quote = str(xo.quote);
+        if (quote !== undefined) payoff.quote = quote;
         return payoff;
       }),
     };
@@ -854,10 +867,12 @@ function normalizeLedger(raw: unknown): Ledger {
  */
 function knowledgeForYaml(list: KnowledgeFact[]): Array<string | Record<string, unknown>> {
   return list.map((f) => {
-    if (f.since === undefined && (f.refs === undefined || f.refs.length === 0)) return f.fact;
+    // 带 quote 的项也写对象（不塌缩成纯字符串）：证据锚 schema（决策 0013）要求 quote round-trip 不丢
+    if (f.since === undefined && (f.refs === undefined || f.refs.length === 0) && f.quote === undefined) return f.fact;
     const o: Record<string, unknown> = { fact: f.fact };
     if (f.since !== undefined) o.since = f.since;
     if (f.refs !== undefined && f.refs.length > 0) o.refs = f.refs;
+    if (f.quote !== undefined) o.quote = f.quote;
     return o;
   });
 }
@@ -1707,8 +1722,9 @@ function unquoteQuote(text: string): string {
 /**
  * 在 chapter 文件里找 quote 首次出现的文件实际行号（1 起始，含 frontmatter 行，与 search_content 口径一致）。
  * chapter 越界/非 manuscript 内 .md/不存在或 quote 找不到 → 返回 null（CR 行 line 段写 `?`）。
+ * 导出供对账器（reconcile.ts）复用同一套定位口径。
  */
-function locateQuoteLine(workDir: string, chapterRelPath: string, quote: string): number | null {
+export function locateQuoteLine(workDir: string, chapterRelPath: string, quote: string): number | null {
   let abs: string;
   try {
     abs = resolveInside(workDir, chapterRelPath);

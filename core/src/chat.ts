@@ -81,8 +81,14 @@ const LEDGER_CHAPTER_SLICE_TOOL = 'ledger_chapter_slice';
 /** decision_tail 工具名：core 侧碰撞模式讨论沉淀注入契约（domain 并行开发的裁决检索摘要工具）。 */
 const DECISION_TAIL_TOOL = 'decision_tail';
 
+/** read_chapter_summaries 工具名：core 侧「前章摘要」注入契约（domain 章摘要导生缓存读取）。 */
+const READ_CHAPTER_SUMMARIES_TOOL = 'read_chapter_summaries';
+
 /** 讨论沉淀注入字符预算（决策 0013：裁决全量不进上下文，只进检索摘要）。 */
 const DECISION_INJECT_MAX_CHARS = 1500;
+
+/** 前章摘要注入字符预算（章摘要散文 + 机检行；超限截断并加省略标注）。 */
+const PREV_SUMMARY_INJECT_MAX_CHARS = 1500;
 
 /**
  * 契约层注入字符预算：skill 清单 / persona 正文 / 碰撞协议各自上限。
@@ -126,7 +132,8 @@ interface DecisionTail {
 
 /**
  * 组装系统提示：按决策 0010 注入面分层——契约层（prompt md + workDir 行 + skill 清单 + 碰撞协议(模式 collide 时)）→
- * 姿态层（角色，request 带 persona 且按名能找到才注，无则零注入）→ 数据层（声口摘要 + 本章账本切片 + 讨论沉淀（模式 collide 时），缺则静默跳过）。
+ * 姿态层（角色，request 带 persona 且按名能找到才注，无则零注入）→ 数据层（声口摘要 + 本章账本切片 +
+ * 前章摘要 + 讨论沉淀（模式 collide 时），缺则静默跳过）。
  * 数据层账本切片与讨论沉淀需要调 domain 工具，故为 async（可挂 abortSignal，超时/断连可中止）。
  */
 async function systemPrompt(
@@ -176,6 +183,13 @@ async function systemPrompt(
     const sliceResult = await fetchChapterSlice(workDir, chapter, tools, abortSignal);
     if (sliceResult?.found && sliceResult.slice) {
       prompt += `\n\n## 本章账本切片(${sliceResult.chapterTitle ?? chapter})\n仅含与当前章相关的账本条目，非全书。\n\n${sliceResult.slice}`;
+    }
+  }
+  // 数据层 b2：前章摘要（章挂载会话 + domain 工具可用才注；无前章记录/报错/超时静默降级零噪音）
+  if (workDir && chapter && tools) {
+    const prevSummary = await fetchPrevSummary(workDir, chapter, tools, abortSignal);
+    if (prevSummary) {
+      prompt += buildPrevSummarySection(prevSummary);
     }
   }
   // 数据层 c：讨论沉淀（最近裁决）——碰撞模式才注（mode=collide 且有 workDir 且工具可用）；缺/报错/超时 warn 降级，decisions.md 无记录则零注入
@@ -360,6 +374,113 @@ function extractDecisionTail(result: unknown): DecisionTail | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * 数据层前章摘要：章挂载会话才注。仿 fetchChapterSlice 调 read_chapter_summaries（before=当前章），
+ * 取章序中该章之前最近一章有摘要的记录（0 或 1 条）。同口径独立注入超时（缺省 15s），
+ * 到点 warn 明确归因为数据层超时；工具缺失/调用失败/无记录返回 undefined（零注入，不阻断聊天）。
+ */
+async function fetchPrevSummary(
+  workDir: string,
+  chapter: string,
+  tools: ToolSet,
+  abortSignal: AbortSignal
+): Promise<PrevSummaryRecord | undefined> {
+  const tool = tools[READ_CHAPTER_SUMMARIES_TOOL];
+  if (!tool?.execute) {
+    console.warn('[chat] read_chapter_summaries 工具不可用（domain MCP 未连接或工具不存在），跳过前章摘要注入');
+    return undefined;
+  }
+  const injectSeconds = getDataInjectTimeoutSeconds();
+  const injectSignal = AbortSignal.any([abortSignal, AbortSignal.timeout(injectSeconds * 1000)]);
+  try {
+    const result: unknown = await tool.execute({ workDir, before: chapter } as never, {
+      toolCallId: 'chat-prev-summary',
+      messages: [],
+      context: undefined,
+      abortSignal: injectSignal,
+    });
+    return extractPrevSummary(result);
+  } catch (err) {
+    if (abortSignal.aborted) return undefined; // 客户端断连/整体超时：静默跳过（外层已有归因）
+    if (injectSignal.aborted) {
+      console.warn(
+        `[chat] 数据层注入超时：read_chapter_summaries ${injectSeconds} 秒无响应（domain 数据层挂起），跳过前章摘要注入（非 LLM 请求超时）`
+      );
+      return undefined;
+    }
+    console.warn(
+      '[chat] read_chapter_summaries 调用失败，跳过前章摘要注入：',
+      err instanceof Error ? err.message : err
+    );
+    return undefined;
+  }
+}
+
+/** 前章摘要记录（extract 后的窄化视图）：机检字段缺哪个省哪个。 */
+interface PrevSummaryRecord {
+  relPath: string;
+  summary: string;
+  tension?: number;
+  sceneType?: string;
+  wordCount?: number;
+}
+
+/** 从 read_chapter_summaries 结果取首条记录并窄化：三态兼容（extractChapterSlice 同口径）；格式不识别/空记录返回 undefined（零注入）。 */
+function extractPrevSummary(result: unknown): PrevSummaryRecord | undefined {
+  if (!result || typeof result !== 'object') return undefined;
+  const r = result as {
+    isError?: unknown;
+    structuredContent?: unknown;
+    summaries?: unknown;
+    content?: Array<{ type?: string; text?: string }>;
+  };
+  const text = r.content?.find((c) => c && c.type === 'text' && typeof c.text === 'string')?.text;
+  if (r.isError) {
+    console.warn(`[chat] read_chapter_summaries 执行失败：${text ?? '未知错误'}`);
+    return undefined;
+  }
+
+  const candidates: unknown[] = [];
+  if (r.structuredContent !== undefined) candidates.push(r.structuredContent);
+  if (r.summaries !== undefined) candidates.push(r);
+  if (text !== undefined) {
+    try {
+      candidates.push(JSON.parse(text));
+    } catch {
+      // 非 JSON 文本不进候选
+    }
+  }
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const summaries = (candidate as { summaries?: unknown }).summaries;
+    if (!Array.isArray(summaries) || summaries.length === 0) continue;
+    for (const item of summaries) {
+      if (!item || typeof item !== 'object') continue;
+      const s = item as { relPath?: unknown; summary?: unknown; tension?: unknown; sceneType?: unknown; wordCount?: unknown };
+      if (typeof s.relPath !== 'string' || typeof s.summary !== 'string' || s.summary.trim() === '') continue;
+      return {
+        relPath: s.relPath,
+        summary: s.summary.trim(),
+        ...(typeof s.tension === 'number' && Number.isFinite(s.tension) ? { tension: s.tension } : {}),
+        ...(typeof s.sceneType === 'string' && s.sceneType.trim() !== '' ? { sceneType: s.sceneType } : {}),
+        ...(typeof s.wordCount === 'number' && Number.isFinite(s.wordCount) ? { wordCount: s.wordCount } : {}),
+      };
+    }
+  }
+  return undefined;
+}
+
+/** 组装「## 前章摘要」节：散文超预算截断；[机检] 行缺哪个字段省哪个，全缺则整行不出。 */
+function buildPrevSummarySection(rec: PrevSummaryRecord): string {
+  const body = truncateInjection(rec.summary, PREV_SUMMARY_INJECT_MAX_CHARS, '前章摘要');
+  const checks: string[] = [];
+  if (rec.tension !== undefined) checks.push(`tension: ${rec.tension}`);
+  if (rec.sceneType !== undefined) checks.push(`sceneType: ${rec.sceneType}`);
+  if (rec.wordCount !== undefined) checks.push(`字数: ${rec.wordCount}`);
+  const meta = checks.length > 0 ? `\n[机检] ${checks.join(' · ')}` : '';
+  return `\n\n## 前章摘要（${rec.relPath}）\n${body}${meta}`;
 }
 
 /** 组装「## 讨论沉淀（最近裁决）」节：lines 合并超预算截断并加省略标注；total > lines.length（有摘要折叠）时在节末尾追加条数说明。 */

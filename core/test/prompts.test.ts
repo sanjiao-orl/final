@@ -170,7 +170,7 @@ describe('首次运行释放', () => {
   it('升级通道：hash 清单覆盖当前随包正本（改提示词须同步再生 manifest，防清单陈旧失守）', () => {
     // 真实随包目录里的规范文件，每个都应在清单里且当前内容 hash 在列——否则升级通道对它失效。
     const promptsDir = path.resolve(import.meta.dirname, '..', 'prompts');
-    for (const rel of ['chat.md', 'review.md', 'collide.md', 'personas/责编.md', 'schemes/结构对抗型.md']) {
+    for (const rel of ['chat.md', 'review.md', 'collide.md', 'summary.md', 'quality-check.md', 'personas/责编.md', 'schemes/结构对抗型.md']) {
       expect(SHIPPED_FILE_HASHES[rel]).toBeDefined();
       expect(SHIPPED_FILE_HASHES[rel]!).toContain(contentHash(fs.readFileSync(path.join(promptsDir, rel), 'utf8')));
     }

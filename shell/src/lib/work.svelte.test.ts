@@ -19,6 +19,15 @@ const VOLUME: VolumeNode[] = [{ type: 'volume', title: '第一卷', children: [c
 
 const READ_RESULT = { content: '正文', frontmatter: {}, frontmatterRaw: '---\nfoo: 1\n---\n', body: '正文' };
 
+/** list_trash 返回的条目样例（契约镜像）。 */
+const TRASH_ENTRY = {
+  trashPath: '.novel/trash/第一卷__第一章-x.md',
+  kind: 'chapter' as const,
+  originalPath: '第一卷/第一章.md',
+  deletedAt: '2026-08-12T10:00:00Z',
+  name: '第一章-x.md',
+};
+
 function mockClient(overrides: Record<string, unknown> = {}): CoreClient {
   return {
     callTool: vi.fn(),
@@ -185,12 +194,14 @@ describe('WorkStore', () => {
     expect(work.dirty).toBe(true); // 脏标记兜底不丢
   });
 
-  it('deleteChapter：当前章软删 → 清 current、notice 提示、刷新结构', async () => {
-    const callTool = vi
-      .fn()
-      .mockResolvedValueOnce(READ_RESULT)
-      .mockResolvedValueOnce({ trashPath: 'C:/works/demo/.novel/trash/第一章.md' })
-      .mockResolvedValueOnce(VOLUME);
+  it('deleteChapter：当前章软删 → 清 current、notice 提示、刷新结构并触发回收站重拉', async () => {
+    const callTool = vi.fn((name: string) => {
+      if (name === 'read_chapter') return Promise.resolve(READ_RESULT);
+      if (name === 'delete_chapter') return Promise.resolve({ trashPath: 'C:/works/demo/.novel/trash/第一章.md' });
+      if (name === 'list_trash') return Promise.resolve({ entries: [TRASH_ENTRY] });
+      if (name === 'list_structure') return Promise.resolve(VOLUME);
+      return Promise.resolve(undefined);
+    });
     const client = mockClient({ callTool });
     const work = new WorkStore();
     work.init(client, 'C:/works/demo');
@@ -200,7 +211,11 @@ describe('WorkStore', () => {
     expect(work.current).toBeNull();
     expect(work.dirty).toBe(false);
     expect(work.notice).toContain('第一章.md');
-    expect(callTool).toHaveBeenLastCalledWith('list_structure', { workDir: 'C:/works/demo' });
+    // 删除成功后 fire-and-forget 重拉回收站（domain list_trash 为真相源）
+    expect(callTool).toHaveBeenCalledWith('list_trash', { workDir: 'C:/works/demo' });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(work.trashEntries).toEqual([TRASH_ENTRY]);
+    expect(work.structure).toEqual(VOLUME);
   });
 
   it('exportAll：成功 notice 带章数；失败红条', async () => {
@@ -298,52 +313,73 @@ describe('WorkStore', () => {
     expect(work.current?.relPath).toBe('第一卷/第一章·少年.md');
   });
 
-  it('deleteChapter：本地 trash 列表累积 trashPath（domain 无 list_trash 的兜底）', async () => {
-    const callTool = vi
-      .fn()
-      .mockResolvedValueOnce({ trashPath: '.novel/trash/第一卷__第一章-20260812-1.md' }) // delete_chapter
-      .mockResolvedValueOnce(VOLUME); // loadStructure
+  it('refreshTrash：list_trash 写入 trashEntries，首次成功后清旧 localStorage 残留 key（一次性迁移清理）', async () => {
+    const legacyKey = 'novel.trash.C:/works/demo';
+    _store.set(legacyKey, JSON.stringify([{ relPath: '旧.md', trashPath: '.novel/trash/旧-x.md', deletedAt: Date.now() }]));
+    const callTool = vi.fn((name: string) => {
+      if (name === 'list_trash') {
+        return Promise.resolve({ entries: [TRASH_ENTRY, { trashPath: '.novel/trash/junk', kind: 'volume', name: 'junk' }] });
+      }
+      return Promise.resolve(undefined);
+    });
     const client = mockClient({ callTool });
     const work = new WorkStore();
     work.init(client, 'C:/works/demo');
-    expect(work.listTrash()).toEqual([]);
-    await work.deleteChapter('第一卷/第一章.md');
-    const entries = work.listTrash();
-    expect(entries).toHaveLength(1);
-    expect(entries[0]).toMatchObject({ relPath: '第一卷/第一章.md', trashPath: '.novel/trash/第一卷__第一章-20260812-1.md' });
+    expect(work.trashEntries).toEqual([]);
+    await work.refreshTrash();
+    // domain 列表原样落状态（含无 originalPath/deletedAt 的无时间戳垃圾条目）
+    expect(work.trashEntries).toHaveLength(2);
+    expect(work.trashEntries[0]).toMatchObject({ originalPath: '第一卷/第一章.md' });
+    expect(work.trashEntries[1]?.originalPath).toBeUndefined();
+    // 迁移清理：壳侧旧跟踪数据与 domain 真相源可能不一致，首次 list_trash 成功后作废删除
+    expect(_store.has(legacyKey)).toBe(false);
   });
 
-  it('restoreTrash：读 trash → 写回原路径 → 删 trash 条目 → 刷结构', async () => {
+  it('refreshTrash：list_trash 失败静默——不抛错、列表保持现状、console.warn 留痕；成功前不清旧 key', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const legacyKey = 'novel.trash.C:/works/demo';
+    _store.set(legacyKey, '[]');
+    const client = mockClient({ callTool: vi.fn().mockRejectedValue(new Error('core 是旧版没有 list_trash')) });
+    const work = new WorkStore();
+    work.init(client, 'C:/works/demo');
+    await expect(work.refreshTrash()).resolves.toBeUndefined(); // 失败静默不抛
+    expect(work.trashEntries).toEqual([]);
+    expect(_store.has(legacyKey)).toBe(true); // 未成功拉取不动旧数据
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it('restoreTrash：读 trash → 按 originalPath 写回 → 重拉列表 → 刷结构', async () => {
     const trashContent = '---\nfoo: 1\n---\n旧章内容';
-    const callTool = vi
-      .fn()
-      .mockResolvedValueOnce(READ_RESULT) // openChapter
-      .mockResolvedValueOnce({ trashPath: '.novel/trash/第一卷__第一章-x.md' }) // delete
-      .mockResolvedValueOnce(VOLUME) // loadStructure after delete
-      .mockResolvedValueOnce({ content: trashContent }) // restore read_chapter on trash path
-      .mockResolvedValueOnce(undefined) // restore write_chapter
-      .mockResolvedValueOnce(VOLUME); // loadStructure after restore
+    const callTool = vi.fn().mockImplementation((name: string) => {
+      if (name === 'read_chapter') return Promise.resolve({ content: trashContent }); // restore read_chapter on trash path
+      if (name === 'write_chapter') return Promise.resolve(undefined);
+      if (name === 'list_trash') return Promise.resolve({ entries: [] }); // 找回后重拉：条目已移出
+      if (name === 'list_structure') return Promise.resolve(VOLUME);
+      return Promise.resolve(undefined);
+    });
     const client = mockClient({ callTool });
     const work = new WorkStore();
     work.init(client, 'C:/works/demo');
-    await work.openChapter(VOLUME[0]!.children[0]!);
-    await work.deleteChapter('第一卷/第一章.md');
-    expect(work.listTrash()).toHaveLength(1);
+    work.trashEntries = [TRASH_ENTRY]; // 预置回收站状态（refreshTrash 已拉取过的现场）
     const ok = await work.restoreTrash('.novel/trash/第一卷__第一章-x.md');
     expect(ok).toBe(true);
-    expect(work.listTrash()).toEqual([]);
+    expect(work.notice).toContain('第一卷/第一章.md');
     expect(callTool).toHaveBeenCalledWith('read_chapter', {
       workDir: 'C:/works/demo',
       relPath: '.novel/trash/第一卷__第一章-x.md',
     });
+    // 写回目标是 domain 给的 originalPath（不再是壳侧记录的 relPath）
     expect(callTool).toHaveBeenCalledWith('write_chapter', {
       workDir: 'C:/works/demo',
       relPath: '第一卷/第一章.md',
       content: trashContent,
     });
+    expect(work.trashEntries).toEqual([]); // 重拉后条目已移出
+    expect(work.structure).toEqual(VOLUME);
   });
 
-  it('restoreTrash：trashPath 不存在 → 报错返回 false', async () => {
+  it('restoreTrash：trashPath 不在当前列表 → 报错返回 false', async () => {
     const client = mockClient();
     const work = new WorkStore();
     work.init(client, 'C:/works/demo');
@@ -352,19 +388,31 @@ describe('WorkStore', () => {
     expect(work.error).toContain('回收站条目不存在');
   });
 
-  it('restoreTrash：write_chapter 失败 → work.error 红条', async () => {
-    const callTool = vi
-      .fn()
-      .mockResolvedValueOnce({ content: '---\n---\n旧' })
-      .mockRejectedValueOnce(new Error('写盘炸了'));
+  it('restoreTrash：entry 无 originalPath（无时间戳垃圾）→ notice 提示手动处理并中断，不发读写调用', async () => {
+    const callTool = vi.fn();
     const client = mockClient({ callTool });
     const work = new WorkStore();
     work.init(client, 'C:/works/demo');
-    // 预置 trash 条目
-    _store.set(
-      `novel.trash.${work.workDir}`,
-      JSON.stringify([{ relPath: 'manuscript/a.md', trashPath: '.novel/trash/a-x.md', deletedAt: Date.now() }]),
-    );
+    work.trashEntries = [{ trashPath: '.novel/trash/无名垃圾', kind: 'volume', name: '无名垃圾' }];
+    const ok = await work.restoreTrash('.novel/trash/无名垃圾');
+    expect(ok).toBe(false);
+    expect(work.notice).toContain('该条目无法还原原路径');
+    expect(work.notice).toContain('.novel/trash/');
+    expect(callTool).not.toHaveBeenCalledWith('read_chapter', expect.anything());
+    expect(callTool).not.toHaveBeenCalledWith('write_chapter', expect.anything());
+  });
+
+  it('restoreTrash：write_chapter 失败 → work.error 红条', async () => {
+    const callTool = vi.fn((name: string) => {
+      if (name === 'read_chapter') return Promise.resolve({ content: '---\n---\n旧' });
+      return Promise.reject(new Error('写盘炸了'));
+    });
+    const client = mockClient({ callTool });
+    const work = new WorkStore();
+    work.init(client, 'C:/works/demo');
+    work.trashEntries = [
+      { trashPath: '.novel/trash/a-x.md', kind: 'chapter', originalPath: 'manuscript/a.md', deletedAt: '2026-08-12T10:00:00Z', name: 'a-x.md' },
+    ];
     const ok = await work.restoreTrash('.novel/trash/a-x.md');
     expect(ok).toBe(false);
     expect(work.error).toContain('找回失败');

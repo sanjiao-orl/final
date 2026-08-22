@@ -26,6 +26,8 @@ function clientOf(overrides: Record<string, unknown> = {}): CoreClient {
     createCandidate: vi.fn().mockResolvedValue({ candidate: CAND }),
     patchCandidate: vi.fn().mockResolvedValue({ candidate: CAND }),
     rewriteStream: vi.fn().mockResolvedValue(undefined),
+    // 采纳落定后会 fire-and-forget 触发章摘要生成（POST /v1/summary/generate）
+    generateSummary: vi.fn().mockResolvedValue({ ok: true, frozen: true, record: { relPath: '', summary: '' } }),
     callTool: vi.fn().mockResolvedValue(undefined),
     // 采纳会触发 work.saveCurrent → 保存成功后 fire-and-forget 落账（任务 1b）
     recordStatsSnapshot: vi.fn().mockResolvedValue({ date: '2026-08-12', words: 100, prev: null, delta: null }),
@@ -249,7 +251,7 @@ describe('CandidatesStore', () => {
       .fn()
       .mockResolvedValueOnce({ content: '其他正文', frontmatter: {}, frontmatterRaw: '---\n---\n', body: '其他正文' }) // read_chapter
       .mockResolvedValueOnce(undefined) // write_chapter
-      .mockResolvedValueOnce({ type: 'volume', title: '第一卷', children: [] }); // 后台刷树
+      .mockResolvedValue({ type: 'volume', title: '第一卷', children: [] }); // 后台刷树 + 采纳后诊断/对账（空 findings/anchors）
     const client = clientOf({ patchCandidate, callTool });
     const store = new CandidatesStore();
     store.init(client);
@@ -404,14 +406,14 @@ describe('CandidatesStore', () => {
   });
 });
 
-describe('CandidatesStore · 采纳后自动诊断（批三-3）', () => {
+describe('CandidatesStore · 采纳后自动诊断 + 对账合并提示 + 章摘要触发', () => {
   beforeEach(() => {
     snapshot.dismissNotice();
   });
 
   const flush = () => new Promise<void>((r) => setTimeout(r, 0));
 
-  function adoptContext(overrides: Record<string, unknown> = {}): { store: CandidatesStore; callTool: ReturnType<typeof vi.fn> } {
+  function adoptContext(overrides: Record<string, unknown> = {}): { store: CandidatesStore; callTool: ReturnType<typeof vi.fn>; generateSummary: ReturnType<typeof vi.fn> } {
     const patchCandidate = vi.fn().mockResolvedValue({ candidate: CAND });
     const callTool = vi.fn((name: string) => {
       if (name === 'ledger_diagnostics') {
@@ -424,9 +426,14 @@ describe('CandidatesStore · 采纳后自动诊断（批三-3）', () => {
           blockerCount: 1,
         });
       }
+      if (name === 'ledger_reconcile') {
+        // chapterMissing+quoteMissing=3 计入提醒；lineDrift=9 提示级不计入
+        return Promise.resolve({ workDir: 'C:/works/demo', anchors: { checked: 5, ok: 2, chapterMissing: 1, quoteMissing: 2, lineDrift: 9 } });
+      }
       return Promise.resolve(undefined);
     });
-    const client = clientOf({ patchCandidate, callTool, ...overrides });
+    const generateSummary = vi.fn().mockResolvedValue({ ok: true, frozen: true, record: { relPath: '', summary: '' } });
+    const client = clientOf({ patchCandidate, callTool, generateSummary, ...overrides });
     const store = new CandidatesStore();
     store.init(client);
     work.init(client, 'C:/works/demo');
@@ -434,10 +441,10 @@ describe('CandidatesStore · 采纳后自动诊断（批三-3）', () => {
     work.registerEditor({ getMd: () => '原文X改写X', applyEdit: () => 'ok', appendMd: () => 'ok', replaceBodyMd: () => 'ok' });
     store.items = [CAND];
     store.toggleSelect('c1');
-    return { store, callTool };
+    return { store, callTool, generateSummary };
   }
 
-  it('adoptSelected：采纳落定后诊断有 findings → 弹无还原动作的轻提示（含 MAJOR/BLOCKER 计数）', async () => {
+  it('adoptSelected：采纳落定后诊断 + 对账并行跑，合并计数弹一次轻提示（lineDrift 不计入对账提醒）', async () => {
     const { store, callTool } = adoptContext();
     await store.adoptSelected();
     await flush();
@@ -445,14 +452,17 @@ describe('CandidatesStore · 采纳后自动诊断（批三-3）', () => {
       workDir: 'C:/works/demo',
       issueLogPath: 'editorial_notes/issues.md',
     });
-    expect(snapshot.notice?.message).toContain('诊断现存 2 条');
-    expect(snapshot.notice?.message).toContain('含 2 条 MAJOR/BLOCKER');
+    expect(callTool).toHaveBeenCalledWith('ledger_reconcile', { workDir: 'C:/works/demo' });
+    expect(snapshot.notice?.message).toContain('诊断 2 条');
+    expect(snapshot.notice?.message).toContain('对账 3 处锚异常');
+    expect(snapshot.notice?.message).not.toContain('9');
   });
 
-  it('adoptSelected：诊断无 findings → 不弹提示（不打扰）', async () => {
+  it('adoptSelected：诊断无 findings 且对账无锚异常 → 不弹提示（不打扰）', async () => {
     const { store } = adoptContext({
       callTool: vi.fn((name: string) => {
         if (name === 'ledger_diagnostics') return Promise.resolve({ findings: [], hasBlockers: false, blockerCount: 0 });
+        if (name === 'ledger_reconcile') return Promise.resolve({ workDir: 'C:/works/demo', anchors: { checked: 5, ok: 5, chapterMissing: 0, quoteMissing: 0, lineDrift: 2 } });
         return Promise.resolve(undefined);
       }),
     });
@@ -461,17 +471,81 @@ describe('CandidatesStore · 采纳后自动诊断（批三-3）', () => {
     expect(snapshot.notice).toBeNull();
   });
 
-  it('adoptSelected：诊断调用失败 → 静默不弹提示', async () => {
+  it('adoptSelected：诊断调用失败但对账有锚异常 → 只按对账计数提示（任一失败不影响另一个）', async () => {
     const { store } = adoptContext({
       callTool: vi.fn((name: string) => {
         if (name === 'ledger_diagnostics') return Promise.reject(new Error('core 掉线'));
+        if (name === 'ledger_reconcile') return Promise.resolve({ workDir: 'C:/works/demo', anchors: { checked: 5, ok: 4, chapterMissing: 1, quoteMissing: 0, lineDrift: 0 } });
         return Promise.resolve(undefined);
       }),
     });
     await store.adoptSelected();
     await flush();
-    expect(snapshot.notice).toBeNull();
+    expect(snapshot.notice?.message).toContain('对账 1 处锚异常');
+    expect(snapshot.notice?.message).not.toContain('诊断');
     expect(work.error).toBeNull(); // 不污染采纳主链路
+  });
+
+  it('adoptSelected：对账调用失败但诊断有 findings → 只按诊断计数提示', async () => {
+    const { store } = adoptContext({
+      callTool: vi.fn((name: string) => {
+        if (name === 'ledger_diagnostics') return Promise.resolve({ findings: [{ severity: 'MAJOR', message: 'x' }] });
+        if (name === 'ledger_reconcile') return Promise.reject(new Error('core 掉线'));
+        return Promise.resolve(undefined);
+      }),
+    });
+    await store.adoptSelected();
+    await flush();
+    expect(snapshot.notice?.message).toContain('诊断 1 条');
+    expect(snapshot.notice?.message).not.toContain('对账');
+  });
+
+  it('adoptSelected：采纳后对每个受影响章 fire-and-forget 触发章摘要生成，失败静默不报红条', async () => {
+    const { store, generateSummary } = adoptContext();
+    await store.adoptSelected();
+    expect(generateSummary).toHaveBeenCalledTimes(1);
+    expect(generateSummary).toHaveBeenCalledWith('C:/works/demo', '章节A.md');
+    await flush();
+    expect(work.error).toBeNull();
+
+    // 摘要是导生缓存：失败被吞，下次采纳会重建，不影响采纳结果
+    const genFail = vi.fn().mockRejectedValue(new Error('LLM 超时'));
+    const ctx2 = adoptContext({ generateSummary: genFail });
+    await ctx2.store.adoptSelected();
+    await flush();
+    expect(genFail).toHaveBeenCalledTimes(1);
+    expect(work.error).toBeNull();
+  });
+
+  it('adoptSelected：跨章采纳 → 对每个受影响章各触发一次章摘要生成', async () => {
+    const patchCandidate = vi.fn().mockResolvedValue({ candidate: CAND });
+    const generateSummary = vi.fn().mockResolvedValue({ ok: true, frozen: true, record: { relPath: '', summary: '' } });
+    const callTool = vi.fn().mockResolvedValue(undefined); // write_chapter / 后台刷树 / 诊断 / 对账全空
+    const listCandidates = vi.fn().mockResolvedValue({ candidates: [] });
+    const client = clientOf({ patchCandidate, generateSummary, callTool, listCandidates });
+    const store = new CandidatesStore();
+    store.init(client);
+    work.init(client, 'C:/works/demo');
+    work.structure = [
+      { type: 'volume', title: '第一卷', children: [{ type: 'chapter', title: 'A', relPath: 'A.md', wordCount: 1, scenes: [] }] },
+      { type: 'volume', title: '第二卷', children: [{ type: 'chapter', title: 'B', relPath: 'B.md', wordCount: 1, scenes: [] }] },
+    ];
+    // 当前在 A 章，采纳 A 章一条 + B 章一条（B 需先开章：read_chapter 回包）
+    const TREE = work.structure; // 后台刷树回同一棵树，避免 structure 被后台 loadStructure 打空
+    (callTool as ReturnType<typeof vi.fn>).mockImplementation((name: string) => {
+      if (name === 'read_chapter') return Promise.resolve({ content: 'b', frontmatter: {}, frontmatterRaw: '---\n---\n', body: 'b' });
+      if (name === 'list_structure') return Promise.resolve(TREE);
+      return Promise.resolve(undefined);
+    });
+    work.registerEditor({ getMd: () => 'x改写X', applyEdit: () => 'ok', appendMd: () => 'ok', replaceBodyMd: () => 'ok' });
+    store.items = [{ ...CAND, chapter: 'A.md' }, { ...CAND, id: 'c2', chapter: 'B.md' }];
+    store.toggleSelect('c1');
+    store.toggleSelect('c2');
+    await store.adoptSelected();
+    await flush();
+    expect(generateSummary).toHaveBeenCalledWith('C:/works/demo', 'A.md');
+    expect(generateSummary).toHaveBeenCalledWith('C:/works/demo', 'B.md');
+    expect(generateSummary).toHaveBeenCalledTimes(2);
   });
 });
 

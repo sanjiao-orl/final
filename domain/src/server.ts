@@ -3,7 +3,8 @@
  * 双侧合并口径：基础工具 8 个 + WS-9 scan_quality + A 组 8 工具 + WS-17 账本 4 工具 + 0008 skill_read 1 工具 + 0009 问题日志 2 工具（issue_append/issue_set_status）+ scheme_set_active 1 工具（激活/取消激活方案指针）。
  * 批三-3 新增 2 工具：ledger_chapter_slice（按章过滤的账本视图，只读）+ write_meta（书级元数据写入，不写账本/不写正文）。
  * 批一③ 碰撞模式 新增 3 工具：decision_append（裁决留痕追加）/ decision_tail（裁决留痕尾部只读）/ chapter_set_blueprint（章蓝图模式设置），并在 frontmatter 透出 blueprint、buildChapter 透传。
- * 被 core 包经 MCP stdio spawn 调用；工具实现见 tools.ts / ledger.ts。
+ * 块1 理解层供料 新增 4 工具：ledger_reconcile（证据锚对账）/ write_chapter_summary + read_chapter_summaries（章摘要导生缓存，机检字段首写冻结）/ list_trash（回收站收口）；ledger_diagnostics 输出并入节奏诊断（pacing-flat，加法）。
+ * 被 core 包经 MCP stdio spawn 调用；工具实现见 tools.ts / ledger.ts / reconcile.ts / summaries.ts。
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -18,6 +19,7 @@ import {
   exportTxt,
   listSnapshots,
   listStructure,
+  listTrash,
   moveChapter,
   moveVolume,
   readChapter,
@@ -48,6 +50,8 @@ import {
   type LedgerOp,
 } from './ledger.js';
 import { readSkillBody, schemeSetActive } from './prompts.js';
+import { reconcileLedger } from './reconcile.js';
+import { pacingDiagnostics, readChapterSummaries, writeChapterSummary } from './summaries.js';
 import domainPkg from '../package.json' with { type: 'json' };
 
 const server = new McpServer({
@@ -355,14 +359,20 @@ server.registerTool(
   {
     title: '账本确定性诊断',
     description:
-      '对 workDir 跑全量确定性诊断（零 LLM 成本，宁缺毋滥）：账本级 = 悬空伏笔 / 逾期伏笔 / 道具双位冲突 + 批三-2 三条新规则（clock-regression 时钟跨章倒退 / custody-chain-break 托管链断裂 / knowledge-no-knower 保密无知情人登记）；章级 = 章首时间跳变 / 季节冲突。返回 findings（code/chapter/severity/category/message）、hasBlockers（是否存在 BLOCKER）与 blockerCount（问题日志 CR 行 severity 列为 BLOCKER 的条数）——BLOCKER 计数已接进 hasBlockers，供暂存区入口标红，不做硬拦截。',
+      '对 workDir 跑全量确定性诊断（零 LLM 成本，宁缺毋滥）：账本级 = 悬空伏笔 / 逾期伏笔 / 道具双位冲突 + 批三-2 三条新规则（clock-regression 时钟跨章倒退 / custody-chain-break 托管链断裂 / knowledge-no-knower 保密无知情人登记）；章级 = 章首时间跳变 / 季节冲突；块1 并入章摘要节奏诊断 pacing-flat（连续 ≥5 章张力 ≤4，MODERATE/PACE，摘要缓存缺失/不足时静默不出）。返回 findings（code/chapter/severity/category/message）、hasBlockers（是否存在 BLOCKER）与 blockerCount（问题日志 CR 行 severity 列为 BLOCKER 的条数）——BLOCKER 计数已接进 hasBlockers，供暂存区入口标红，不做硬拦截。',
     inputSchema: {
       workDir: z.string().describe('作品文件夹的绝对路径'),
       ledgerPath: z.string().optional().describe('可选：账本文件相对 workDir 路径，必须是 .novel/ 根目录正下的 .md（不含子目录），默认 .novel/ledger.md'),
       issueLogPath: z.string().optional().describe('可选：问题日志（issues.md，CR 格式）相对 workDir 路径，必须是 .novel/ 根下或 editorial_notes/ 下的 .md，用于统计 BLOCKER 条数'),
     },
   },
-  async ({ workDir, ledgerPath, issueLogPath }) => jsonResult(diagnosticsForWork(workDir, ledgerPath, issueLogPath)),
+  async ({ workDir, ledgerPath, issueLogPath }) => {
+    const base = diagnosticsForWork(workDir, ledgerPath, issueLogPath);
+    // 块1：节奏诊断（章摘要 tension 机检字段）并入诊断输出——纯加法，pacing 永不产 BLOCKER，
+    // hasBlockers/blockerCount 口径不受影响。
+    const pacing = pacingDiagnostics(workDir);
+    return jsonResult(pacing.length > 0 ? { ...base, findings: [...base.findings, ...pacing] } : base);
+  },
 );
 
 server.registerTool(
@@ -571,6 +581,77 @@ server.registerTool(
     },
   },
   async ({ workDir, name }) => jsonResult({ ok: true, name, content: readSkillBody(workDir, name) }),
+);
+
+// 块1 理解层供料：证据锚对账器（第 32 个工具）
+server.registerTool(
+  'ledger_reconcile',
+  {
+    title: '账本证据锚对账',
+    description:
+      '对账器（确定性、零 LLM 成本、永不产 BLOCKER）：把四维账本里所有证据锚逐一回验正文——时钟表 chapters[] 每个章引用、道具托管链每步、伏笔 setups[]/payoffs[] 每条、知情事实的 since；锚 schema = chapter + 可选 line + 可选 quote（0013 决策3）。规则：锚指向的章不在当前章序 → anchor-chapter-missing（MAJOR/CONT，章被删/改名账本悬空）；有 quote 但在该章找不到 → anchor-quote-missing（MAJOR/CONT，账本抽错或正文已改）；quote 找到但行号与记录不符 → anchor-line-drift（MINOR/CONT，编辑漂移提示级）；无 quote 无 line 的纯章引用只验章存在性。返回 { workDir, anchors: { checked, ok, chapterMissing, quoteMissing, lineDrift }, findings, skipped? }。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      ledgerPath: z.string().optional().describe('可选：账本文件相对 workDir 路径，必须是 .novel/ 根目录正下的 .md（不含子目录），默认 .novel/ledger.md'),
+    },
+  },
+  async ({ workDir, ledgerPath }) => jsonResult(reconcileLedger(workDir, ledgerPath)),
+);
+
+// 块1 理解层供料：章摘要导生缓存写入（第 33 个工具；机检字段首写冻结）
+server.registerTool(
+  'write_chapter_summary',
+  {
+    title: '写入章摘要缓存',
+    description:
+      '把单章摘要写入导生缓存 .novel/cache/chapter-summaries.json（可焚可重建，原子写）。校验：relPath 必须在当前章序内；summary 非空；tension 若给必须是 1-10 整数；wordCount 若给必须 ≥0 整数。冻结语义（0013 决策4）：tension/sceneType/wordCount 三机检字段随首次落盘冻结，重建（再次写入）只回改 summary 散文与 generatedAt，机检字段只在旧记录缺该字段时补写。返回 { ok, frozen }（frozen=true 表示传入机检字段因旧值已存在被冻结未更新）。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      relPath: z.string().describe('章相对 workDir 路径，必须是 manuscript/ 内且在章序内的 .md'),
+      summary: z.string().describe('摘要散文（AI 生成，重建可改）'),
+      tension: z.number().int().min(1).max(10).optional().describe('可选：张力 1-10（机检字段，首写冻结）'),
+      sceneType: z.string().optional().describe('可选：场景类型（机检字段，首写冻结），如 战斗/日常/过渡/高潮/悬念/情感/其他'),
+      wordCount: z.number().int().min(0).optional().describe('可选：字数（机检字段，首写冻结；非空白字符口径）'),
+    },
+  },
+  async ({ workDir, relPath, summary, tension, sceneType, wordCount: wc }) =>
+    jsonResult(
+      writeChapterSummary(workDir, relPath, {
+        summary,
+        ...(tension !== undefined ? { tension } : {}),
+        ...(sceneType !== undefined ? { sceneType } : {}),
+        ...(wc !== undefined ? { wordCount: wc } : {}),
+      }),
+    ),
+);
+
+// 块1 理解层供料：章摘要导生缓存读取（第 34 个工具）
+server.registerTool(
+  'read_chapter_summaries',
+  {
+    title: '读取章摘要缓存',
+    description:
+      '读章摘要导生缓存（.novel/cache/chapter-summaries.json；可焚可重建，损坏按空缓存处理不抛错）。给 relPath 只返回该章（不在缓存→空数组）；不给返回全部，按章序排，被删/改名的章标 stale:true 排最后。返回 { summaries: [{ relPath, summary, tension?, sceneType?, wordCount?, generatedAt, stale? }] }。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      relPath: z.string().optional().describe('可选：章相对 workDir 路径'),
+      before: z.string().optional().describe('可选：章相对 workDir 路径——给了就只返回章序中该章之前最近一章有摘要的记录（0 或 1 条，供「前章摘要」注入）；与 relPath 同给时 before 优先'),
+    },
+  },
+  async ({ workDir, relPath, before }) =>
+    jsonResult(readChapterSummaries(workDir, relPath, before !== undefined ? { before } : undefined)),
+);
+
+// 块1：回收站收口进 domain（第 35 个工具；壳不再用 localStorage 跟踪软删）
+server.registerTool(
+  'list_trash',
+  {
+    title: '列出回收站',
+    description:
+      '列 .novel/trash/ 直接子项（不递归；目录不存在→空数组；只读）：每项 { trashPath, kind: chapter|volume, originalPath?, deletedAt?, name }——originalPath 从拍平文件名 best-effort 还原（章条目补回 .md 后缀；原名本身含 __ 的极端情形会失真），deletedAt 从文件名时间戳解析；无时间戳的垃圾文件名仍列出但无 originalPath/deletedAt。排序 deletedAt 新→旧。找回 = read_chapter 读 trashPath + write_chapter 写回 originalPath。',
+    inputSchema: { workDir: z.string().describe('作品文件夹的绝对路径') },
+  },
+  async ({ workDir }) => jsonResult(listTrash(workDir)),
 );
 
 // 挂起等待 stdio 上的 MCP 请求

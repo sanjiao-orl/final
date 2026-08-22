@@ -10,6 +10,7 @@
   import { captureSelection, locateUnique } from '../../lib/pm-search.js';
   import { refreshSuggests, Suggest } from '../../lib/suggest.js';
   import { candidates } from '../../lib/candidates.svelte.js';
+  import { quality } from '../../lib/quality.svelte.js';
   import { settings } from '../../lib/settings.svelte.js';
   import { statusVar, layout } from '../../theme.js';
   import { nextChapterStatus } from '../../lib/frontmatter.js';
@@ -326,6 +327,20 @@
       copying = false;
     }
   }
+
+  // ---------- 章节质检（作家助手「章节风险提示」范式）：点按钮→看风险→作者自行修改，不自动改、不拦截流转 ----------
+  const QC_KIND_LABELS: Record<string, string> = { typo: '错别字', sensitive: '敏感词', wording: '用词', other: '其他' };
+  function qcKindLabel(kind: string): string {
+    return QC_KIND_LABELS[kind] ?? '其他';
+  }
+  /** quote 截断展示（过长引用只给预览，定位靠行号）。 */
+  function qcQuote(q: string): string {
+    return q.length > 60 ? `${q.slice(0, 60)}…` : q;
+  }
+  function runQualityCheck(): void {
+    if (!cur || quality.checking) return;
+    void quality.run(work.workDir, cur.relPath);
+  }
 </script>
 
 <div class="scroller" bind:this={scroller}>
@@ -350,6 +365,14 @@
           >
             {copied ? '已复制' : copying ? '复制中…' : '复制'}
           </button>
+          <button
+            class="continue-btn qc-btn"
+            disabled={quality.checking}
+            title="章节质检：错别字 / 敏感词 / 用词风险提示（只提示，不自动修改）"
+            onclick={() => runQualityCheck()}
+          >
+            {quality.checking ? '质检中…' : '质检'}
+          </button>
           <!-- 发布状态三态流转（任务 2）：有 status 实态显当前值；无 status 虚态「草稿」（虚线/半透明） -->
           <button
             class="pill status"
@@ -370,6 +393,48 @@
             </span>
           {/if}
         </div>
+
+        <!-- 章节质检结果面板（可折叠，右上角关闭；只提示风险段落，作者自行修改） -->
+        {#if quality.open}
+          <div class="qc-panel">
+            <div class="qc-head">
+              <span class="qc-title">章节质检{quality.chapterTitle ? ` · ${quality.chapterTitle}` : ''}</span>
+              <button class="qc-close" onclick={() => quality.close()} aria-label="关闭质检面板" title="关闭">×</button>
+            </div>
+            {#if quality.truncated}
+              <p class="qc-truncated">正文过长已截断，结果可能不全</p>
+            {/if}
+            {#if quality.checking}
+              <p class="qc-loading">质检中…</p>
+            {:else if quality.error}
+              <p class="qc-error">质检失败：{quality.error}</p>
+            {:else if quality.result && quality.result.length > 0}
+              <ul class="qc-list">
+                {#each quality.result as f, i (i)}
+                  <li class="qc-item" class:unlocated={f.located === false}>
+                    <div class="qc-item-head">
+                      <span
+                        class="qc-badge"
+                        class:sensitive={f.kind === 'sensitive'}
+                        title={f.kind === 'sensitive' ? '敏感词：发布前务必处理' : undefined}
+                      >{qcKindLabel(f.kind)}</span>
+                      {#if f.located === false}
+                        <span class="qc-unlocated">未定位</span>
+                      {:else if typeof f.line === 'number'}
+                        <span class="qc-loc">第 {f.line} 行{typeof f.paraLine === 'number' ? ` · 段起于第 ${f.paraLine} 行` : ''}</span>
+                      {/if}
+                    </div>
+                    {#if f.quote}<blockquote class="qc-quote">{qcQuote(f.quote)}</blockquote>{/if}
+                    <p class="qc-reason">{f.reason}</p>
+                    {#if f.suggestion}<p class="qc-suggest">建议：{f.suggestion}</p>{/if}
+                  </li>
+                {/each}
+              </ul>
+            {:else}
+              <p class="qc-empty">未发现风险。</p>
+            {/if}
+          </div>
+        {/if}
       </div>
     {/if}
     <div class="prose" bind:this={host}></div>
@@ -530,6 +595,123 @@
   .goal-num {
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
+  }
+
+  /* —— 章节质检结果面板：章头下方可折叠，风险提示不拦截任何流转 —— */
+  .qc-panel {
+    margin-top: 14px;
+    padding: 10px 14px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--paper);
+    font-family: var(--ui-font);
+    font-size: 12.5px;
+  }
+  .qc-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .qc-title {
+    flex: 1;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    color: var(--ink);
+  }
+  .qc-close {
+    width: 20px;
+    height: 20px;
+    border-radius: 5px;
+    color: var(--muted);
+    cursor: pointer;
+    transition: background var(--t-hover), color var(--t-hover);
+  }
+  .qc-close:hover {
+    background: color-mix(in srgb, var(--muted) 12%, transparent);
+    color: var(--ink);
+  }
+  .qc-truncated,
+  .qc-loading,
+  .qc-empty {
+    margin: 8px 0 2px;
+    color: var(--muted);
+  }
+  .qc-truncated {
+    color: var(--status-polish);
+  }
+  .qc-error {
+    margin: 8px 0 2px;
+    padding: 6px 9px;
+    border-radius: 6px;
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 7%, transparent);
+    border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--line));
+  }
+  .qc-list {
+    list-style: none;
+    margin: 8px 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 320px;
+    overflow-y: auto;
+  }
+  .qc-item {
+    padding: 7px 9px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--panel);
+  }
+  /* LLM quote 没能逐字定位的条目整体灰显（正常降级，行号不可信） */
+  .qc-item.unlocated {
+    opacity: 0.62;
+  }
+  .qc-item-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .qc-badge {
+    padding: 1px 7px;
+    border-radius: 8px;
+    font-size: 10.5px;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid var(--accent-line);
+    flex: none;
+  }
+  /* 敏感词用警示色（发布前务必处理） */
+  .qc-badge.sensitive {
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 8%, transparent);
+    border-color: color-mix(in srgb, var(--danger) 35%, var(--line));
+  }
+  .qc-loc {
+    font-size: 11px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .qc-unlocated {
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .qc-quote {
+    margin: 5px 0 0;
+    padding: 3px 9px;
+    border-left: 2px solid var(--line);
+    color: var(--muted);
+    font-family: var(--body-font);
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .qc-reason {
+    margin: 5px 0 0;
+    color: var(--ink);
+  }
+  .qc-suggest {
+    margin: 4px 0 0;
+    color: var(--ok);
   }
   .prose {
     /* 行高按 --body-line-px 派生（默认 17px×1.6=27，theme.ts 的 lineHeightPx 派生），

@@ -10,6 +10,8 @@ import { corsHeadersFor, HttpError, readJsonBody, toPublicErrorMessage, writeJso
 import { handleReviewRequest } from './review.js';
 import { handleContinueRequest, type ContinueDeps } from './continue.js';
 import { handleRewriteRequest, type RewriteDeps } from './rewrite.js';
+import { generateChapterSummary, type SummaryDeps } from './summary.js';
+import { qualityCheckChapter, type QualityCheckDeps } from './qualityCheck.js';
 import { listPosture } from './prompts.js';
 import { normalizeWorkDir } from './workdir.js';
 import { PROTOCOL_VERSION } from './runtime.js';
@@ -34,6 +36,10 @@ export interface ServerDeps {
   stats: StatsStore;
   rewrite: RewriteDeps;
   continue: ContinueDeps;
+  /** 章摘要生成（便宜档）；tools 引用与 chat 同一 MCP 注册表。 */
+  summary: SummaryDeps;
+  /** 发布前质检（便宜档）。 */
+  qualityCheck: QualityCheckDeps;
   version: string;
   /** /v1/dev 联调页开关：缺省 = tsx dev 运行时开、prod bundle 关（见 devEnabledDefault）。 */
   devEnabled?: boolean;
@@ -63,6 +69,12 @@ const candidatePatchSchema = z
   .refine((o) => o.status !== undefined || o.proposed !== undefined || o.instruction !== undefined, {
     message: '至少要有一个待更新字段',
   });
+
+/** 章摘要生成 / 发布前质检共用请求体：workDir（作品文件夹）+ relPath（章相对路径）。 */
+const chapterTargetSchema = z.object({
+  workDir: z.string().min(1),
+  relPath: z.string().min(1),
+});
 
 export function createAppServer(deps: ServerDeps): Server {
   return createHttpServer((req, res) => {
@@ -250,6 +262,35 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
     return;
   }
 
+  if (req.method === 'POST' && pathname === '/v1/summary/generate') {
+    // 章摘要生成（便宜档）：同步执行返回 200 结果（壳侧 fire-and-forget 调用，不等不关心）。
+    // 工具/LLM 失败 → 502 + 中文 message；body 校验失败 400。
+    const parsed = chapterTargetSchema.safeParse(await readJsonBody(req));
+    if (!parsed.success) {
+      throw new HttpError(400, '请求体不合法: ' + parsed.error.issues.map((i) => i.message).join('; '));
+    }
+    const workDir = normalizeWorkDir(parsed.data.workDir);
+    const payload = await withDisconnectSignal(res, (signal) =>
+      generateChapterSummary(deps.summary, workDir, parsed.data.relPath, signal)
+    );
+    writeJson(res, 200, payload, req.headers.origin);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/v1/quality/check') {
+    // 发布前质检（便宜模型路线）：LLM 只找问题，位置由代码确定性定位；同步返回 findings。
+    const parsed = chapterTargetSchema.safeParse(await readJsonBody(req));
+    if (!parsed.success) {
+      throw new HttpError(400, '请求体不合法: ' + parsed.error.issues.map((i) => i.message).join('; '));
+    }
+    const workDir = normalizeWorkDir(parsed.data.workDir);
+    const payload = await withDisconnectSignal(res, (signal) =>
+      qualityCheckChapter(deps.qualityCheck, workDir, parsed.data.relPath, signal)
+    );
+    writeJson(res, 200, payload, req.headers.origin);
+    return;
+  }
+
   if (pathname === '/v1/candidates' || pathname.startsWith('/v1/candidates/')) {
     await routeCandidates(req, res, url, deps.candidates);
     return;
@@ -301,6 +342,21 @@ async function executeToolGuarded(
       throw new HttpError(499, '客户端已断连，工具执行已中止');
     }
     throw err;
+  } finally {
+    res.off('close', onClose);
+  }
+}
+
+/**
+ * 带客户端断连中止地跑一个异步任务：请求体已被路由层读完，只挂 res 'close'。
+ * 任务完成后恢复监听；断连后任务内部抛错也照常走统一错误出口（writeJson 对已销毁连接是 no-op）。
+ */
+async function withDisconnectSignal<T>(res: ServerResponse, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const disconnect = new AbortController();
+  const onClose = (): void => disconnect.abort();
+  res.once('close', onClose);
+  try {
+    return await run(disconnect.signal);
   } finally {
     res.off('close', onClose);
   }

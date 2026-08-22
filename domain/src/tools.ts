@@ -431,6 +431,88 @@ export function deleteVolume(workDir: string, volumePath: string): DeleteVolumeR
   return { ok: true, trashPath: toPosix(path.join('.novel', 'trash', stampName)) };
 }
 
+export interface TrashEntry {
+  /** 相对 workDir 的 trash 路径（正斜杠），如 .novel/trash/manuscript__卷一__第1章-20260822-123456789-ab12.md */
+  trashPath: string;
+  /** 还原的原路径（manuscript/... 正斜杠）；名字不可解析时缺省不出现。 */
+  originalPath?: string;
+  /** chapter | volume（.md 后缀=chapter，否则=volume）。 */
+  kind: 'chapter' | 'volume';
+  /** 删除时间（从文件名时间戳解析成本地 ISO 串）；解析不出缺省不出现。 */
+  deletedAt?: string;
+  /** 原始文件名（兜底展示用）。 */
+  name: string;
+}
+
+/**
+ * list_trash：列 .novel/trash/ 直接子项（不递归；目录不存在→空数组），只读不建目录。
+ * - 隐藏文件（. 开头）跳过；
+ * - 解析：去 .md 后缀判定 kind；尾部匹配 `-(\d{8})-(\d{9})-([0-9a-f]{4})`（deleteChapter/deleteVolume 的
+ *   stamp() 格式）→ deletedAt（本地时间转 ISO）；剩余拍平名按 deleteChapter 的 flattenRel 逆映射
+ *   `__`→`/` 还原 originalPath——只对带时间戳（=可解析为软删产物）的名字还原，best-effort：
+ *   原名本身含 `__` 的极端情形还原会失真，可接受；无时间戳的垃圾文件名不硬猜（originalPath 缺省不出现）；
+ * - 排序：deletedAt 新→旧；无 deletedAt 的排最后，按 name 字典序兜底；
+ * - 不抛错优先：单项解析失败仍列出（只有 name+kind）。
+ */
+export function listTrash(workDir: string): { entries: TrashEntry[] } {
+  const dir = path.join(assertWorkDir(workDir), '.novel', 'trash');
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { entries: [] }; // 没删过任何东西：目录不存在
+    throw err;
+  }
+  // 尾部时间戳（stamp() 格式：YYYYMMDD-HHMMSSmmm-xxxx）
+  const STAMP_TAIL_RE = /-(\d{8})-(\d{9})-([0-9a-f]{4})$/;
+  const entries: TrashEntry[] = names.map((name): TrashEntry | null => {
+    if (name.startsWith('.')) return null; // 隐藏文件跳过（map 内先占位，下面统一过滤）
+    try {
+      const isChapter = /\.md$/i.test(name);
+      const base = isChapter ? name.replace(/\.md$/i, '') : name;
+      const m = STAMP_TAIL_RE.exec(base);
+      let deletedAt: string | undefined;
+      let originalPath: string | undefined;
+      if (m) {
+        const [, ymd, hmsms] = m;
+        deletedAt = new Date(
+          Number(ymd!.slice(0, 4)),
+          Number(ymd!.slice(4, 6)) - 1,
+          Number(ymd!.slice(6, 8)),
+          Number(hmsms!.slice(0, 2)),
+          Number(hmsms!.slice(2, 4)),
+          Number(hmsms!.slice(4, 6)),
+          Number(hmsms!.slice(6, 9)),
+        ).toISOString();
+        // best-effort 还原原路径：只对带时间戳（=可解析为 deleteChapter/deleteVolume 产物）的名字还原；
+        // 无时间戳的垃圾文件名不硬猜（originalPath 缺省不出现）。拍平名非空才还原。
+        // flattenRel 拍平时剥掉了 .md 后缀，章条目还原时补回（卷目录本无后缀）。
+        const flattened = base.slice(0, m.index); // 去掉尾部时间戳，剩拍平名
+        if (flattened !== '') originalPath = flattened.split('__').join('/') + (isChapter ? '.md' : '');
+      }
+      const entry: TrashEntry = {
+        trashPath: toPosix(path.join('.novel', 'trash', name)),
+        kind: isChapter ? 'chapter' : 'volume',
+        ...(deletedAt !== undefined ? { deletedAt } : {}),
+        ...(originalPath !== undefined ? { originalPath } : {}),
+        name,
+      };
+      return entry;
+    } catch {
+      // 单项解析失败仍列出（只有 name+kind），不抛错
+      return { trashPath: toPosix(path.join('.novel', 'trash', name)), kind: /\.md$/i.test(name) ? 'chapter' : 'volume', name };
+    }
+  }).filter((e): e is TrashEntry => e !== null);
+  // 排序：deletedAt 新→旧（字符串比较即可，ISO 串字典序=时间序）；无 deletedAt 的排最后，name 字典序兜底
+  entries.sort((a, b) => {
+    if (a.deletedAt !== undefined && b.deletedAt !== undefined) return b.deletedAt.localeCompare(a.deletedAt);
+    if (a.deletedAt !== undefined) return -1;
+    if (b.deletedAt !== undefined) return 1;
+    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+  });
+  return { entries };
+}
+
 export interface ExportTxtResult {
   ok: true;
   /** 导出文件相对 workDir 的路径（正斜杠）。 */
