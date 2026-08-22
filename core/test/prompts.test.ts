@@ -188,6 +188,18 @@ describe('首次运行释放', () => {
     expect(fs.readFileSync(path.join(target, 'chat.md'), 'utf8')).toBe('修复后的新版聊天提示');
   });
 
+  it('升级通道：Windows 检出（autocrlf）把随包正本变成 CRLF 也认得——hash 行尾归一（CI windows-latest 回归）', () => {
+    const source = makeTmpDir();
+    const target = makeTmpDir();
+    writeTree(source, { 'chat.md': '修复后的新版聊天提示' });
+    const bundledChat = fs.readFileSync(path.resolve(import.meta.dirname, '..', 'prompts', 'chat.md'), 'utf8');
+    // 模拟 autocrlf 检出：LF → CRLF
+    writeTree(target, { 'chat.md': bundledChat.replace(/\n/g, '\r\n') });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    releasePrompts(target, source);
+    expect(fs.readFileSync(path.join(target, 'chat.md'), 'utf8')).toBe('修复后的新版聊天提示');
+  });
+
   it('升级通道：目标被本地改过 → 跳过覆盖并 warn 提示，永不覆盖', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const source = makeTmpDir();

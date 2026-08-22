@@ -153,9 +153,13 @@ export function resolvePromptRoot(env: NodeJS.ProcessEnv = process.env): string 
   return bundledPromptDir();
 }
 
-/** 计算内容 sha256（十六进制小写，utf8 编码），与随包 hash 清单同一口径。 */
+/**
+ * 计算内容 sha256（十六进制小写，utf8 编码），与随包 hash 清单同一口径。
+ * 行尾归一（\r\n → \n）后哈希：Windows 检出（autocrlf）会把随包正本变成 CRLF，行尾敏感的 hash
+ * 会把「作者没改过」误判为「本地改过」而跳过升级（CI windows-latest 实证）；内容比对只认逻辑行。
+ */
 export function contentHash(content: string): string {
-  return createHash('sha256').update(content, 'utf8').digest('hex');
+  return createHash('sha256').update(content.replace(/\r\n/g, '\n'), 'utf8').digest('hex');
 }
 
 /**
