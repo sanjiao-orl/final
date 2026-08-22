@@ -205,7 +205,7 @@ describe('/v1/chat SSE 管道', () => {
       vi.unstubAllEnvs();
       await s.close();
     }
-  });
+  }, 20_000); // 真实 1s 超时 + 全管道，CI 双核 runner 可超 vitest 默认 5s（同回放条数预算先例）
 
   it('客户端断连：中止 LLM 请求，不落库 assistant 消息（用户消息已落库）', async () => {
     let aborted = false;
@@ -404,7 +404,7 @@ describe('/v1/chat SSE 管道', () => {
     } finally {
       await s.close();
     }
-  });
+  }, 20_000); // CI 双核 runner 可超 vitest 默认 5s（同回放条数预算先例）
 
   it('失败轮落库：服务端超时已产生的文本随部分 assistant 消息落库，SSE 收到 error', async () => {
     vi.stubEnv('LLM_TIMEOUT_SECONDS', '1');
@@ -423,7 +423,7 @@ describe('/v1/chat SSE 管道', () => {
       vi.unstubAllEnvs();
       await s.close();
     }
-  });
+  }, 20_000); // 真实 1s 超时 + 全管道，CI 双核 runner 可超 vitest 默认 5s
 
   it('失败轮落库：多步工具轮在后续步骤超时时，已收集的 toolCalls 落库为部分 assistant 消息', async () => {
     vi.stubEnv('LLM_TIMEOUT_SECONDS', '1');
@@ -460,7 +460,7 @@ describe('/v1/chat SSE 管道', () => {
       vi.unstubAllEnvs();
       await s.close();
     }
-  });
+  }, 20_000); // 真实 1s 超时 + 全管道，CI 双核 runner 可超 vitest 默认 5s
 
   it('回放工具调用摘要：带 toolCalls 的 assistant 行 content 末尾追加 [工具调用]；空 content 有 toolCalls 不再跳过', async () => {
     const model = stepModel([textResult(['好'])]);
