@@ -5,7 +5,7 @@
   import { iconSvg } from '../lib/icons.js';
   import { TRASH_DIR } from '../lib/paths.js';
   import { candidates } from '../lib/candidates.svelte.js';
-  import { settings } from '../lib/settings.svelte.js';
+  import { settings, APPROVAL_MODES, APPROVAL_MODE_LABELS, APPROVAL_MODE_DESCS, type ApprovalMode } from '../lib/settings.svelte.js';
   import { dialog } from '../lib/dialog.svelte.js';
   import { review } from '../lib/review.svelte.js';
   import { scheme } from '../lib/scheme.svelte.js';
@@ -140,6 +140,27 @@
     if (ok) schemeOpen = false;
   }
 
+  // ---------- 审批模式就地三选菜单（T14）：不再跳设置栏，复刻方案下拉的 overlay+menu 两件套 ----------
+  let approvalOpen = $state(false);
+  /** yolo 二次确认态：第一次点 yolo 只进入确认态，再点才真正生效；关菜单/选其他项即取消。 */
+  let yoloConfirming = $state(false);
+
+  function toggleApprovalMenu(): void {
+    approvalOpen = !approvalOpen;
+    yoloConfirming = false;
+  }
+
+  /** 选择审批模式：ask/auto 单击即生效并收起；yolo 走两段式确认。 */
+  function pickApprovalMode(mode: ApprovalMode): void {
+    if (mode === 'yolo' && !yoloConfirming) {
+      yoloConfirming = true;
+      return;
+    }
+    settings.setApproval(mode);
+    approvalOpen = false;
+    yoloConfirming = false;
+  }
+
   // ---------- 码字日历（任务 1d：按日落账热力 + 速度摘要） ----------
   let calOpen = $state(false);
   let calLoading = $state(false);
@@ -228,9 +249,38 @@
 
   <span class="tb-spacer"></span>
 
-  <button class="tb-mode" title="当前审批模式(B6) — 点击打开设置栏" onclick={() => ui.toggleCol('settings')}>
-    <i class="dot"></i>{settings.approvalMode} 模式
-  </button>
+  <span class="tb-mode-anchor">
+    <button
+      class="tb-mode"
+      class:on={approvalOpen}
+      onclick={toggleApprovalMenu}
+      title={`当前审批模式：${settings.approvalMode} — ${APPROVAL_MODE_LABELS[settings.approvalMode]}，点击切换`}
+    >
+      <i class="dot"></i>审批·{APPROVAL_MODE_LABELS[settings.approvalMode]}
+    </button>
+    {#if approvalOpen}
+      <!-- T14 审批模式下拉：同款 overlay+menu 两件套；yolo 项两段式确认，选其他项或关 overlay 即取消 -->
+      <button class="approval-menu-overlay" onclick={toggleApprovalMenu} aria-label="关闭审批模式菜单"></button>
+      <div class="approval-menu" role="menu" aria-label="审批模式">
+        {#each APPROVAL_MODES as m (m)}
+          <button
+            class="approval-item"
+            class:confirm={m === 'yolo' && yoloConfirming}
+            role="menuitem"
+            onclick={() => pickApprovalMode(m)}
+          >
+            <span class="check">{settings.approvalMode === m ? '✓' : ''}</span>
+            <span class="body">
+              <span class="name">
+                {#if m === 'yolo' && yoloConfirming}确认开启全部放行？写/删/导出将不再询问{:else}{APPROVAL_MODE_LABELS[m]}{/if}
+              </span>
+              <span class="desc">{m === 'yolo' && yoloConfirming ? '再次点击确认；点其他项取消' : APPROVAL_MODE_DESCS[m]}</span>
+            </span>
+          </button>
+        {/each}
+      </div>
+    {/if}
+  </span>
   <span class="tb-scheme-anchor">
     <button class="tb-mode" class:on={schemeOpen} onclick={toggleSchemeMenu} title="角色与方案(0010) — 三通道（chat/rewrite/review）请求携带当前方案的 persona">
       <i class="dot"></i>方案：{scheme.activeScheme ?? '默认'}
@@ -288,10 +338,10 @@
     onclick={() => void review.toggle()}
     title={review.running
       ? '审阅正在后台进行：点击查看进度或取消；完成后结果保留'
-      : '审阅：全书去AI味扫描 + 账本确定性诊断（零 LLM 成本）；BLOCKER 未清零时徽标常显'}
+      : '审阅：全书去AI味扫描 + 账本确定性诊断（零 LLM 成本）；拦路（BLOCKER）未清零时徽标常显'}
   >
     {@html iconSvg('search', 15)}
-    {review.running ? (review.open ? '扫描中…' : '后台扫描中…') : '审阅'}{#if review.blockerTotal > 0}<i class="tb-badge danger" title="BLOCKER 未清零">{review.blockerTotal}</i>{/if}
+    {review.running ? (review.open ? '扫描中…' : '后台扫描中…') : '审阅'}{#if review.blockerTotal > 0}<i class="tb-badge danger" title="拦路（BLOCKER）未清零">{review.blockerTotal}</i>{/if}
   </button>
   <button class="tb-btn" class:on={candidates.stagingTab} onclick={() => candidates.openStaging()} title="暂存区：AI 产出候选，批量采纳/整改/丢弃">
     {@html iconSvg('drawer', 15)}
@@ -460,6 +510,85 @@
   .tb-mode.on {
     border-color: var(--accent-line);
     color: var(--accent);
+  }
+  /* T14 审批模式下拉：包裹 pill 锚定，几何同款方案/日历下拉（样式名独立，避免与 scheme-menu 撞） */
+  .tb-mode-anchor {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    height: 100%;
+    flex: none;
+  }
+  .approval-menu-overlay {
+    position: fixed;
+    inset: 0;
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: default;
+    z-index: 40;
+  }
+  .approval-menu {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    z-index: 41;
+    min-width: 260px;
+    max-width: 320px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    box-shadow: var(--shadow-pop);
+    padding: 5px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  /* 菜单项：主行中文标签 + 一行小字说明；yolo 确认态整条转 danger 色 */
+  .approval-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    width: 100%;
+    padding: 5px 8px;
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--ink);
+    text-align: left;
+    cursor: pointer;
+    transition: background var(--t-hover);
+    background: none;
+    border: none;
+  }
+  .approval-item:hover {
+    background: color-mix(in srgb, var(--muted) 10%, transparent);
+  }
+  .approval-item .check {
+    width: 14px;
+    flex: none;
+    color: var(--accent);
+    font-weight: 700;
+  }
+  .approval-item .name {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .approval-item .desc {
+    display: block;
+    margin-top: 1px;
+    font-size: 10.5px;
+    line-height: 1.5;
+    color: var(--muted);
+    white-space: normal;
+  }
+  .approval-item.confirm .name {
+    color: var(--danger);
+    font-weight: 600;
+  }
+  .approval-item.confirm .desc,
+  .approval-item.confirm .check {
+    color: var(--danger);
   }
   /* 决策 0010 方案下拉：包裹 pill 锚定（撑满 header 高度 → top:100% 即落到 header 下方，right:0 对齐 pill 右缘） */
   .tb-scheme-anchor {

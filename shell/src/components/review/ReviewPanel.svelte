@@ -12,11 +12,23 @@
   import type { JumpTarget } from '../../lib/jump-target.js';
   import { work } from '../../lib/work.svelte.js';
 
+  // T13 术语中文化：pill 显示中文，英文原值留在 title（代码层枚举仍是 domain 契约镜像）
   const SEV_LABEL: Record<FindingSeverity, string> = {
-    BLOCKER: 'BLOCKER',
-    MAJOR: 'MAJOR',
-    MODERATE: 'MODERATE',
-    MINOR: 'MINOR',
+    BLOCKER: '拦路',
+    MAJOR: '严重',
+    MODERATE: '中等',
+    MINOR: '轻微',
+  };
+  // 贵档 finding 类别（对齐 domain FindingCategory）；未知值原样显示
+  const CATEGORY_LABEL: Record<string, string> = {
+    CONT: '连续',
+    CANON: '设定',
+    VOICE: '声口',
+    CRAFT: '笔法',
+    STRUCT: '结构',
+    PACE: '节奏',
+    REPEAT: '重复',
+    META: '元信息',
   };
   const SCAN_SEV_LABEL: Record<ScanSeverity, string> = {
     fail: '超标',
@@ -92,7 +104,7 @@
         class="btn sm"
         disabled={review.running}
         onclick={() => void review.run()}
-        title={review.running ? '正在处理，完成后可点击' : `按「${REVIEW_LEVELS.find((l) => l.id === review.level)?.label}」档重跑（处理完问题后重跑，BLOCKER 清零徽标即消失）`}
+        title={review.running ? '正在处理，完成后可点击' : `按「${REVIEW_LEVELS.find((l) => l.id === review.level)?.label}」档重跑（处理完问题后重跑，拦路（BLOCKER）清零徽标即消失）`}
       >重跑</button>
       <button class="icon-btn" onclick={() => review.close()} aria-label="关闭审阅报告">{@html iconSvg('close', 14, 2)}</button>
     </div>
@@ -101,7 +113,7 @@
   <!-- 反馈#4：三档说明（名字 + 干什么 + 贵不贵），点之前知道会发生什么 -->
   <div class="tiers">
     <div class="tier"><b>① 全书扫描</b><span class="t-desc">scan_quality 逐章量化「去 AI 味」指标，纯本地确定性计算，免费。</span></div>
-    <div class="tier"><b>② 账本诊断</b><span class="t-desc">ledger_diagnostics 四维账本确定性检查 + 问题日志 BLOCKER 计数，免费。</span></div>
+    <div class="tier"><b>② 账本诊断</b><span class="t-desc">ledger_diagnostics 四维账本确定性检查 + 问题日志拦路（BLOCKER）计数，免费。</span></div>
     <div class="tier"><b>③ 贵档冷读</b><span class="t-desc">对当前章 LLM 冷读审阅（只注入单章 + 账本切片），走主笔模型，按章计费、需数秒至数十秒。</span></div>
     <div class="tier"><b>级别</b><span class="t-desc">快速=仅①；标准=①+②（默认）；深度=①+②+自动对当前章跑③。扫描可关掉面板后台进行。</span></div>
   </div>
@@ -137,11 +149,11 @@
       {@const r = review.report}
 
       <div class="summary">
-        <span class="pill sev-BLOCKER" class:off={r.counts.BLOCKER === 0}>BLOCKER {r.counts.BLOCKER}</span>
-        <span class="pill sev-MAJOR" class:off={r.counts.MAJOR === 0}>MAJOR {r.counts.MAJOR}</span>
-        <span class="pill sev-MODERATE" class:off={r.counts.MODERATE === 0}>MODERATE {r.counts.MODERATE}</span>
+        <span class="pill sev-BLOCKER" class:off={r.counts.BLOCKER === 0} title="BLOCKER">拦路 {r.counts.BLOCKER}</span>
+        <span class="pill sev-MAJOR" class:off={r.counts.MAJOR === 0} title="MAJOR">严重 {r.counts.MAJOR}</span>
+        <span class="pill sev-MODERATE" class:off={r.counts.MODERATE === 0} title="MODERATE">中等 {r.counts.MODERATE}</span>
         {#if r.issueLogBlockers > 0}
-          <span class="pill sev-BLOCKER" title="问题日志（CR 格式）里的 BLOCKER 条数">日志 BLOCKER {r.issueLogBlockers}</span>
+          <span class="pill sev-BLOCKER" title="问题日志（CR 格式）里的 BLOCKER 条数">日志拦路 {r.issueLogBlockers}</span>
         {/if}
         <span class="pill scan" class:off={r.scanFail === 0}>指标超标 {r.scanFail}</span>
         <span class="pill scan-warn" class:off={r.scanWarn === 0}>指标临界 {r.scanWarn}</span>
@@ -174,7 +186,7 @@
         <div class="card-body">
           {#each r.bookFindings as f (f.code + f.message)}
             <div class="finding">
-              <span class="pill sev-{f.severity}">{SEV_LABEL[f.severity]}</span>
+              <span class="pill sev-{f.severity}" title={f.severity}>{SEV_LABEL[f.severity]}</span>
               <span class="fmsg">{f.message}</span>
               <!-- 账本级条目无章定位，按钮禁用并说明（保持与章内一致的视觉） -->
               <button class="jump" disabled title="该诊断无章节定位信息">定位</button>
@@ -204,7 +216,7 @@
           <div class="card-head">
             <span class="ch">{c.title}</span>
             {#if c.findings.some((f) => f.severity === 'BLOCKER') || c.premium.some((f) => f.severity === 'BLOCKER')}
-              <span class="pill sev-BLOCKER">BLOCKER</span>
+              <span class="pill sev-BLOCKER" title="BLOCKER">拦路</span>
             {/if}
             {#if c.metrics.length === 0 && c.findings.length === 0 && c.premium.length === 0}
               <span class="meta-note">干净</span>
@@ -215,7 +227,7 @@
             <div class="card-body">
               {#each c.findings as f (f.code + f.message)}
                 <div class="finding">
-                  <span class="pill sev-{f.severity}">{SEV_LABEL[f.severity]}</span>
+                  <span class="pill sev-{f.severity}" title={f.severity}>{SEV_LABEL[f.severity]}</span>
                   <span class="fmsg">{f.message}</span>
                   {#if f.chapter}
                     {@const ch = f.chapter}
@@ -231,8 +243,8 @@
                   {@const fid = review.findingId(c.relPath, i)}
                   {@const disposal = review.disposalOf(c.relPath, i)}
                   <div class="finding premium" class:disposed={disposal !== undefined}>
-                    <span class="pill sev-{f.severity}">{SEV_LABEL[f.severity]}</span>
-                    {#if f.category}<span class="pill" title="问题类别">{f.category}</span>{/if}
+                    <span class="pill sev-{f.severity}" title={f.severity}>{SEV_LABEL[f.severity]}</span>
+                    {#if f.category}<span class="pill" title={`问题类别：${f.category}`}>{CATEGORY_LABEL[f.category] ?? f.category}</span>{/if}
                     <span class="fmsg">
                       <span class="quote">「{f.quote}」</span> {f.why}
                       {#if f.suggestion}<span class="sug">建议：{f.suggestion}</span>{/if}

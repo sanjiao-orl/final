@@ -12,6 +12,23 @@ import { tauriInvoke, type CoreClient, type LlmStatus } from './core.js';
 
 export type ApprovalMode = 'ask' | 'auto' | 'yolo';
 
+/** 审批模式全集（Toolbar 三选菜单与 SettingsColumn 卡片共用的单一事实源）。 */
+export const APPROVAL_MODES: readonly ApprovalMode[] = ['ask', 'auto', 'yolo'];
+
+/** 审批模式中文标签（T14）：pill/菜单/设置卡共用，英文原值另以 title 保留。 */
+export const APPROVAL_MODE_LABELS: Record<ApprovalMode, string> = {
+  ask: '逐项询问',
+  auto: '同目标免问',
+  yolo: '全部放行',
+};
+
+/** 审批模式一行说明（菜单小字 / 设置卡描述共用；语义对齐 approval.svelte.ts 头注释）。 */
+export const APPROVAL_MODE_DESCS: Record<ApprovalMode, string> = {
+  ask: 'AI 直调写/删/导出前一律弹审批卡；暂存采纳路径不弹。',
+  auto: '本会话内同工具同目标放行一次后不再询问，换目标仍询问。',
+  yolo: '全部自动放行；写入仍强制事前快照（B4 不受模式影响）。',
+};
+
 /** 与 core/rust normalizePresetId 同口径：环境变量预设 id 统一为大写下划线。 */
 export function normalizePresetId(id: string): string {
   return id.trim().toUpperCase().replace(/[^A-Z0-9]+/g, '_');

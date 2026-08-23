@@ -1,7 +1,7 @@
 // settings.svelte.ts 应用级配置单测：loadAppConfig / saveAppConfig / restartCore（mock tauri invoke，
 // 参照现有 *.svelte.test.ts 的写法）。localStorage 偏好项不在本文件覆盖范围（原逻辑不动）。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { normalizePresetId, settings } from './settings.svelte.js';
+import { normalizePresetId, settings, APPROVAL_MODES, APPROVAL_MODE_LABELS, APPROVAL_MODE_DESCS } from './settings.svelte.js';
 
 type InvokeFn = (cmd: string, args?: Record<string, unknown>) => unknown;
 
@@ -397,6 +397,42 @@ describe('LLM core 生效态', () => {
   it('normalizePresetId：与 core 统一为大写下划线', () => {
     expect(normalizePresetId('MAIN-WRITER-AB12')).toBe('MAIN_WRITER_AB12');
     expect(normalizePresetId(' main writer ab12 ')).toBe('MAIN_WRITER_AB12');
+  });
+});
+
+describe('审批模式常量与 setter（T14 三选菜单/设置卡共用）', () => {
+  it('APPROVAL_MODES：三模式按保守→放开排序', () => {
+    expect(APPROVAL_MODES).toEqual(['ask', 'auto', 'yolo']);
+  });
+
+  it('LABELS/DESCS：三模式键齐全且中文文案非空', () => {
+    expect(APPROVAL_MODE_LABELS).toEqual({ ask: '逐项询问', auto: '同目标免问', yolo: '全部放行' });
+    for (const m of APPROVAL_MODES) {
+      expect(APPROVAL_MODE_LABELS[m].length).toBeGreaterThan(0);
+      expect(APPROVAL_MODE_DESCS[m].length).toBeGreaterThan(0);
+    }
+    // 关键语义不回退：auto 限本会话、yolo 仍强制快照
+    expect(APPROVAL_MODE_DESCS.auto).toContain('本会话');
+    expect(APPROVAL_MODE_DESCS.yolo).toContain('快照');
+  });
+
+  it('setApproval：切换 approvalMode 并持久化到 settings.approval', () => {
+    const values = new Map<string, string>();
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      value: {
+        getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => values.set(key, value),
+        removeItem: (key: string) => values.delete(key),
+      },
+    });
+    settings.setApproval('yolo');
+    expect(settings.approvalMode).toBe('yolo');
+    expect(values.get('settings.approval')).toBe('"yolo"');
+    settings.setApproval('ask');
+    expect(settings.approvalMode).toBe('ask');
+    expect(values.get('settings.approval')).toBe('"ask"');
+    delete (globalThis as { localStorage?: unknown }).localStorage;
   });
 });
 

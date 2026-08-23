@@ -3,14 +3,15 @@
   // 保存与快照（自动保存间隔、采纳前自动快照常开）、暂存与裁决（分流/采纳留痕）。
   // 第二步新增：作品目录（config.json workDir）+ 模型配置（BYOK 双档 LLM_*），保存后重启 core 生效。
   import { open } from '@tauri-apps/plugin-dialog';
-  import { settings, normalizePresetId, type ApprovalMode } from '../../lib/settings.svelte.js';
+  import { settings, APPROVAL_MODES, APPROVAL_MODE_LABELS, APPROVAL_MODE_DESCS, normalizePresetId, type ApprovalMode } from '../../lib/settings.svelte.js';
   import type { ResolvedField } from '../../lib/settings.svelte.js';
 
-  const APPROVALS: { mode: ApprovalMode; name: string; desc: string }[] = [
-    { mode: 'ask', name: 'ask · 逐项询问', desc: 'AI 直调写/删/导出前一律弹审批卡；暂存采纳路径不弹（已有人的裁决）。默认。' },
-    { mode: 'auto', name: 'auto · 同类放行', desc: '本会话内同工具同目标放行一次后不再询问，换目标仍询问。' },
-    { mode: 'yolo', name: 'yolo · 完全放手', desc: '全部自动放行。所有写入仍强制事前快照（B4 不受模式影响）。' },
-  ];
+  // T14 单一事实源：审批模式文案统一来自 settings.svelte.ts 常量（原英文值留 title）
+  const APPROVALS: { mode: ApprovalMode; name: string; desc: string }[] = APPROVAL_MODES.map((mode) => ({
+    mode,
+    name: APPROVAL_MODE_LABELS[mode],
+    desc: APPROVAL_MODE_DESCS[mode],
+  }));
 
   const ASSIGNS: { purpose: 'writing' | 'background' | 'review'; name: string }[] = [
     { purpose: 'writing', name: '写作档' },
@@ -55,7 +56,7 @@
   <div class="label">审批模式(B6)</div>
   <div class="approval-cards">
     {#each APPROVALS as a (a.mode)}
-      <button class="opt" class:on={settings.approvalMode === a.mode} onclick={() => settings.setApproval(a.mode)}>
+      <button class="opt" class:on={settings.approvalMode === a.mode} title={`审批模式：${a.mode}`} onclick={() => settings.setApproval(a.mode)}>
         <span class="radio"></span>
         <span class="body">
           <span class="o-name">{a.name}</span>

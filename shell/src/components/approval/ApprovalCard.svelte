@@ -4,7 +4,7 @@
   import { tick } from 'svelte';
   import { approval } from '../../lib/approval.svelte.js';
   import { chat } from '../../lib/chat.svelte.js';
-  import { settings } from '../../lib/settings.svelte.js';
+  import { settings, APPROVAL_MODE_LABELS } from '../../lib/settings.svelte.js';
   import { work } from '../../lib/work.svelte.js';
 
   const req = $derived(approval.active);
@@ -52,7 +52,7 @@
     <div class="card" bind:this={cardEl}>
       <div class="head">
         <span class="title" id="approval-title">审批 · 危险操作</span>
-        <span class="tag">{settings.approvalMode} 模式挂起</span>
+        <span class="tag" title={`当前审批模式：${settings.approvalMode}`}>{APPROVAL_MODE_LABELS[settings.approvalMode]}模式挂起</span>
       </div>
       <div class="body">
         AI 请求绕过暂存区，直接改动作品文件。这是写操作，且不经人工裁决路径。
@@ -83,9 +83,9 @@
       <div class="foot">
         审批模式(B6)
         <span class="modes">
-          <span class="mini-mode" class:on={settings.approvalMode === 'ask'}>ask</span>
-          <span class="mini-mode" class:on={settings.approvalMode === 'auto'}>auto</span>
-          <span class="mini-mode" class:on={settings.approvalMode === 'yolo'}>yolo</span>
+          <span class="mini-mode" class:on={settings.approvalMode === 'ask'} title={APPROVAL_MODE_LABELS.ask}>ask</span>
+          <span class="mini-mode" class:on={settings.approvalMode === 'auto'} title={APPROVAL_MODE_LABELS.auto}>auto</span>
+          <span class="mini-mode" class:on={settings.approvalMode === 'yolo'} title={APPROVAL_MODE_LABELS.yolo}>yolo</span>
         </span>
       </div>
     </div>
