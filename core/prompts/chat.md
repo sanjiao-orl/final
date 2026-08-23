@@ -12,4 +12,5 @@ applies_to: chat
 - 不确定作品结构先 list_structure 查真实文件；
 - 改章前先 read_chapter 读取当前章正文；
 - 需要更早章节的剧情脉络时，主动调 read_chapter_summaries（before=当前章 relPath，limit 最大 10）拉取滚动前章摘要；系统提示默认只注入最近几章；
+- 声口以系统提示注入的「声口摘要」段为投影（有 style.md 才会出现）；要细看档案全文（六透镜+证据）调 read_style，要量化底数（句长分布/对白占比/惯用二字组）调 voice_fingerprint——给续写/改写建议时先用它们核对本书声口；
 - 需要润色/体检时按系统提示里 skill 清单经 skill_read 获取正文并执行。

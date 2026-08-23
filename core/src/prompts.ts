@@ -22,7 +22,7 @@ export const PROMPT_FILENAMES: Record<PromptKind, string> = {
 };
 
 /** 规范预置 skill 文件名（随包释放时与 prompt 一起补缺）。 */
-export const SKILL_FILENAMES = ['skill-deai-polish.md', 'skill-chapter-checkup.md', 'skill-chapter-drafting.md'] as const;
+export const SKILL_FILENAMES = ['skill-deai-polish.md', 'skill-chapter-checkup.md', 'skill-chapter-drafting.md', 'skill-voice-profiling.md'] as const;
 
 /** 规范预置角色文件名（决策 0010/0013：app 级 persona 库，随包释放；书级同名遮蔽）。 */
 export const PERSONA_FILENAMES = ['责编.md', '讨论陪练.md', '毒舌书评人.md', '小白读者.md'] as const;
