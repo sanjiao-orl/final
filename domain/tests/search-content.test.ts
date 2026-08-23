@@ -2,6 +2,8 @@
  * search_content.test.ts —— 大小写不敏感子串匹配、excerpt 截断、limit。
  */
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { searchContent } from '../src/tools.js';
 import { makeWorkDir, writeTree } from './helpers.js';
@@ -98,5 +100,36 @@ describe('search_content', () => {
     const work = makeWorkDir();
     writeTree(work, { 'manuscript/第1章.md': '目标词在这里。' });
     expect(searchContent(work, '目标词').skipped).toBeUndefined();
+  });
+});
+
+/**
+ * 符号链接跳过上报（评审T3）：collectMdFiles 对 symlink 条目不再静默 continue，
+ * 经 onSkip 上报、消费端（此处 search_content，已传 onSkip）计入 skipped——扫描不静默漏章。
+ * Windows 用目录联接 junction（免管理员权限，readdir dirent 报 isSymbolicLink）。
+ */
+describe('search_content 符号链接跳过上报', () => {
+  it('manuscript 内的 symlink 不再静默漏：计入 skipped、不搜链接内容、仓内正常章不受影响', () => {
+    const work = makeWorkDir();
+    writeTree(work, { 'manuscript/第1章.md': '目标词在仓内。' });
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'domain-junction-'));
+    try {
+      fs.writeFileSync(path.join(outside, '外章.md'), '目标词在仓外。', 'utf8');
+      fs.symlinkSync(outside, path.join(work, 'manuscript', '外链'), 'junction');
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const hits = searchContent(work, '目标词');
+        expect(hits.map((h) => h.relPath)).toEqual(['manuscript/第1章.md']); // 链接内容不进搜索
+        expect(hits.skipped).toEqual([
+          { path: 'manuscript/外链', reason: expect.stringContaining('符号链接') },
+        ]);
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+        expect(String(warnSpy.mock.calls[0]?.[0])).toContain('外链');
+      } finally {
+        warnSpy.mockRestore();
+      }
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
   });
 });

@@ -101,7 +101,7 @@ export function errText(err: unknown): string {
 /**
  * 递归收集 manuscript 下的所有 .md 文件（符号链接一律跳过，防止链接逃逸），
  * 按 rel 排序保证输出稳定；manuscript 不存在时返回空数组。
- * 目录不可读时不再静默：console.warn 带路径与错误，并通过可选 onSkip 上报
+ * 目录不可读与符号链接条目均不再静默：console.warn 带路径与错误，并通过可选 onSkip 上报
  * （rel 相对 manuscriptDir，'' 表示 manuscript 根），供扫描类工具组装 skipped 列表。
  */
 export function collectMdFiles(
@@ -120,7 +120,13 @@ export function collectMdFiles(
       return;
     }
     for (const e of entries) {
-      if (e.isSymbolicLink()) continue; // 防符号链接逃逸
+      if (e.isSymbolicLink()) {
+        // 防符号链接逃逸：不再静默 continue——warn + onSkip 上报，扫描类工具据此计入 skipped（章序/字数/搜索不静默漏章）
+        const relName = path.join(rel, e.name);
+        console.warn(`[fsutil] 符号链接已跳过: ${path.join(manuscriptDir, relName)}（防链接逃逸）`);
+        onSkip?.(relName, new Error('符号链接已跳过（防链接逃逸）'));
+        continue;
+      }
       if (e.isDirectory()) {
         walk(path.join(dir, e.name), path.join(rel, e.name));
       } else if (e.isFile() && e.name.toLowerCase().endsWith('.md')) {
