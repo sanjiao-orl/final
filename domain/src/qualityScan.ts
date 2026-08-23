@@ -107,9 +107,10 @@ const EXCERPT_LEN = 60;
 
 /** 汉字数（CJK Unified Ideographs + Ext-A，与 LAY 检测命令口径一致）。 */
 export function countCjk(text: string): number {
+  // 码元循环：目标区间全在 BMP，逐码点迭代与逐码元计数等价（评审T4：避免迭代器开销）
   let n = 0;
-  for (const ch of text) {
-    const c = ch.codePointAt(0)!;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
     if ((c >= 0x3400 && c <= 0x4dbf) || (c >= 0x4e00 && c <= 0x9fff)) n += 1;
   }
   return n;
@@ -125,12 +126,26 @@ interface BodyLine {
   line: number;
 }
 
-interface Paragraph {
-  /** 段落原文（多行拼接，去换行）。 */
-  text: string;
+/**
+ * 段落紧凑摘要（内存优化，评审T4）：扫描单章时即时抽取、随即丢弃段落全文，
+ * 不再让 RawChapter 持有每段全文（300 章档曾净增 ~117MB）。只承载两个消费者的全部输入：
+ * metricParagraphLength（长度指标）与 computeBook 的跨章模板段检测。
+ */
+interface ParaDigest {
   /** 段落首行行号。 */
   line: number;
+  /** 段落 CJK 字数（countCjk 同口径）。 */
   cjk: number;
+  /** 段落开头截断：多行拼接（逐行 trim 去换行）后的前 EXCERPT_LEN 字，供长度命中明细。 */
+  excerpt: string;
+  /** 纯标题段标记（拼接结果 # 开头；空串不可能出现——cur 内各行均非空行）。不参与长度/模板检测。 */
+  heading: boolean;
+  /**
+   * 跨章模板段落 opening：段落 CJK 剥离串的前 20 字。
+   * 仅当非标题段且剥离串 ≥TEMPLATE_MIN_CJK 字时才有值，否则 undefined（不参与模板检测）。
+   * 剥离正则区间 \u3400-\u4dbf\u4e00-\u9fff 与 countCjk 完全一致，资格判断语义不变。
+   */
+  opening?: string;
 }
 
 /** 正文 → 带行号的行列表；baseLine = 正文首行在文件中的 1 起始行号。 */
@@ -139,14 +154,49 @@ function bodyLines(body: string, baseLine: number): BodyLine[] {
   return lines.map((text, i) => ({ text, line: baseLine + i }));
 }
 
-/** 按空行分组段落；纯标题段（### 等）保留但标记，不参与长度/模板检查。 */
-function paragraphs(lines: BodyLine[]): Paragraph[] {
-  const out: Paragraph[] = [];
+/** 按空行分组段落并即时抽取紧凑摘要（评审T4 内存优化：不持段落全文，也不物化拼接全文/CJK 剥离串——逐行单趟流式累计）；纯标题段保留但标记，不参与长度/模板检查。 */
+function paragraphs(lines: BodyLine[]): ParaDigest[] {
+  const out: ParaDigest[] = [];
   let cur: BodyLine[] = [];
   const flush = (): void => {
     if (cur.length === 0) return;
-    const text = cur.map((l) => l.text.trim()).join('');
-    out.push({ text, line: cur[0]!.line, cjk: countCjk(text) });
+    let cjk = 0;
+    let excerpt = '';
+    let opening: string | undefined;
+    let heading = false;
+    let excerptDone = false;
+    const openingUnits: number[] = []; // opening 以 fromCharCode 一次成型，避免 += 产生 cons 串链
+    for (let i = 0; i < cur.length; i++) {
+      const t = cur[i]!.text.trim();
+      if (i === 0) heading = HEADING_RE.test(t); // 拼接结果的首字符来自首行 trim 后首字符
+      // 单趟累计：CJK 码元数、前 20 个 CJK 字。区间 \u3400-\u4dbf\u4e00-\u9fff 全是 BMP 码元，
+      // 故「剥离串长度 == CJK 计数」「剥离串前 20 字 == 依序累计的前 20 个 CJK 字」，与旧实现等价。
+      for (let j = 0; j < t.length; j++) {
+        const c = t.charCodeAt(j);
+        if ((c >= 0x3400 && c <= 0x4dbf) || (c >= 0x4e00 && c <= 0x9fff)) {
+          cjk += 1;
+          if (openingUnits.length < 20) openingUnits.push(c);
+        }
+      }
+      // 摘录 = 逐行 trim 后 join 的全文前 EXCERPT_LEN 字；攒够即停，不再拼余下行
+      if (!excerptDone) {
+        excerpt += t;
+        if (excerpt.length >= EXCERPT_LEN) {
+          excerpt = excerpt.slice(0, EXCERPT_LEN);
+          excerptDone = true;
+        }
+      }
+    }
+    if (!heading && openingUnits.length >= TEMPLATE_MIN_CJK) {
+      opening = String.fromCharCode(...openingUnits);
+    }
+    out.push({
+      line: cur[0]!.line,
+      cjk,
+      excerpt,
+      heading,
+      ...(opening === undefined ? {} : { opening }),
+    });
     cur = [];
   };
   for (const l of lines) {
@@ -231,11 +281,12 @@ function metricNotShi(lines: BodyLine[]): Metric {
   let count = 0;
   let more = 0;
   for (const l of lines) {
-    const seen = new Set<number>();
+    let seen: Set<number> | undefined; // 惰性创建：无命中的行不分配（评审T4 内存优化）
     for (const p of pats) {
       let m: RegExpExecArray | null;
       p.re.lastIndex = 0;
       while ((m = p.re.exec(l.text)) !== null) {
+        if (seen === undefined) seen = new Set<number>();
         if (!seen.has(m.index)) {
           seen.add(m.index);
           count += 1;
@@ -273,11 +324,12 @@ function metricMetaDiscourse(lines: BodyLine[]): Metric {
   let count = 0;
   let more = 0;
   for (const l of lines) {
-    const seen = new Set<number>();
+    let seen: Set<number> | undefined; // 惰性创建：无命中的行不分配（评审T4 内存优化）
     for (const p of pats) {
       let m: RegExpExecArray | null;
       p.re.lastIndex = 0;
       while ((m = p.re.exec(l.text)) !== null) {
+        if (seen === undefined) seen = new Set<number>();
         if (!seen.has(m.index)) {
           seen.add(m.index);
           count += 1;
@@ -302,21 +354,21 @@ function metricMetaDiscourse(lines: BodyLine[]): Metric {
   };
 }
 
-/** 段落长度：>200 字警告、>300 字超标（novel-improver / writing-novel 阶段三清单）。 */
-function metricParagraphLength(paras: Paragraph[]): Metric {
+/** 段落长度：>200 字警告、>300 字超标（novel-improver / writing-novel 阶段三清单）。吃紧凑摘要而非全文。 */
+function metricParagraphLength(paras: ParaDigest[]): Metric {
   const hits: ScanHit[] = [];
   let count = 0;
   let more = 0;
   let worst = 0;
   for (const p of paras) {
-    if (p.text.trim() === '' || HEADING_RE.test(p.text.trim())) continue;
+    if (p.heading) continue; // 空/标题段不参与（与旧实现按全文 trim/HEADING_RE 判断等价）
     if (p.cjk > worst) worst = p.cjk;
     if (p.cjk <= PARA_WARN) continue;
     count += 1;
     if (hits.length < MAX_HITS) {
       hits.push({
         line: p.line,
-        text: `${p.cjk} 字：${p.text.slice(0, EXCERPT_LEN)}`,
+        text: `${p.cjk} 字：${p.excerpt}`,
       });
     } else {
       more += 1;
@@ -393,30 +445,100 @@ export function isFilteredNgram(ng: string): boolean {
  * 高频词：CJK 双字/三字 n-gram 词频（无分词器的确定性近似）。
  * 口径统一（NGRAM_CANDIDATE）：同词 ≥3 次/章进入候选；≥4 次（NGRAM_WARN）警告；>5 次（NGRAM_FAIL）异常。
  * 人名/称谓/功能词碎片先经 isFilteredNgram 过滤（WS-7 顺手改良），其余仍为候选而非判决。
+ *
+ * [评审T4 内存优化] 不再物化「跨行拼接的 CJK 串」、也不对每个位置做 slice 生成 n-gram 字符串
+ * （旧实现每章 ~6000 个短字符串 + Map 字符串键）。计数走模块级复用的开放寻址散列表
+ * （Float64Array/Uint32Array 后备存储在 GC 堆外，不参与 Scavenge 复制与晋升，且跨章复用零分配）；
+ * 仅对进入候选（≥NGRAM_CANDIDATE 且未被过滤）的少量 n-gram 还原字符串参与排序/输出。
+ * 编码：CJK 码元减 0x3400 后按 HF_CJK_BASE=0x6c00 进制压位（区间 \u3400-\u4dbf ∪ \u4e00-\u9fff
+ * 共 27648 格），三字键最大 ~2.1e13 < 2^53 精确可表；码元序列→数字为双射 → 与旧字符串键一一
+ * 对应，候选集与排序输入完全一致 → 输出与旧实现逐字节一致（终排序与插入序无关）。
  */
+const HF_CJK_BASE = 0x6c00;
+/** 三字键标签（=HF_CJK_BASE²）：三字压位值在前导码元为 0（首字 U+3400）时会落进二字键值域，
+ * 加标签后二字键 ∈ [0, BASE²)、三字键 ∈ [BASE², BASE²+BASE³)，两域不相交，码元序列→键成双射。 */
+const HF_TAG3 = HF_CJK_BASE * HF_CJK_BASE;
+let hfKeys = new Float64Array(1 << 14); // 存「键+1」：全零压位键（㐀㐀/㐀㐀㐀）编码为 0，+1 后 0 只表示空槽
+let hfCounts = new Uint32Array(1 << 14);
+let hfUsed = 0;
+
+function hfGrow(): void {
+  const keys = new Float64Array(hfKeys.length * 2);
+  const counts = new Uint32Array(hfKeys.length * 2);
+  for (let i = 0; i < hfKeys.length; i++) {
+    const k = hfKeys[i]!;
+    if (k === 0) continue;
+    let j = k % keys.length;
+    while (keys[j] !== 0) j = (j + 1) % keys.length;
+    keys[j] = k;
+    counts[j] = hfCounts[i]!;
+  }
+  hfKeys = keys;
+  hfCounts = counts;
+}
+
+function hfRecord(key: number): void {
+  const stored = key + 1; // +1：全零压位键（㐀㐀/㐀㐀㐀）编码为 0，避免与空槽哨兵冲突
+  if ((hfUsed + 1) * 2 > hfKeys.length) hfGrow();
+  let i = stored % hfKeys.length;
+  while (hfKeys[i] !== 0) {
+    if (hfKeys[i] === stored) {
+      hfCounts[i]! += 1;
+      return;
+    }
+    i = (i + 1) % hfKeys.length;
+  }
+  hfKeys[i] = stored;
+  hfCounts[i] = 1;
+  hfUsed += 1;
+}
+
 function metricHighFreq(lines: BodyLine[]): Metric {
-  // 去掉标题行后取纯 CJK 序列
-  const cjk = lines
-    .filter((l) => !HEADING_RE.test(l.text.trim()))
-    .map((l) => l.text.replace(/[^\u3400-\u4dbf\u4e00-\u9fff]/g, ''))
-    .join('');
-  const freq = new Map<string, number>();
-  for (let i = 0; i < cjk.length - 1; i++) {
-    const bigram = cjk.slice(i, i + 2);
-    freq.set(bigram, (freq.get(bigram) ?? 0) + 1);
+  hfKeys.fill(0);
+  hfCounts.fill(0);
+  hfUsed = 0;
+  // 流式携带跨行边界的前两个 CJK 码元（合法值 ≥0x3400，0 作哨兵表示尚无前文）
+  let prev2 = 0;
+  let prev1 = 0;
+  for (const l of lines) {
+    if (HEADING_RE.test(l.text.trim())) continue;
+    const t = l.text;
+    for (let i = 0; i < t.length; i++) {
+      const c = t.charCodeAt(i);
+      if ((c < 0x3400 || c > 0x4dbf) && (c < 0x4e00 || c > 0x9fff)) continue;
+      if (prev1 !== 0) hfRecord((prev1 - 0x3400) * HF_CJK_BASE + (c - 0x3400));
+      if (prev2 !== 0) hfRecord(HF_TAG3 + ((prev2 - 0x3400) * HF_CJK_BASE + (prev1 - 0x3400)) * HF_CJK_BASE + (c - 0x3400));
+      prev2 = prev1;
+      prev1 = c;
+    }
   }
-  for (let i = 0; i < cjk.length - 2; i++) {
-    const trigram = cjk.slice(i, i + 3);
-    freq.set(trigram, (freq.get(trigram) ?? 0) + 1);
+  const toNg = (v0: number, len: 2 | 3): string => {
+    const units: number[] = [];
+    let v = v0;
+    for (let i = 0; i < len; i++) {
+      units.push(0x3400 + (v % HF_CJK_BASE));
+      v = Math.floor(v / HF_CJK_BASE);
+    }
+    return String.fromCharCode(...units.reverse());
+  };
+  const cand: { ng: string; n: number }[] = [];
+  for (let i = 0; i < hfKeys.length; i++) {
+    const stored = hfKeys[i]!;
+    if (stored === 0) continue;
+    const k = stored - 1; // 去 +1（见 hfKeys 声明处注释）
+    const n = hfCounts[i]!;
+    if (n < NGRAM_CANDIDATE) continue;
+    // 三字键带 HF_TAG3 标签（二字/三字值域不相交，见 HF_TAG3 注释）
+    const ng = k >= HF_TAG3 ? toNg(k - HF_TAG3, 3) : toNg(k, 2);
+    if (!isFilteredNgram(ng)) cand.push({ ng, n });
   }
-  const flagged = [...freq.entries()]
-    .filter(([ng, n]) => n >= NGRAM_CANDIDATE && !isFilteredNgram(ng))
-    .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+  const flagged = cand
+    .sort((a, b) => b.n - a.n || (a.ng < b.ng ? -1 : 1))
     .slice(0, 15);
   let worst = 0;
   const hits: ScanHit[] = [];
   let more = 0;
-  for (const [ng, n] of flagged) {
+  for (const { ng, n } of flagged) {
     if (n > worst) worst = n;
     if (hits.length >= MAX_HITS) {
       more += 1;
@@ -499,10 +621,12 @@ interface RawChapter {
   title: string;
   metrics: Metric[];
   scenes: { title: string; line: number }[];
-  paragraphs: Paragraph[];
 }
 
-function scanChapterRaw(body: string, baseLine: number, relPath: string, title: string): RawChapter {
+/** 单章原始扫描结果 = 章级驻留数据 + 段落紧凑摘要。摘要由 scanWork 即时折叠进书级 openings 后即弃。 */
+type ChapterRawWithParas = RawChapter & { paragraphs: ParaDigest[] };
+
+function scanChapterRaw(body: string, baseLine: number, relPath: string, title: string): ChapterRawWithParas {
   const lines = bodyLines(body, baseLine);
   const paras = paragraphs(lines);
   const { scenes, metric: scenesMetric } = metricScenes(lines);
@@ -536,7 +660,7 @@ export function scanChapter(content: string, relPath = '', title = ''): ChapterS
 
 // ---------- 书级指标 ----------
 
-function computeBook(raws: RawChapter[]): BookScan {
+function computeBook(raws: RawChapter[], openings: Map<string, number[]>): BookScan {
   // 场景轮换池：全稿去重 ### 标题（按首次出现顺序）
   const pool: string[] = [];
   const seen = new Set<string>();
@@ -569,23 +693,12 @@ function computeBook(raws: RawChapter[]): BookScan {
     }
   }
 
-  // 跨章模板段落候选：同一段落开头（前 20 CJK 字）出现在 ≥2 个不同章
-  const openings = new Map<string, Set<string>>();
-  for (const r of raws) {
-    for (const p of r.paragraphs) {
-      const text = p.text.trim();
-      if (text === '' || HEADING_RE.test(text)) continue;
-      const cjk = text.replace(/[^\u3400-\u4dbf\u4e00-\u9fff]/g, '');
-      if (cjk.length < TEMPLATE_MIN_CJK) continue;
-      const opening = cjk.slice(0, 20);
-      const set = openings.get(opening) ?? new Set<string>();
-      set.add(r.relPath);
-      openings.set(opening, set);
-    }
-  }
+  // 跨章模板段落候选：同一段落开头（前 20 CJK 字）出现在 ≥2 个不同章。
+  // openings 由 scanWork 在逐章扫描时即时折叠（opening → 严格递增的章下标数组，见 scanWork 注释），
+  // 此处只做终筛：下标还原为 relPath 后排序，与旧「Set 去重 + 排序」输出逐字节一致。
   const templateParagraphs: TemplateParagraph[] = [...openings.entries()]
-    .filter(([, chs]) => chs.size >= TEMPLATE_MIN_CHAPTERS)
-    .map(([opening, chs]) => ({ opening, chapters: [...chs].sort() }))
+    .filter(([, idxs]) => idxs.length >= TEMPLATE_MIN_CHAPTERS)
+    .map(([opening, idxs]) => ({ opening, chapters: idxs.map((i) => raws[i]!.relPath).sort() }))
     .sort((a, b) => (a.opening < b.opening ? -1 : 1));
 
   return { scenePool: pool, sceneContinuity, templateParagraphs };
@@ -626,6 +739,12 @@ export function scanWork(workDir: string, signal?: AbortSignal): WorkScanResult 
   });
   // scan 前按编号感知阅读序重排章列表（字典序会在 >9 章/汉字编号时错序，见 compareChapterFiles）
   const raws: RawChapter[] = [];
+  // 跨章模板段落候选的 opening → 章下标数组：逐章扫描后即时折叠（评审T4 内存优化）。
+  // - 段落摘要不随章累积，避免驻留数据在频繁 Scavenge 下被反复复制/晋升（RSS 超线性根因）；
+  // - 值用章下标（SMI）而非 relPath 字符串集合：每章只在折叠时连续出现，查尾去重即可，
+  //   数组元素为小整数、无 HeapNumber/Set 开销，终筛时再还原为 relPath。
+  const openings = new Map<string, number[]>();
+  let chapterIdx = 0;
   for (const f of [...files].sort((a, b) => compareChapterFiles(a.rel, b.rel))) {
     signal?.throwIfAborted();
     let content: string;
@@ -642,12 +761,22 @@ export function scanWork(workDir: string, signal?: AbortSignal): WorkScanResult 
     const baseLine = fmEnd === 0 ? 1 : content.slice(0, fmEnd).split(/\r?\n/).length;
     const fmTitle = parseFrontmatter(content).title;
     const title = fmTitle ?? path.basename(f.abs, '.md');
-    raws.push(scanChapterRaw(body, baseLine, toPosix(path.join('manuscript', f.rel)), title));
+    const relPath = toPosix(path.join('manuscript', f.rel));
+    const { paragraphs: paras, ...chapter } = scanChapterRaw(body, baseLine, relPath, title);
+    // 摘要即时折叠进 openings 后即弃，不随章驻留（评审T4 内存优化，见 openings 声明处注释）
+    for (const p of paras) {
+      if (p.opening === undefined) continue; // 空/标题段或剥离串 <TEMPLATE_MIN_CJK，不参与
+      const idxs = openings.get(p.opening);
+      if (idxs === undefined) openings.set(p.opening, [chapterIdx]);
+      else if (idxs[idxs.length - 1] !== chapterIdx) idxs.push(chapterIdx); // 同章重复段落只记一次
+    }
+    raws.push(chapter);
+    chapterIdx += 1;
   }
   return {
     workDir: wd,
     chapters: raws.map((r) => ({ relPath: r.relPath, title: r.title, metrics: r.metrics })),
-    book: computeBook(raws),
+    book: computeBook(raws, openings),
     ...(skipped.length > 0 ? { skipped } : {}), // 可选加法：空时不出现，不改既有字段语义
   };
 }
