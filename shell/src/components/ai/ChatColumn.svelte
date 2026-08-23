@@ -1,10 +1,11 @@
 <script lang="ts">
   // 对话栏（D2 · v4）：B7/B8 会话名（双击重命名）+ 消息流 + composer；
-  // D2.1 assistant 气泡 marked 渲染 markdown（{@html} 输出——本地单用户 BYOK,信任面已记入方案）；
+  // D2.1 assistant 气泡 marked 渲染 markdown（{@html} 输出——LLM 输出不可信，统一过 sanitizeHtml 净化，见 lib/sanitize.ts）；
   // D2.2 工具 chip 堆叠 → 一行摘要「N 个工具调用 · 查看」+ ui.showCol('tools') + chat.focusToolsGroupKey 跳转；
   // D2.3 仅在接近底部(40px)时跟底，用户上翻即停；
   // D2.5 流式中气泡末尾 ▎ 光标 + "正在调用 XX" 指示；40ms 批次机制不动（0002 决策）。
   import { marked } from 'marked';
+  import { sanitizeHtml } from '../../lib/sanitize.js';
   import { iconSvg } from '../../lib/icons.js';
   import { chat } from '../../lib/chat.svelte.js';
   import { ui } from '../../lib/ui.svelte.js';
@@ -62,10 +63,10 @@
     return `挂载：${scope}`;
   }
 
-  // D2.1 markdown 渲染：assistant 气泡用 marked 转 HTML，{@html} 输出。
-  // 本地单用户 BYOK 信任面（v4 方案 §三 D2）—— 不引入 DOMPurify。
+  // D2.1 markdown 渲染：assistant 气泡用 marked 转 HTML，净化后 {@html} 输出
+  // （碰撞节与整泡同一条路径，LLM 输出一律过 DOMPurify 白名单）。
   function renderAiHtml(content: string): string {
-    return marked.parse(content, { async: false, gfm: true }) as string;
+    return sanitizeHtml(marked.parse(content, { async: false, gfm: true }) as string);
   }
 
   // D2.5：光标/「正在调用」定位到流式占位消息——store 持有占位下标（send 时记录），
@@ -144,7 +145,7 @@
             {#if secs}
               {#each secs as sec (sec.sec)}
                 <div class="collide-sec" style:--sec-color={collideVar(sec.sec)}>
-                  {@html marked.parse(sec.md, { async: false, gfm: true })}
+                  {@html renderAiHtml(sec.md)}
                 </div>
               {/each}
             {:else}

@@ -1,4 +1,5 @@
-// 测试：markdown ↔ 编辑器 HTML 桥——场景 ###、中文引号、段落空行的往返稳定。
+// @vitest-environment jsdom
+// 测试：markdown ↔ 编辑器 HTML 桥——场景 ###、中文引号、段落空行的往返稳定（mdToHtml 已过净化，需 DOM）。
 import { describe, expect, it } from 'vitest';
 import { htmlToMd, isBlankHtml, mdToHtml } from './markdown.js';
 
@@ -9,6 +10,13 @@ describe('mdToHtml', () => {
     const html = mdToHtml(BODY);
     expect(html).toContain('<p>清晨的雾气笼罩着青崖山，石阶上的露水还没干。</p>');
     expect(html).toContain('<h3>临行</h3>');
+  });
+
+  it('AI 采纳正文混入恶意 raw HTML：净化后再进编辑器（评审 D12 提前项）', () => {
+    const html = mdToHtml('正文。\n\n<img src=x onerror=alert(1)><script>steal()</script>\n\n尾。');
+    expect(html).not.toContain('onerror');
+    expect(html).not.toContain('<script');
+    expect(html).toContain('正文。');
   });
 });
 

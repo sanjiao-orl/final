@@ -1,9 +1,11 @@
 /**
  * markdown.ts —— 正文 markdown 与编辑器 HTML 的双向桥（marked + turndown）。
  * 真相永远在 .md 正文；这里只做呈现层转换，不碰 frontmatter（壳从 read_chapter 拿拆好的 body/frontmatterRaw）。
+ * md→HTML 侧统一过 sanitizeHtml：AI 采纳的 proposed 也是 LLM 输出，进编辑器（innerHTML/insertContentAt）前净化。
  */
 import { marked } from 'marked';
 import TurndownService from 'turndown';
+import { sanitizeHtml } from './sanitize.js';
 
 const turndown = new TurndownService({
   headingStyle: 'atx', // ### 场景标题往返不变形
@@ -13,10 +15,10 @@ const turndown = new TurndownService({
   fence: '```',
 });
 
-/** 正文 md → 编辑器初始 HTML。只剥首尾换行，不动前导空白（4 空格缩进代码块开头的章不能被破坏）。 */
+/** 正文 md → 编辑器初始 HTML（净化后）。只剥首尾换行，不动前导空白（4 空格缩进代码块开头的章不能被破坏）。 */
 export function mdToHtml(md: string): string {
   const html = marked.parse(md.replace(/^\n+|\n+$/g, ''), { async: false, gfm: true });
-  return html;
+  return sanitizeHtml(html as string);
 }
 
 /**
