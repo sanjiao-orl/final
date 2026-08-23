@@ -12,6 +12,16 @@
 - [评审-流程安排①] promptfoo 行为回归基建（从缓做提级块 2 前置）：`scripts/promptfoo/` 三件套——provider.mjs（promptfoo 0.122 类式自定义 provider：拉起真实 core+domain MCP、.demo-work 临时副本、POST /v1/chat 完整消费 SSE 聚合 `{text, toolCalls, truncated}`；整轮共用一个 core，进程退出自动清理）、promptfooconfig.yaml（首轮三用例：直接指令起草→`stage_chapter_proposal` 且 `write_chapter` 缺席；点名「章节起草」skill→先 `skill_read` 再提案、仍不直写；非正文诉求→零提案零直写）、README.md（运行口径）。root devDep promptfoo ^0.122 + `npm run promptfoo`。定位=本地手动回归（改 prompts 措辞/发版前跑，不进 CI，与 e2e 同口径）；shipped-hashes 只管分发一致，promptfoo 管语义不回归。
 - 验证：`npm run check` 0 错、`npm test` 全绿 975（core 240 / domain 347 / shell 388，较 967 +8）、`cargo test` 17 绿、`npm run promptfoo` 真实 LLM 3/3 通过（5m04s；写作档 go/v1 预设余额不足，以 `LLM_ASSIGN_*` 覆盖到 OX_ALPHA_FREE 免费档跑通——行为断言考察措辞路由，与模型档位弱相关）。core/domain 零改动，e2e-workflow 未复跑（v0.2.9 已复跑成功且本批不触 core 链路；chat 行为面由 promptfoo 真跑覆盖）。
 
+## 块 2 声口批核销（2026-08-23：断言先行 + 四件全结；随本批提交未发版）
+
+- [块2·0 断言先行] promptfoo 声口建档用例：skill_read → read_chapter 取样 → write_meta（relPath=.novel/style.md），write_chapter/stage_chapter_proposal 缺席。首跑实证一个正向信号：演示书仅一章完整正文（第2章 79 字、第3章 0 字），模型正确走 skill 纪律「样本不足三章直说」拒绝硬蒸——随后 provider 补三章节 fixture（只进 .demo-work 临时副本，不改仓库本体）走完整 happy path，真跑 4/4。
+- [块2·①] 声口建档 skill 转正（0009）：candidates/ → core/prompts/ 根（git mv 保历史，candidates/ 目录撤空），SKILL_FILENAMES 3→4，shipped-hashes 补新文件 hash；措辞过 0012 审查——description 注入通道补「续写」、判定改「先 read_style 确认事实（exists:false=首次建档；系统提示摘要只是快捷信号）」、取样加 voice_fingerprint 量化底数参照（注明非结论来源）、交差说明 read_style 全文读回。
+- [块2·②] read_style（第 37 个工具）：domain ledger.ts readStyle（路径白名单同 write_meta 固定 .novel/style.md；文件缺失返回 {exists:false} 不报错）；chat.md 工作流指引加声口行——首版措辞带「## 声口摘要」字面量撞了两条既有注入断言（存在性/分层顺序），改「声口摘要段」避开；chat.md shipped-hash 追加新版。测试并入 voice.test.ts（write_meta 写入后 round-trip + 缺失 exists:false）。
+- [块2·③] voice_fingerprint（第 38 个工具）：domain/src/voice.ts 纯计算——句长分布（均值/中位/短≤12 CJK/长≥50 CJK 占比）、对白占比（「」『』“”配对、引号不跨行防未闭合吞段）、段长、高频相邻二字组 top8（≥2 次）；取样三态（relPaths 显式/全书缺省需 workDir/texts ≤4 段内联）；compare 产出 deltas+中文 flags，阈值写死（对白 ±10pp/平均句长 ±30%/短长句占比 ±15pp/top8 零重合），样本 <100 CJK 门控不出提示（宁缺勿噪）。domain 测试 +14（口径/门控/零重合/取样三态/越界中文错）。
+- [块2·④] 续写/改写口吻偏离检测：core/src/voice-check.ts（callDomainTool 调 voice_fingerprint texts+compare，8s 兜底超时，失败/缺工具/重连中一律降级为 done 不带 voice，绝不拦产出）；continue（基线=context 正文尾巴）/rewrite（基线=original 选区）done 事件加法附 voice；main.ts 装配 tools；壳 core.ts VoiceDeviation 镜像 + done 透传，candidates store 三流程（触发式续写/选区改写/整改）捕获 flags 挂 voiceNote（会话态快照，不持久化——core sqlite 候选表零改动），CandidateView 详情卡「声口偏离」提示行（title 注明基线口径与「参照不拦内容」）。core 测试 +2（附带/缺失降级/报错降级/护栏拒绝不算）、shell 测试 +2（SSE 透传双态/voiceNote 挂载与缺席）。
+- 验证：`npm run check` 0 错（显式 exit=0，不再管道吞退出码）、`npm test` 全绿 993（core 242 / domain 361 / shell 390，较 975 +18）、`npm run promptfoo` 真实 LLM 4/4（OX_ALPHA_FREE 档，9m55s）。
+- 本批过程中修的仓级问题：promptfoo 进 devDependencies 把 @types/json-schema 提升进根 node_modules/@types，ambient 类型全局生效打挂 core tsc（zod.fromJSONSchema 的 JSONSchema7 比对，v0.2.10 提交起 CI 三连红）——promptfoo 退出 devDependencies 改 `npx -y promptfoo@0.122.0` 钉版本（205623b）；此前「check 全绿」的汇报因 `| tail` 吞了管道退出码而失实，教训已写入验证习惯（显式 echo $?）。
+
 ## P3（遗留备查）
 
 - [块1遗留] `shell/src/lib/candidates.svelte.test.ts` 是 CRLF/LF 混合行尾文件（历史遗留；编辑时注意保持所在区域一致，git 的 LF→CRLF 提示是既有状态非新引入）。
