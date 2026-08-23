@@ -7,7 +7,14 @@
   import { Editor } from '@tiptap/core';
   import StarterKit from '@tiptap/starter-kit';
   import { htmlToMd, mdToHtml } from '../../lib/markdown.js';
-  import { captureSelection, locateUnique } from '../../lib/pm-search.js';
+  import { captureSelection, findTextRanges, locateUnique } from '../../lib/pm-search.js';
+  import { snapshot } from '../../lib/snapshot.svelte.js';
+  import type { JumpTarget } from '../../lib/jump-target.js';
+  import {
+    bodyLineForFileLine,
+    estimateBlockIndex,
+    targetLineText,
+  } from '../../lib/jump-target.js';
   import { refreshSuggests, Suggest } from '../../lib/suggest.js';
   import { candidates } from '../../lib/candidates.svelte.js';
   import { quality } from '../../lib/quality.svelte.js';
@@ -76,10 +83,12 @@
       appendMd,
       replaceBodyMd,
       insertAfter,
+      jumpTo: (t) => jumpToTarget(t),
     });
     if (scene) {
       jumpToScene(scene); // 场景跳转自己管光标与滚动
-    } else {
+    } else if (!work.pendingJump) {
+      // 有待跳转目标时不 focus('end')：避免光标/滚动与随后的定位跳转打架（pendingJump 由 $effect 消费）
       editor.commands.focus('end');
       if (typewriter) requestAnimationFrame(scrollCaret);
     }
@@ -98,6 +107,15 @@
   $effect(() => {
     void candidates.revision;
     if (editor) refreshSuggests(editor.view);
+  });
+
+  // T9 正文跳转派单：work.pendingJump 每次赋新对象保证必触发，消费一次即清
+  $effect(() => {
+    const j = work.pendingJump;
+    if (j && editor) {
+      work.pendingJump = null; // 消费一次即清
+      jumpToTarget(j);
+    }
   });
 
   // 浮层打开期间禁止选区条再弹
@@ -296,6 +314,78 @@
     }
   }
 
+  // ---------- T9 正文跳转：quote 优先精确、line 兜底近似，命中即滚动 + 闪烁高亮 ----------
+
+  /** 上一个闪烁高亮元素与计时器（新跳转覆盖旧的：先摘旧类再挂新的）。 */
+  let flashEl: HTMLElement | null = null;
+  let flashTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** 选区落到 from..to（单点则落段首），下一帧把所在 DOM 滚到视口中央并加 1.8s 闪烁高亮。 */
+  function revealRange(from: number, to: number): void {
+    if (!editor) return;
+    if (to > from) editor.chain().setTextSelection({ from, to }).run();
+    else editor.commands.setTextSelection(from);
+    requestAnimationFrame(() => {
+      if (!editor) return;
+      const dom = editor.view.nodeDOM(from);
+      const el = dom instanceof HTMLElement ? dom : dom instanceof Text ? dom.parentElement : null;
+      if (!el) return;
+      el.scrollIntoView({ block: 'center' });
+      if (flashTimer !== undefined) clearTimeout(flashTimer);
+      flashEl?.classList.remove('jump-flash');
+      flashEl = el;
+      el.classList.add('jump-flash');
+      flashTimer = setTimeout(() => {
+        flashEl?.classList.remove('jump-flash');
+        flashEl = null;
+        flashTimer = undefined;
+      }, 1800);
+    });
+  }
+
+  /**
+   * 跳转协议实现：quote 优先（取第一处命中——跳转语义不苛求唯一，与采纳的 locateUnique 不同）；
+   * line 兜底按「文件行号 → 正文行号 → 非空行下标估算 PM 块位」换算，估算块文本不含目标行时
+   * 找第一个含目标文本的块，都找不到回落到 clamp 后的估算块（行号是近似值，跳错段落好过不跳）。
+   */
+  function jumpToTarget(t: JumpTarget): 'ok' | 'not-found' {
+    if (!editor) return 'not-found';
+    const quote = t.quote?.trim();
+    if (quote) {
+      const hit = findTextRanges(editor.state.doc, quote)[0];
+      if (hit) {
+        revealRange(hit.from, hit.to);
+        return 'ok';
+      }
+    }
+    if (typeof t.line === 'number') {
+      const bodyLine = bodyLineForFileLine(t.line, work.current?.frontmatterRaw ?? '');
+      if (bodyLine != null) {
+        const md = htmlToMd(editor.getHTML());
+        const targetText = targetLineText(md, bodyLine);
+        const est = targetText != null ? estimateBlockIndex(md, bodyLine) : -1;
+        if (targetText != null && est >= 0) {
+          const blocks: { pos: number; text: string }[] = [];
+          editor.state.doc.forEach((node, offset) => {
+            if (node.isTextblock) blocks.push({ pos: offset, text: node.textContent });
+          });
+          if (blocks.length > 0) {
+            const idx = Math.min(Math.max(est, 0), blocks.length - 1);
+            const estimated = blocks[idx]!;
+            const block =
+              estimated.text.includes(targetText)
+                ? estimated
+                : (blocks.find((b) => b.text.includes(targetText)) ?? estimated);
+            revealRange(block.pos + 1, block.pos + 1); // 选区落段首
+            return 'ok';
+          }
+        }
+      }
+    }
+    snapshot.showNotice('未能在正文定位到目标位置（内容可能已改动）');
+    return 'not-found';
+  }
+
   // ---------- B5 章头 ----------
   const cur = $derived(work.current);
   const fmStatus = $derived(typeof cur?.frontmatter?.status === 'string' ? cur.frontmatter.status : undefined);
@@ -423,6 +513,12 @@
                       {:else if typeof f.line === 'number'}
                         <span class="qc-loc">第 {f.line} 行{typeof f.paraLine === 'number' ? ` · 段起于第 ${f.paraLine} 行` : ''}</span>
                       {/if}
+                      <button
+                        class="qc-jump"
+                        disabled={f.located === false}
+                        title={f.located === false ? '未定位：引用未能匹配正文，行号不可信' : '定位到正文对应位置'}
+                        onclick={() => jumpToTarget({ ...(typeof f.line === 'number' ? { line: f.line } : {}), quote: f.quote })}
+                      >定位</button>
                     </div>
                     {#if f.quote}<blockquote class="qc-quote">{qcQuote(f.quote)}</blockquote>{/if}
                     <p class="qc-reason">{f.reason}</p>
@@ -630,6 +726,28 @@
     background: color-mix(in srgb, var(--muted) 12%, transparent);
     color: var(--ink);
   }
+  /* 定位按钮：跳到正文对应位置（未定位条目禁用置灰） */
+  .qc-jump {
+    margin-left: auto;
+    flex: none;
+    font-size: 11px;
+    line-height: 1;
+    padding: 2px 8px;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    background: var(--panel);
+    color: var(--accent);
+    cursor: pointer;
+    transition: border-color var(--t-hover), background var(--t-hover), opacity var(--t-hover);
+  }
+  .qc-jump:hover:not(:disabled) {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+  }
+  .qc-jump:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
   .qc-truncated,
   .qc-loading,
   .qc-empty {
@@ -740,6 +858,18 @@
   .prose :global(.ProseMirror h3) {
     font-size: 1.05em;
     color: var(--muted);
+  }
+  /* —— T9 跳转闪烁高亮：定位命中后 1.8s 渐隐（revealRange 挂/摘类） —— */
+  .prose :global(.jump-flash) {
+    animation: jump-flash 1.8s ease-out;
+  }
+  @keyframes jump-flash {
+    from {
+      background: color-mix(in srgb, var(--accent) 22%, transparent);
+    }
+    to {
+      background: transparent;
+    }
   }
 
   /* —— 暂存候选内联装饰：原文删除线，建议文本建议色插入，尾带 ✓/× —— */

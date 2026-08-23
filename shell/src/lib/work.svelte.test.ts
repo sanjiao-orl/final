@@ -705,3 +705,87 @@ describe('WorkStore · 开章/保存竞态（代际 + 快照）', () => {
     expect(work.dirty).toBe(false);
   });
 });
+
+describe('WorkStore · jumpToChapter（T9 正文跳转派单）', () => {
+  it('同章跳转：不开章不重读，直接派单 pendingJump（每次赋新对象保证可再触发）', async () => {
+    const callTool = vi.fn().mockResolvedValue(READ_RESULT);
+    const client = mockClient({ callTool });
+    const work = new WorkStore();
+    work.init(client, 'C:/works/demo');
+    await work.openChapter(VOLUME[0]!.children[0]!);
+    callTool.mockClear();
+
+    const ok = await work.jumpToChapter('第一卷/第一章.md', { line: 12, quote: '摘录' });
+    expect(ok).toBe(true);
+    expect(callTool).not.toHaveBeenCalled(); // 同章不重读
+    expect(work.pendingJump).toEqual({ line: 12, quote: '摘录' });
+
+    // 再次跳同章同参：新对象（消费方靠 $effect 依赖变化再触发）
+    const first = work.pendingJump;
+    await work.jumpToChapter('第一卷/第一章.md', { line: 12, quote: '摘录' });
+    expect(work.pendingJump).not.toBe(first);
+    expect(work.pendingJump).toEqual({ line: 12, quote: '摘录' });
+  });
+
+  it('跨章跳转：先开章再派单；默认空目标=只跳章', async () => {
+    const twoVolumes: VolumeNode[] = [
+      { type: 'volume', title: '第一卷', children: [ch('第一卷/第一章.md', '第一章'), ch('第一卷/第二章.md', '第二章')] },
+    ];
+    const callTool = vi.fn((name: string) =>
+      name === 'read_chapter' ? Promise.resolve(READ_RESULT) : Promise.resolve(twoVolumes),
+    );
+    const client = mockClient({ callTool });
+    const work = new WorkStore();
+    work.init(client, 'C:/works/demo');
+    await work.loadStructure();
+    await work.openChapter(twoVolumes[0]!.children[0]!);
+
+    const ok = await work.jumpToChapter('第一卷/第二章.md', { quote: '伏笔原文' });
+    expect(ok).toBe(true);
+    expect(work.current?.relPath).toBe('第一卷/第二章.md');
+    expect(work.pendingJump).toEqual({ quote: '伏笔原文' });
+
+    // 只跳章（不传目标）→ 空对象派单（Editor 消费为空操作，停留在章首）
+    const ok2 = await work.jumpToChapter('第一卷/第二章.md');
+    expect(ok2).toBe(true);
+    expect(work.pendingJump).toEqual({});
+  });
+
+  it('目标章不在结构树 → false + 红条，不动 pendingJump', async () => {
+    const callTool = vi.fn((name: string) =>
+      name === 'read_chapter' ? Promise.resolve(READ_RESULT) : Promise.resolve(VOLUME),
+    );
+    const client = mockClient({ callTool });
+    const work = new WorkStore();
+    work.init(client, 'C:/works/demo');
+    await work.loadStructure();
+
+    const ok = await work.jumpToChapter('第一卷/不存在的章.md', { line: 3 });
+    expect(ok).toBe(false);
+    expect(work.error).toContain('章节不在结构树中');
+    expect(work.pendingJump).toBeNull();
+  });
+
+  it('跨章开章失败（读盘错误）→ false，不派单', async () => {
+    const twoVolumes: VolumeNode[] = [
+      { type: 'volume', title: '第一卷', children: [ch('第一卷/第一章.md', '第一章'), ch('第一卷/第二章.md', '第二章')] },
+    ];
+    let reads = 0;
+    const callTool = vi.fn((name: string) => {
+      if (name === 'list_structure') return Promise.resolve(twoVolumes);
+      if (name === 'read_chapter' && reads++ === 0) return Promise.resolve(READ_RESULT); // 首次开章成功
+      return Promise.reject(new Error('磁盘错误')); // 跳转时的第二次读盘失败
+    });
+    const client = mockClient({ callTool });
+    const work = new WorkStore();
+    work.init(client, 'C:/works/demo');
+    await work.loadStructure();
+    await work.openChapter(twoVolumes[0]!.children[0]!); // 当前第一章
+    work.error = null;
+
+    const ok = await work.jumpToChapter('第一卷/第二章.md', { line: 5 });
+    expect(ok).toBe(false);
+    expect(work.current?.relPath).toBe('第一卷/第一章.md'); // 没切过去
+    expect(work.pendingJump).toBeNull();
+  });
+});

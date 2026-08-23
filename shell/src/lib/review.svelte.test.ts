@@ -187,9 +187,21 @@ describe('applyPremiumFindings', () => {
 });
 
 describe('ReviewStore', () => {
-  it('run：并行调 scan_quality + ledger_diagnostics，产出报告与徽标', async () => {
+  /** 对账空结果（无 findings）：既有用例的 mock 兜底，避免把诊断结果误当对账发现重复计数。 */
+  const recOk = (): { anchors: { checked: number; ok: number; chapterMissing: number; quoteMissing: number; lineDrift: number }; findings: [] } => ({
+    anchors: { checked: 4, ok: 4, chapterMissing: 0, quoteMissing: 0, lineDrift: 0 },
+    findings: [],
+  });
+
+  it('run：并行调 scan_quality + ledger_diagnostics + ledger_reconcile，产出报告与徽标', async () => {
     const callTool = vi.fn((name: string) =>
-      Promise.resolve(name === 'scan_quality' ? scanFixture() : diagFixture({ blockerCount: 2, hasBlockers: true })),
+      Promise.resolve(
+        name === 'scan_quality'
+          ? scanFixture()
+          : name === 'ledger_diagnostics'
+            ? diagFixture({ blockerCount: 2, hasBlockers: true })
+            : recOk(),
+      ),
     );
     const s = new ReviewStore();
     s.init(mockClient(callTool), 'C:/works/demo');
@@ -199,6 +211,7 @@ describe('ReviewStore', () => {
       workDir: 'C:/works/demo',
       issueLogPath: ISSUE_LOG_DEFAULT,
     }, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(callTool).toHaveBeenCalledWith('ledger_reconcile', { workDir: 'C:/works/demo' }, expect.objectContaining({ signal: expect.any(AbortSignal) }));
     expect(s.report).not.toBeNull();
     expect(s.blockerTotal).toBe(2);
     expect(s.hasBlockers).toBe(true);
@@ -207,13 +220,19 @@ describe('ReviewStore', () => {
 
   it('toggle：开视图并跑扫描；再 toggle 关视图但徽标保留', async () => {
     const callTool = vi.fn((name: string) =>
-      Promise.resolve(name === 'scan_quality' ? scanFixture() : diagFixture({ blockerCount: 1, hasBlockers: true })),
+      Promise.resolve(
+        name === 'scan_quality'
+          ? scanFixture()
+          : name === 'ledger_diagnostics'
+            ? diagFixture({ blockerCount: 1, hasBlockers: true })
+            : recOk(),
+      ),
     );
     const s = new ReviewStore();
     s.init(mockClient(callTool), 'd');
     await s.toggle();
     expect(s.open).toBe(true);
-    expect(callTool).toHaveBeenCalledTimes(2);
+    expect(callTool).toHaveBeenCalledTimes(3); // scan + diag + rec 各一次
     await s.toggle();
     expect(s.open).toBe(false);
     expect(s.blockerTotal).toBe(1); // 关掉视图后红点仍在（清零出口）
@@ -235,6 +254,7 @@ describe('ReviewStore', () => {
     let resolveScan!: (v: WorkScanResult) => void;
     const callTool = vi.fn((name: string) => {
       if (name === 'scan_quality') return new Promise<WorkScanResult>((r) => (resolveScan = r));
+      if (name === 'ledger_reconcile') return Promise.resolve({ anchors: { checked: 0, ok: 0, chapterMissing: 0, quoteMissing: 0, lineDrift: 0 }, findings: [] });
       return Promise.resolve(diagFixture());
     });
     const s = new ReviewStore();
@@ -243,12 +263,14 @@ describe('ReviewStore', () => {
     const p2 = s.run();
     resolveScan(scanFixture());
     await Promise.all([p1, p2]);
-    expect(callTool).toHaveBeenCalledTimes(2); // scan + diag 各一次
+    expect(callTool).toHaveBeenCalledTimes(3); // scan + diag + rec 各一次
   });
 
   it('runPremium：调 client.review 合并进报告，BLOCKER 计数上升', async () => {
     const callTool = vi.fn((name: string) =>
-      Promise.resolve(name === 'scan_quality' ? scanFixture() : diagFixture()),
+      Promise.resolve(
+        name === 'scan_quality' ? scanFixture() : name === 'ledger_diagnostics' ? diagFixture() : recOk(),
+      ),
     );
     const review = vi.fn().mockResolvedValue({
       findings: [{ severity: 'BLOCKER', quote: '他死了。', why: '与账本冲突' }],
@@ -350,7 +372,9 @@ describe('ReviewStore', () => {
 
   it('mode 区分扫描/贵档冷读（进度文案用）', async () => {
     const callTool = vi.fn((name: string) =>
-      Promise.resolve(name === 'scan_quality' ? scanFixture() : diagFixture()),
+      Promise.resolve(
+        name === 'scan_quality' ? scanFixture() : name === 'ledger_diagnostics' ? diagFixture() : recOk(),
+      ),
     );
     const reviewFn = vi.fn().mockResolvedValue({ findings: [] });
     const s = new ReviewStore();
@@ -515,6 +539,7 @@ describe('ReviewStore 取消', () => {
     let resolveScan!: (v: WorkScanResult) => void;
     const callTool = vi.fn((name: string) => {
       if (name === 'scan_quality') return new Promise<WorkScanResult>((r) => (resolveScan = r));
+      if (name === 'ledger_reconcile') return Promise.resolve({ findings: [] });
       return Promise.resolve(diagFixture());
     });
     const s = new ReviewStore();
@@ -555,6 +580,7 @@ describe('ReviewStore 取消', () => {
     let resolveScan!: (v: WorkScanResult) => void;
     const callTool = vi.fn((name: string) => {
       if (name === 'scan_quality') return new Promise<WorkScanResult>((r) => (resolveScan = r));
+      if (name === 'ledger_reconcile') return Promise.resolve({ findings: [] });
       return Promise.resolve(diagFixture());
     });
     const s = new ReviewStore();
@@ -564,7 +590,7 @@ describe('ReviewStore 取消', () => {
     s.close(); // 关掉面板：扫描继续
     expect(s.running).toBe(true);
     await s.toggle(); // 重开：只看进度，不重跑
-    expect(callTool).toHaveBeenCalledTimes(2); // scan + diag 各一次，未追加
+    expect(callTool).toHaveBeenCalledTimes(3); // scan + diag + rec 各一次，未追加
     s.cancel();
     await new Promise((r) => setTimeout(r, 0));
     expect(s.running).toBe(false);
@@ -574,13 +600,18 @@ describe('ReviewStore 取消', () => {
 describe('ReviewStore 部分成功（逐项结算）', () => {
   it('scan 失败 diag 成功：报告由 diag 出，失败项带错误信息，不进全局红条', async () => {
     const callTool = vi.fn((name: string) =>
-      name === 'scan_quality' ? Promise.reject(new Error('domain 僵死')) : Promise.resolve(diagFixture({ blockerCount: 1 })),
+      name === 'scan_quality'
+        ? Promise.reject(new Error('domain 僵死'))
+        : name === 'ledger_reconcile'
+          ? Promise.resolve({ anchors: { checked: 2, ok: 2, chapterMissing: 0, quoteMissing: 0, lineDrift: 0 }, findings: [] })
+          : Promise.resolve(diagFixture({ blockerCount: 1 })),
     );
     const s = new ReviewStore();
     s.init(mockClient(callTool), 'd');
     await s.run();
     expect(s.items.scan).toEqual({ status: 'fail', error: 'domain 僵死' });
     expect(s.items.diag).toEqual({ status: 'ok' });
+    expect(s.items.rec).toEqual({ status: 'ok' });
     expect(s.error).toBeNull(); // 部分成功不算整体失败
     expect(work.error).toBeNull();
     expect(s.report).not.toBeNull();
@@ -608,6 +639,7 @@ describe('ReviewStore 部分成功（逐项结算）', () => {
     await s.run();
     expect(s.items.scan?.status).toBe('fail');
     expect(s.items.diag?.status).toBe('fail');
+    expect(s.items.rec?.status).toBe('fail');
     expect(s.error).toContain('审阅扫描失败');
     expect(work.error).toContain('审阅扫描失败');
     expect(s.report).toBeNull();
@@ -653,12 +685,18 @@ describe('ReviewStore 分级扫描（R5）', () => {
     expect(s.level).toBe('standard'); // 默认档=现状行为
     s.init(mockClient(callTool), 'd');
     await s.run();
-    expect(callTool).toHaveBeenCalledTimes(2);
+    expect(callTool).toHaveBeenCalledTimes(3); // scan + diag + rec 各一次
   });
 
   it('deep 档：确定性检查完成后自动对当前章追加贵档冷读', async () => {
     const callTool = vi.fn((name: string) =>
-      Promise.resolve(name === 'scan_quality' ? scanFixture() : diagFixture()),
+      Promise.resolve(
+        name === 'scan_quality'
+          ? scanFixture()
+          : name === 'ledger_reconcile'
+            ? { findings: [] }
+            : diagFixture(),
+      ),
     );
     const reviewFn = vi.fn().mockResolvedValue({
       findings: [{ severity: 'BLOCKER', quote: '他死了。', why: '与账本冲突' }],
@@ -669,7 +707,7 @@ describe('ReviewStore 分级扫描（R5）', () => {
     work.current = { relPath: 'manuscript/卷一/第1章.md', title: '第1章', frontmatter: {}, frontmatterRaw: '', savedMd: '' };
     try {
       await s.run();
-      expect(callTool).toHaveBeenCalledTimes(2);
+      expect(callTool).toHaveBeenCalledTimes(3);
       expect(reviewFn).toHaveBeenCalledWith('C:/works/demo', 'manuscript/卷一/第1章.md', undefined, expect.objectContaining({ signal: expect.any(AbortSignal) }));
       expect(s.mode).toBe('premium');
       const row = s.report!.chapters.find((c) => c.relPath === 'manuscript/卷一/第1章.md')!;
@@ -694,5 +732,112 @@ describe('ReviewStore 分级扫描（R5）', () => {
     expect(s.error).toContain('深度档需要先打开一个章节');
     expect(s.report).not.toBeNull();
     expect(s.running).toBe(false);
+  });
+});
+
+// ---------- T9：ledger_reconcile 对账并入审阅 ----------
+
+describe('ledger_reconcile 对账并入（T9）', () => {
+  /** 对账结果 fixture：带锚统计 + 与诊断同形状的 findings。 */
+  function recFixture() {
+    return {
+      anchors: { checked: 12, ok: 9, chapterMissing: 1, quoteMissing: 1, lineDrift: 1 },
+      findings: [
+        { code: 'anchor-chapter-missing', chapter: 'manuscript/卷一/第2章.md', severity: 'MAJOR' as const, category: 'CONT', message: '证据锚章缺失' },
+        { code: 'anchor-line-drift', severity: 'MODERATE' as const, category: 'CONT', message: '账本级行漂移' },
+      ],
+    };
+  }
+
+  it('① 对账 findings 并入章卡/bookFindings，counts/blockerTotal 计入，anchors 透传；缺省时与现状一致', () => {
+    const base = buildReviewReport(scanFixture(), diagFixture());
+    expect(base.counts.MAJOR).toBe(1); // 仅诊断的 overdue-promise
+    expect(base.reconcileAnchors).toBeUndefined();
+
+    const r = buildReviewReport(scanFixture(), diagFixture(), recFixture());
+    expect(r.chapters[1]!.findings.map((f) => f.code)).toContain('anchor-chapter-missing'); // 按 chapter 进章卡
+    expect(r.bookFindings.map((f) => f.code)).toContain('anchor-line-drift'); // 无 chapter 进 bookFindings
+    expect(r.counts.MAJOR).toBe(2); // 诊断 1 条 + 对账 1 条
+    expect(r.counts.MODERATE).toBe(3); // 诊断 2 条 + 对账 1 条
+    expect(r.reconcileAnchors).toEqual(recFixture().anchors);
+    // 对账 BLOCKER 自然计入 blockerTotal
+    const r2 = buildReviewReport(
+      scanFixture(),
+      diagFixture(),
+      { ...recFixture(), findings: [{ code: 'x', severity: 'BLOCKER', category: 'CONT', message: 'm' }] },
+    );
+    expect(r2.counts.BLOCKER).toBe(1);
+    expect(r2.blockerTotal).toBe(1);
+    expect(r2.hasBlockers).toBe(true);
+  });
+
+  it('① store：standard/deep 档并行加跑 ledger_reconcile，findings 并入报告、items.rec=ok', async () => {
+    const callTool = vi.fn((name: string) =>
+      Promise.resolve(
+        name === 'scan_quality'
+          ? scanFixture()
+          : name === 'ledger_reconcile'
+            ? recFixture()
+            : diagFixture(),
+      ),
+    );
+    const s = new ReviewStore();
+    s.init(mockClient(callTool), 'C:/works/demo');
+    await s.run();
+    expect(callTool).toHaveBeenCalledWith('ledger_reconcile', { workDir: 'C:/works/demo' }, expect.objectContaining({ signal: expect.any(AbortSignal), timeoutMs: 600_000 }));
+    expect(s.items.rec).toEqual({ status: 'ok' });
+    const row = s.report!.chapters.find((c) => c.relPath === 'manuscript/卷一/第2章.md')!;
+    expect(row.findings.map((f) => f.code)).toContain('anchor-chapter-missing');
+    expect(s.error).toBeNull();
+  });
+
+  it('② 对账失败但 scan/diag 成功：报告照出且 items.rec=fail，不进全局红条', async () => {
+    const callTool = vi.fn((name: string) =>
+      name === 'ledger_reconcile'
+        ? Promise.reject(new Error('对账超时'))
+        : Promise.resolve(name === 'scan_quality' ? scanFixture() : diagFixture()),
+    );
+    const s = new ReviewStore();
+    s.init(mockClient(callTool), 'd');
+    await s.run();
+    expect(s.items.scan).toEqual({ status: 'ok' });
+    expect(s.items.diag).toEqual({ status: 'ok' });
+    expect(s.items.rec).toEqual({ status: 'fail', error: '对账超时' });
+    expect(s.error).toBeNull(); // 部分成功不算整体失败
+    expect(work.error).toBeNull();
+    expect(s.report).not.toBeNull();
+    expect(s.running).toBe(false);
+  });
+
+  it('③ quick 档不发 ledger_reconcile 调用，items.rec 标 skipped', async () => {
+    const callTool = vi.fn((name: string) =>
+      Promise.resolve(name === 'scan_quality' ? scanFixture() : diagFixture()),
+    );
+    const s = new ReviewStore();
+    s.level = 'quick';
+    s.init(mockClient(callTool), 'd');
+    await s.run();
+    expect(callTool).toHaveBeenCalledTimes(1); // 只有 scan_quality
+    expect(callTool).not.toHaveBeenCalledWith('ledger_reconcile', expect.anything(), expect.anything());
+    expect(s.items.rec).toEqual({ status: 'skipped' });
+  });
+
+  it('老 core / mock 返回 undefined：rec 按无 findings 处理，不崩且计数不变', async () => {
+    const callTool = vi.fn((name: string) =>
+      Promise.resolve(
+        name === 'scan_quality'
+          ? scanFixture()
+          : name === 'ledger_diagnostics'
+            ? diagFixture()
+            : undefined,
+      ),
+    );
+    const s = new ReviewStore();
+    s.init(mockClient(callTool), 'd');
+    await s.run();
+    expect(s.items.rec).toEqual({ status: 'ok' });
+    expect(s.report).not.toBeNull();
+    expect(s.report!.counts).toEqual(buildReviewReport(scanFixture(), diagFixture()).counts);
+    expect(s.report!.reconcileAnchors).toBeUndefined();
   });
 });

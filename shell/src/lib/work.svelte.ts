@@ -5,6 +5,7 @@
 import type { CoreClient, DailyStats } from './core.js';
 import { isToolMissingError } from './core.js';
 import type { ChapterNode, ReadChapterResult, RestoreTrashResult, TrashEntry, VolumeNode } from './types.js';
+import type { JumpTarget } from './jump-target.js';
 import { setFrontmatterStatus, nextChapterStatus } from './frontmatter.js';
 import { writeClipboardText } from './clipboard.js';
 
@@ -18,6 +19,11 @@ export interface EditorApi {
   replaceBodyMd: (md: string) => 'ok' | 'not-found';
   /** B1 插入其后：proposed 插入 original 之后（原文保留）。 */
   insertAfter?: (original: string, proposed: string) => 'ok' | 'not-found' | 'ambiguous';
+  /**
+   * T9 正文跳转（壳层跳转协议）：quote 优先精确定位，line（文件行号含 frontmatter）换算兜底；
+   * 命中即滚动+选区+闪烁高亮。定位失败返回 'not-found'（Editor 侧已弹轻提示）。
+   */
+  jumpTo?: (target: JumpTarget) => 'ok' | 'not-found';
 }
 
 export interface OpenChapter {
@@ -42,6 +48,8 @@ export class WorkStore {
   current = $state<OpenChapter | null>(null);
   /** 待跳转的场景标题（打开章后由 Editor 消费）。 */
   pendingScene = $state<string | null>(null);
+  /** 待跳转的正文定位目标（T9：打开章后由 Editor 消费一次即清；同章再跳直接派单）。 */
+  pendingJump = $state<JumpTarget | null>(null);
   /** 当前打开的章里被聚焦的场景标题（结构树当前场高亮判定来源）。 */
   currentScene = $state<string | null>(null);
   /** 同章重载计数：App 按 relPath + 该值 keyed Editor，磁盘回写后强制编辑器重挂载。 */
@@ -128,6 +136,25 @@ export class WorkStore {
       for (const ch of v.children) if (ch.relPath === relPath) return ch;
     }
     return null;
+  }
+
+  /**
+   * T9 正文跳转入口（结果面板统一走这里）：目标章非当前章先开章（脏章先自动落盘，
+   * 失败不跳并留红条），随后把定位目标放进 pendingJump 由 Editor 消费（同章/跨章统一走
+   * pendingJump——每次赋新对象保证 $effect 必触发）；只跳章（无 line/quote）传空 target。
+   */
+  async jumpToChapter(relPath: string, target: JumpTarget = {}): Promise<boolean> {
+    if (this.current?.relPath !== relPath) {
+      const node = this.findChapter(relPath);
+      if (!node) {
+        this.error = `跳转失败：章节不在结构树中（${relPath}）`;
+        return false;
+      }
+      await this.openChapter(node);
+      if (this.error) return false; // 开章失败（含未保存冲突），红条已在
+    }
+    this.pendingJump = { ...target };
+    return true;
   }
 
   /** 按 frontmatter 稳定 id 找章（B7：重排改名不失效）。 */

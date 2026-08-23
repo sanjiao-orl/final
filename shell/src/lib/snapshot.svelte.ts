@@ -27,11 +27,13 @@ export interface KnowledgeFactView {
   fact: string;
   since?: string;
   refs?: string[];
+  /** 原文摘录锚（决策 0013，跳转定位用）。 */
+  quote?: string;
 }
 export interface LedgerView {
   clock: Array<{ chapters: string[]; thread?: string; storyDay?: string; season?: string; absoluteDate?: string; notes?: string }>;
-  props: Array<{ name: string; type?: string; holder?: string; status?: string; custody: Array<{ chapter: string; holder?: string; note?: string }>; tripwire?: string }>;
-  promises: Array<{ id: string; name: string; arc: string; heat?: string; setups: Array<{ chapter: string; line?: number; quote?: string }>; payoffs: Array<{ chapter: string; line?: number }>; due?: number; note?: string; expectedVolume?: string; links?: { props?: string[]; characters?: string[] } }>;
+  props: Array<{ name: string; type?: string; holder?: string; status?: string; custody: Array<{ chapter: string; holder?: string; note?: string; line?: number; quote?: string }>; tripwire?: string }>;
+  promises: Array<{ id: string; name: string; arc: string; heat?: string; setups: Array<{ chapter: string; line?: number; quote?: string }>; payoffs: Array<{ chapter: string; line?: number; quote?: string }>; due?: number; note?: string; expectedVolume?: string; links?: { props?: string[]; characters?: string[] } }>;
   knowledge: Array<{ character: string; knows: KnowledgeFactView[]; doesNotKnow?: KnowledgeFactView[]; visibility?: string; knownBy?: string[] }>;
   doNotReexplain: string[];
   protect: Array<{ item: string; reason?: string }>;

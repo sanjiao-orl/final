@@ -1,7 +1,8 @@
 /**
  * review.svelte.ts —— WS-17 壳内审阅出口（确定性档，零 LLM 成本）：
  * 一键跑全书 scan_quality（LAY 去AI味扫描）+ ledger_diagnostics（四维账本确定性诊断，
- * 含问题日志 BLOCKER 计数），解析成逐章报告；BLOCKER 总数供顶栏入口红点徽标（清零出口：
+ * 含问题日志 BLOCKER 计数）+ ledger_reconcile（账本证据锚对账，standard/deep 档并行加跑），
+ * 解析成逐章报告；BLOCKER 总数供顶栏入口红点徽标（清零出口：
  * 作者处理完重跑，徽标消失）。贵档 ledger_slice 不在此出口（后续单独做）。
  * 处置闭环：贵档发现落盘后带 CR id，卡片上可标记「已处理/已知」（issue_set_status），
  * 成功后本地标灰并把该发现的 BLOCKER 从徽标计数中扣减。
@@ -83,6 +84,25 @@ export interface WorkDiagnostics {
   blockerCount: number;
 }
 
+/** 对账锚统计（ledger_reconcile 契约镜像）。 */
+export interface ReconcileAnchors {
+  checked: number;
+  ok: number;
+  chapterMissing: number;
+  quoteMissing: number;
+  lineDrift: number;
+}
+
+/**
+ * ledger_reconcile 返回镜像：anchors 统计 + findings（与诊断同形状）。
+ * 老版本 core / mock 可能缺字段甚至整体返回 undefined，按「无发现」处理。
+ */
+export interface LedgerReconcileResult {
+  anchors?: ReconcileAnchors;
+  findings?: LedgerFinding[];
+  skipped?: unknown;
+}
+
 // ---------- 报告模型（纯函数解析，可独立测试） ----------
 
 /** 逐章行：扫描超标项（warn/fail）+ 该章诊断条目。 */
@@ -109,6 +129,8 @@ export interface ReviewReport {
   scanWarn: number;
   /** 问题日志 BLOCKER 条数（domain blockerCount 原样透传）。 */
   issueLogBlockers: number;
+  /** 对账锚统计（ledger_reconcile 未跑/失败时缺省）。 */
+  reconcileAnchors?: ReconcileAnchors;
   /** 红点徽标数：BLOCKER 诊断条目 + 问题日志 BLOCKER 条数。 */
   blockerTotal: number;
   hasBlockers: boolean;
@@ -126,15 +148,21 @@ export function isExceeded(m: ScanMetric): boolean {
 }
 
 /**
- * 把 scan_quality + ledger_diagnostics 的原始结果解析成逐章报告。
- * 两段可分别缺省（部分成功可见：一段失败时用成功那段出报告）；任一缺省时 clean 恒 false——
+ * 把 scan_quality + ledger_diagnostics + ledger_reconcile 的原始结果解析成逐章报告。
+ * 三段可分别缺省（部分成功可见：一段失败时用成功那段出报告）；任一缺省时 clean 恒 false——
  * 缺了确定性检查的一半，不能替作者下「干净」结论。
+ * 对账 findings 与诊断同形状，按 chapter 并入章卡 / 无 chapter 进 bookFindings，
+ * counts/blockerTotal 自然计入（对账 MAJOR 本来就该计入）；reconcile 缺省时行为与并入前一致。
  */
-export function buildReviewReport(scan: WorkScanResult | null, diag: WorkDiagnostics | null): ReviewReport {
+export function buildReviewReport(
+  scan: WorkScanResult | null,
+  diag: WorkDiagnostics | null,
+  reconcile?: LedgerReconcileResult | null,
+): ReviewReport {
   const counts: SeverityCounts = { BLOCKER: 0, MAJOR: 0, MODERATE: 0, MINOR: 0 };
   const byChapter = new Map<string, LedgerFinding[]>();
   const bookFindings: LedgerFinding[] = [];
-  for (const f of diag?.findings ?? []) {
+  for (const f of [...(diag?.findings ?? []), ...(reconcile?.findings ?? [])]) {
     counts[f.severity] = (counts[f.severity] ?? 0) + 1;
     if (f.chapter) {
       const arr = byChapter.get(f.chapter) ?? [];
@@ -171,6 +199,7 @@ export function buildReviewReport(scan: WorkScanResult | null, diag: WorkDiagnos
     scanFail,
     scanWarn,
     issueLogBlockers: diag?.blockerCount ?? 0,
+    ...(reconcile?.anchors ? { reconcileAnchors: reconcile.anchors } : {}),
     blockerTotal,
     hasBlockers: (diag?.hasBlockers ?? false) || blockerTotal > 0,
     clean,
@@ -300,9 +329,9 @@ export class ReviewStore {
   level = $state<ReviewLevel>('standard');
   /**
    * 各扫描项最近一次运行的独立状态（部分成功可见）：新一次运行前重置为空；
-   * fail 带错误信息，quick 档 diag 标 skipped。
+   * fail 带错误信息，quick 档 diag/rec 标 skipped。
    */
-  items = $state<{ scan?: ScanItemState; diag?: ScanItemState }>({});
+  items = $state<{ scan?: ScanItemState; diag?: ScanItemState; rec?: ScanItemState }>({});
   /**
    * 贵档发现已返回但落盘失败的原因（core persistedError 镜像）：findings 可看，
    * 但作者要知道「没进问题日志、无法处置」。下次贵档跑前清。
@@ -393,7 +422,7 @@ export class ReviewStore {
   }
 
   /**
-   * 按档位跑审阅（R5）：quick=scan_quality；standard=+ledger_diagnostics（现状默认）；
+   * 按档位跑审阅（R5）：quick=scan_quality；standard=+ledger_diagnostics+ledger_reconcile（现状默认）；
    * deep=标准全部 + 当前章贵档冷读。各项独立成功/失败（items），部分成功照常出报告；
    * 取消静默释放锁不报错。
    */
@@ -414,7 +443,7 @@ export class ReviewStore {
           (v) => ({ ok: true as const, v }),
           (e) => ({ ok: false as const, e }),
         );
-      const [scanRes, diagRes] = await Promise.all([
+      const [scanRes, diagRes, recRes] = await Promise.all([
         settle(
           this.client.callTool<WorkScanResult>('scan_quality', { workDir: this.workDir }, {
             signal: ac.signal,
@@ -429,10 +458,19 @@ export class ReviewStore {
                 issueLogPath: ISSUE_LOG_DEFAULT,
               }, { signal: ac.signal, timeoutMs: LONG_CALL_TIMEOUT_MS }),
             ),
+        level === 'quick'
+          ? Promise.resolve(null)
+          : settle(
+              this.client.callTool<LedgerReconcileResult>('ledger_reconcile', { workDir: this.workDir }, {
+                signal: ac.signal,
+                timeoutMs: LONG_CALL_TIMEOUT_MS,
+              }),
+            ),
       ]);
       if (ac.signal.aborted) return; // 取消：静默释放锁，迟到结果一律忽略
       let scan: WorkScanResult | null = null;
       let diag: WorkDiagnostics | null = null;
+      let rec: LedgerReconcileResult | undefined;
       const failures: string[] = [];
       if (scanRes.ok) {
         scan = scanRes.v;
@@ -452,11 +490,21 @@ export class ReviewStore {
         this.items.diag = { status: 'fail', error: msg };
         failures.push(`账本诊断失败：${msg}`);
       }
-      if (scan !== null || diag !== null) {
-        this.report = applyPremiumFindings(buildReviewReport(scan, diag), this.premium);
+      if (level === 'quick') {
+        this.items.rec = { status: 'skipped' };
+      } else if (recRes !== null && recRes.ok) {
+        rec = recRes.v; // 老版本 core / mock 可能返回 undefined：按无 findings 处理
+        this.items.rec = { status: 'ok' };
+      } else if (recRes !== null) {
+        const msg = errText(recRes.e);
+        this.items.rec = { status: 'fail', error: msg };
+        failures.push(`账本对账失败：${msg}`);
+      }
+      if (scan !== null || diag !== null || rec !== undefined) {
+        this.report = applyPremiumFindings(buildReviewReport(scan, diag, rec ?? null), this.premium);
       }
       // 部分成功只在 items 里挂红字；全军覆没才进面板红条 + work.error 红条。
-      if (failures.length > 0 && scan === null && diag === null) {
+      if (failures.length > 0 && scan === null && diag === null && rec === undefined) {
         const msg = `审阅扫描失败：${failures.join('；')}`;
         this.error = msg;
         work.error = msg;

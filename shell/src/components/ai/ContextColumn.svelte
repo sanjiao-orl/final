@@ -4,6 +4,7 @@
   // $effect 自动跟随口径/当前章重拉（取代 onMount 单次），刷新按钮保留手动兜底。
   // 行高紧凑（查阅面板不是编辑器）；最近刷新时间小字。
   import { iconSvg } from '../../lib/icons.js';
+  import type { JumpTarget } from '../../lib/jump-target.js';
   import { snapshot, type LedgerView } from '../../lib/snapshot.svelte.js';
   import { work } from '../../lib/work.svelte.js';
 
@@ -80,6 +81,50 @@
     const note = p.note ? ` · ${p.note}` : '';
     return head ? `${head} · ${tail}${note}` : `${tail}${note}`;
   }
+
+  // ---------- T9 定位闭环：每行一个「定位」按钮，取证据锚跳编辑器 ----------
+
+  /** 行定位锚：chapter 必有（relPath 口径），line/quote 可选（缺则只跳章级）。 */
+  interface RowAnchor {
+    chapter: string;
+    line?: number | undefined;
+    quote?: string | undefined;
+  }
+
+  /** 伏笔行：最后一条 setup 优先，无则最后一条 payoff，都无 → null（按钮禁用）。 */
+  function promiseAnchor(p: LedgerView['promises'][number]): RowAnchor | null {
+    const s = p.setups[p.setups.length - 1];
+    if (s) return { chapter: s.chapter, line: s.line, quote: s.quote };
+    const y = p.payoffs[p.payoffs.length - 1];
+    return y ? { chapter: y.chapter, line: y.line, quote: y.quote } : null;
+  }
+
+  /** 道具行：最新一条 custody（决策 0013 证据锚），空 → null。 */
+  function propAnchor(p: LedgerView['props'][number]): RowAnchor | null {
+    const c = p.custody[p.custody.length - 1];
+    return c ? { chapter: c.chapter, line: c.line, quote: c.quote } : null;
+  }
+
+  /** 时钟行：章级跳转（chapters[0]，无 line/quote），chapters 空 → null。 */
+  function clockAnchor(c: LedgerView['clock'][number]): RowAnchor | null {
+    const ch = c.chapters[0];
+    return ch ? { chapter: ch } : null;
+  }
+
+  /** 知情行：首条已知事实的 since 作章 + quote 摘录，无 since → null。 */
+  function knowledgeAnchor(k: LedgerView['knowledge'][number]): RowAnchor | null {
+    const f = k.knows[0];
+    return f?.since ? { chapter: f.since, quote: f.quote } : null;
+  }
+
+  /** 发起跳转：本栏不遮正文、不关任何面板；失败由编辑器侧轻提示。 */
+  function jump(anchor: RowAnchor | null): void {
+    if (!anchor) return;
+    const target: JumpTarget = {};
+    if (anchor.line !== undefined) target.line = anchor.line;
+    if (anchor.quote !== undefined) target.quote = anchor.quote;
+    void work.jumpToChapter(anchor.chapter, target);
+  }
 </script>
 
 <div class="ctx">
@@ -122,9 +167,13 @@
       {:else}
         <ul class="rows">
           {#each ledger.promises as p (p.id)}
+            {@const a = promiseAnchor(p)}
             <li class="row">
-              <span class="row-name">{p.name}</span>
-              <span class="row-meta">{promiseMeta(p)}</span>
+              <div class="row-main">
+                <span class="row-name">{p.name}</span>
+                <span class="row-meta">{promiseMeta(p)}</span>
+              </div>
+              <button class="locate" disabled={!a} onclick={() => jump(a)} title={a ? '定位到证据位置' : '该条目暂无证据锚'}>定位</button>
             </li>
           {/each}
         </ul>
@@ -142,9 +191,13 @@
       {:else}
         <ul class="rows">
           {#each ledger.props as p (p.name)}
+            {@const a = propAnchor(p)}
             <li class="row">
-              <span class="row-name">{p.name}</span>
-              <span class="row-meta">{propLine(p)}</span>
+              <div class="row-main">
+                <span class="row-name">{p.name}</span>
+                <span class="row-meta">{propLine(p)}</span>
+              </div>
+              <button class="locate" disabled={!a} onclick={() => jump(a)} title={a ? '定位到证据位置' : '该条目暂无证据锚'}>定位</button>
             </li>
           {/each}
         </ul>
@@ -162,8 +215,12 @@
       {:else}
         <ul class="rows">
           {#each ledger.clock as c, i (i)}
+            {@const a = clockAnchor(c)}
             <li class="row">
-              <span class="row-meta">{clockLine(c)}</span>
+              <div class="row-main">
+                <span class="row-meta">{clockLine(c)}</span>
+              </div>
+              <button class="locate" disabled={!a} onclick={() => jump(a)} title={a ? '定位到证据位置' : '该条目暂无证据锚'}>定位</button>
             </li>
           {/each}
         </ul>
@@ -181,9 +238,13 @@
       {:else}
         <ul class="rows">
           {#each ledger.knowledge as k (k.character)}
+            {@const a = knowledgeAnchor(k)}
             <li class="row">
-              <span class="row-name">{k.character}</span>
-              <span class="row-meta">{knowledgeLine(k)}</span>
+              <div class="row-main">
+                <span class="row-name">{k.character}</span>
+                <span class="row-meta">{knowledgeLine(k)}</span>
+              </div>
+              <button class="locate" disabled={!a} onclick={() => jump(a)} title={a ? '定位到证据位置' : '该条目暂无证据锚'}>定位</button>
             </li>
           {/each}
         </ul>
@@ -314,13 +375,44 @@
   }
   .row {
     display: flex;
-    flex-direction: column;
-    gap: 1px;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
     padding: 5px 8px;
     border-radius: 6px;
     background: color-mix(in srgb, var(--paper) 70%, var(--panel));
     border: 1px solid var(--line);
     line-height: 1.4;
+  }
+  /* 主内容列（名 + meta），定位按钮占右侧固定宽 */
+  .row-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .locate {
+    flex: none;
+    align-self: center;
+    height: 18px;
+    padding: 0 7px;
+    font-size: 10.5px;
+    line-height: 1;
+    border-radius: 9px;
+    border: 1px solid var(--line);
+    color: var(--muted);
+    white-space: nowrap;
+    transition: background var(--t-hover), color var(--t-hover), border-color var(--t-hover);
+  }
+  .locate:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    border-color: var(--accent-line);
+    color: var(--accent);
+  }
+  .locate:disabled {
+    opacity: 0.4;
+    cursor: default;
   }
   .row-name {
     font-weight: 600;

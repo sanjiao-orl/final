@@ -33,6 +33,11 @@
 - [评审T15] 上轮已完成（README 发布记录补 v0.2.6/v0.2.7、验收口径改实测、0007 protocol 演进标注、工具数 36 统一；「core 的 ledger.ts」坐标核实活跃文档无此误，仅冻结归档件有不改），本条随之核销。
 - 验证：`npm run check` 0 错（check-versions 六处一致 v0.2.7）、`npm test` 全绿 924（core 235 / domain 343 / shell 346，较 916 +8）、`node scripts/perf-benchmark.mjs` scan_quality 300 章档净增 42.8MB。8 项各自独立 commit，过程留 git。
 
+## T9 核销（2026-08-23 正文跳转闭环，全结）
+
+- [评审T9] 诊断/质检→正文跳转闭环：①壳层跳转协议落地——`shell/src/lib/jump-target.ts`（JumpTarget：quote 优先精确定位、line 兜底近似；行号统一「文件 1 起始含 frontmatter」口径，frontmatterLineCount 换算正文行，空白行向上贴靠、估算块位+文本校验纠偏）+ `work.jumpToChapter(relPath, target)`（跨章先开章含脏保存门禁，派单 pendingJump 由 Editor 消费一次即清）+ Editor 侧 revealRange（滚动居中 + 选区 + 1.8s jump-flash 闪烁高亮，not-found 弹轻提示）。②四类结果面板逐个接入：质检（章头面板每条 finding「定位」，located=false 置灰）、审阅（章卡头/章内诊断/贵档 quote/扫描命中行 L{n} 整行可点/书级连续同场景与模板段落章名芯片钮；书级无锚条目按公约置灰带说明）、对账（ledger_reconcile 并入审阅 standard/deep 档并行跑，findings 与诊断同流进章卡获得定位钮，anchors 计数进报告 reconcileAnchors，quick 档不跑——顺带补上「对账异常 · 审阅面板查看」的断链）、账本（ContextColumn 四维行尾「定位」：伏笔=末条 setup/payoff、道具=末条 custody、时钟=chapters[0]、知情=knows[0].since；snapshot LedgerView 镜像补 custody.line/quote、payoff.quote、knowledge.quote 四字段；无锚置灰）。审阅面板跳转前先收起覆盖层；账本栏不遮正文不收起。shell 测试 +21（jump-target 12 / review 对账并入 5 / jumpToChapter 4）。
+- 验证：`npm run check` 0 错（check-versions 六处一致 v0.2.7）、`npm test` 全绿 945（core 235 / domain 343 / shell 367，较 924 +21）。
+
 ## 本轮核销（2026-08-22/23 修复批：台账 3 条 + 作者实测 1 条，全结）
 
 - [作者实测 P1] 模型设置面板「实际没法用」：用途分配下拉只列 config.json 预设、环境变量预设选不到，保存校验拒绝其 id；兼容回退区四字段在预设生效时被忽略却可输入。修复（纯壳侧，core/Tauri 链路核实无需改）：下拉并入环境变量预设（`assignablePresets` 并集、归一化去重、env 项标注来源），保存校验放宽到 配置∪env 归一化 id（llmStatus 未加载时保持原口径），回退区在 presets 模式禁用输入框并明示被忽略。shell 测试 +4。

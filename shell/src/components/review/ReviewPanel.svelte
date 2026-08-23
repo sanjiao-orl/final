@@ -9,6 +9,7 @@
     type FindingSeverity,
     type ScanSeverity,
   } from '../../lib/review.svelte.js';
+  import type { JumpTarget } from '../../lib/jump-target.js';
   import { work } from '../../lib/work.svelte.js';
 
   const SEV_LABEL: Record<FindingSeverity, string> = {
@@ -48,6 +49,12 @@
 
   function onKeydown(e: KeyboardEvent): void {
     if (e.key === 'Escape') review.close();
+  }
+
+  /** T9 定位闭环：覆盖层会挡正文，跳转前先收起；跳转失败由编辑器侧轻提示，这里只管发起。 */
+  function locate(relPath: string, target?: JumpTarget): void {
+    review.close();
+    void work.jumpToChapter(relPath, target);
   }
 </script>
 
@@ -169,18 +176,20 @@
             <div class="finding">
               <span class="pill sev-{f.severity}">{SEV_LABEL[f.severity]}</span>
               <span class="fmsg">{f.message}</span>
+              <!-- 账本级条目无章定位，按钮禁用并说明（保持与章内一致的视觉） -->
+              <button class="jump" disabled title="该诊断无章节定位信息">定位</button>
             </div>
           {/each}
           {#each r.book.sceneContinuity as v (v.scene)}
             <div class="finding">
               <span class="pill sev-MAJOR">连续同场景</span>
-              <span class="fmsg">「{v.scene}」连续出现 {v.chapters.length} 章：{v.chapters.map(chapterBase).join('、')}</span>
+              <span class="fmsg">「{v.scene}」连续出现 {v.chapters.length} 章：{#each v.chapters as ch, i (i)}{#if i > 0}、{/if}<button class="chip-jump" onclick={() => locate(ch)} title={`定位到「${chapterBase(ch)}」开头`}>{chapterBase(ch)}</button>{/each}</span>
             </div>
           {/each}
           {#each r.book.templateParagraphs as t (t.opening)}
             <div class="finding">
               <span class="pill sev-MAJOR">模板段落</span>
-              <span class="fmsg">「{t.opening}…」跨章重复：{t.chapters.map(chapterBase).join('、')}</span>
+              <span class="fmsg">「{t.opening}…」跨章重复：{#each t.chapters as ch, i (i)}{#if i > 0}、{/if}<button class="chip-jump" onclick={() => locate(ch, { quote: t.opening })} title={`定位到「${chapterBase(ch)}」的段首摘录`}>{chapterBase(ch)}</button>{/each}</span>
             </div>
           {/each}
           {#if r.bookFindings.length === 0 && r.book.sceneContinuity.length === 0 && r.book.templateParagraphs.length === 0}
@@ -200,6 +209,7 @@
             {#if c.metrics.length === 0 && c.findings.length === 0 && c.premium.length === 0}
               <span class="meta-note">干净</span>
             {/if}
+            <button class="jump head-jump" onclick={() => locate(c.relPath)} title={`定位到「${c.title}」开头`}>定位</button>
           </div>
           {#if c.metrics.length > 0 || c.findings.length > 0 || c.premium.length > 0}
             <div class="card-body">
@@ -207,6 +217,12 @@
                 <div class="finding">
                   <span class="pill sev-{f.severity}">{SEV_LABEL[f.severity]}</span>
                   <span class="fmsg">{f.message}</span>
+                  {#if f.chapter}
+                    {@const ch = f.chapter}
+                    <button class="jump" onclick={() => locate(ch)} title={`定位到「${chapterBase(ch)}」`}>定位</button>
+                  {:else}
+                    <button class="jump" disabled title="该诊断无章节定位信息">定位</button>
+                  {/if}
                 </div>
               {/each}
               {#if c.premium.length > 0}
@@ -222,6 +238,7 @@
                       {#if f.suggestion}<span class="sug">建议：{f.suggestion}</span>{/if}
                     </span>
                     <span class="ops">
+                      <button class="btn min" onclick={() => locate(c.relPath, { quote: f.quote })} title="定位到原文引用">定位</button>
                       {#if disposal}
                         <span class="disposed-tag" title={disposal === 'done' ? '已处理' : '已知'}>{disposal === 'done' ? '已处理' : '已知'}</span>
                       {:else}
@@ -250,7 +267,7 @@
                   <span class="mstd">{m.standard}</span>
                 </div>
                 {#each m.hits.slice(0, 3) as h (h.line)}
-                  <div class="hit">L{h.line} · {h.text}</div>
+                  <button class="hit jump-hit" onclick={() => locate(c.relPath, { line: h.line })} title={`定位到第 ${h.line} 行`}>L{h.line} · {h.text}</button>
                 {/each}
                 {#if m.more}<div class="hit">…另有 {m.more} 条命中</div>{/if}
               {/each}
@@ -686,5 +703,62 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  /* T9 定位按钮：小圆角胶囊，右对齐；disabled=无定位信息（title 说明） */
+  .jump {
+    flex: none;
+    height: 18px;
+    padding: 0 7px;
+    font-size: 10.5px;
+    line-height: 1;
+    border-radius: 9px;
+    border: 1px solid var(--line);
+    color: var(--accent);
+    white-space: nowrap;
+    align-self: center;
+    transition: background var(--t-hover), color var(--t-hover), border-color var(--t-hover);
+  }
+  .finding > .jump {
+    margin-left: auto;
+  }
+  .jump:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    border-color: var(--accent-line);
+  }
+  .jump:disabled {
+    opacity: 0.4;
+    cursor: default;
+    color: var(--muted);
+  }
+  .card-head .head-jump {
+    margin-left: auto;
+  }
+  /* 章名小按钮（书级连续同场景 / 模板段落）：内联在 fmsg 文案里 */
+  .chip-jump {
+    height: 17px;
+    padding: 0 6px;
+    font-size: 10.5px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    color: var(--muted);
+    white-space: nowrap;
+    vertical-align: baseline;
+    transition: background var(--t-hover), color var(--t-hover), border-color var(--t-hover);
+  }
+  .chip-jump:hover {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    border-color: var(--accent-line);
+    color: var(--accent);
+  }
+  /* 扫描指标命中行：整行可点定位到第 N 行（保留原排版） */
+  button.hit.jump-hit {
+    display: block;
+    width: fit-content;
+    max-width: calc(100% - 26px);
+    text-align: left;
+    transition: color var(--t-hover);
+  }
+  button.hit.jump-hit:hover {
+    color: var(--accent);
   }
 </style>
