@@ -55,6 +55,11 @@
 - [P3 块1遗留] 找回章闭环：domain 新增第 36 个工具 `restore_trash`（move-back 原子 rename，trash 副本不再存在；无时间戳/目标已存在/原路径非 manuscript/ 均拒绝；文件名解析与 list_trash 共用 parseTrashName 单一事实源）；壳找回（回收站面板 + AI 删章拒绝补偿）优先走新工具，旧版 core 404「工具不可用」兜底读回写（`isToolMissingError` 判定，503 重连不误兜底）。顺手修 `trashPathOf` 按 rejected 状态过滤永远扑空的潜在 bug（rejectApproval 先落定状态再找结果）。domain 测试 +6，shell 测试 +3。
 - 验证：`npm run check` 0 错（check-versions 六处一致 v0.2.7）、`npm test` 全绿 916（core 234 / domain 336 / shell 346）、`cargo test` 17 绿；e2e-workflow 需真实 LLM key（provider 余额不足 401 照旧未跑，非代码回归）。
 
+## 作者实测核销（2026-08-23：工具结果展示与输出触顶，全结）
+
+- [作者实测] 工具卡「结果」显示裸 MCP 信封：domain 工具统一 `jsonResult` 序列化（`{content:[{type:'text', text:'<JSON 字符串>'}]}`，无 outputSchema），core chat SSE `tool-result` 原样转发 `part.output`，ToolCard 直接 `JSON.stringify` 渲染——前端看到带 `\n` 转义的信封全文。修复：shell 新增 `unwrapMcpEnvelope`（识别信封→拼接 text 段→尝试 JSON.parse；非信封原样返回，宁漏勿错），ToolCard formatShort/formatFull/isTruncated 三处接入。同根因揪出隐藏 bug：`trashPathOf` 直读 `result.trashPath`，真实 MCP 路径下永远扑空——拒绝删章的自动找回静默失效、落进「未找到 trash 副本」分支（既有单测 mock 的是已解包形态所以测不出来），已一并接入解包。壳测试 +5（unwrap 3 + 信封找回 1 + 触顶 1）。
+- [作者实测] chat 输出触顶（finishReason=length）零信号：core 流循环忽略 finish 事件，半截回复照常落库发 done，作者观感「发不出来、催几轮才自己压缩发出来」。修复：core 捕获末步 finishReason，='length' 时 done 带 `truncated: true`（加法不改契约）；壳 onDone 收到 truncated 弹 notice +「让它继续」按钮（复用 T12 预填机制，预填「继续+分段输出」引导）。core 测试 +2（length/stop 两态）。续写端点本就有 MAX_OUTPUT_TOKENS=1200 上限，chat 不设上限靠 provider 默认、触顶靠本标记可见。
+
 ## P3（遗留备查）
 
 - [块1遗留] `shell/src/lib/candidates.svelte.test.ts` 是 CRLF/LF 混合行尾文件（历史遗留；编辑时注意保持所在区域一致，git 的 LF→CRLF 提示是既有状态非新引入）。
