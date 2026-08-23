@@ -404,6 +404,31 @@
   // ---------- 平台格式复制（任务 3）：成功短暂「已复制」（1.5s），失败红条在 work.copyChapterText 内落 ----------
   let copying = $state(false);
   let copied = $state(false);
+
+  // ---------- 发布状态 pill 两段式确认（评审 P3：循环点击无确认易误触）----------
+  // 第一击进入确认态显示目标值，3s 内再击生效；超时/切章自动取消。
+  let statusConfirm = $state<string | null>(null);
+  let statusConfirmTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    // 切章（当前章变化）时撤销挂起的确认，避免误作用到新章
+    void work.current?.relPath;
+    return () => {
+      statusConfirm = null;
+      clearTimeout(statusConfirmTimer);
+    };
+  });
+  function onStatusPillClick(): void {
+    if (statusConfirm !== null) {
+      statusConfirm = null;
+      clearTimeout(statusConfirmTimer);
+      void work.cycleChapterStatus();
+      return;
+    }
+    const cur = typeof work.current?.frontmatter?.status === 'string' ? work.current.frontmatter.status : undefined;
+    statusConfirm = nextChapterStatus(cur);
+    clearTimeout(statusConfirmTimer);
+    statusConfirmTimer = setTimeout(() => (statusConfirm = null), 3000);
+  }
   async function copyChapter(): Promise<void> {
     if (copying) return;
     copying = true;
@@ -467,12 +492,17 @@
           <button
             class="pill status"
             class:unset={!fmStatus}
+            class:confirming={statusConfirm !== null}
             style:--st={statusVar(fmStatus)}
             disabled={work.saving}
-            title={fmStatus ? `发布状态：${fmStatus}（点击切换到「${nextChapterStatus(fmStatus)}」）` : '点击设定发布状态：草稿→已发布→已校对'}
-            onclick={() => void work.cycleChapterStatus()}
+            title={statusConfirm !== null
+              ? `再次点击确认切换到「${statusConfirm}」（3 秒内有效，逾期自动取消）`
+              : fmStatus
+                ? `发布状态：${fmStatus}（点击切换到「${nextChapterStatus(fmStatus)}」，需再次点击确认）`
+                : '点击设定发布状态：草稿→已发布→已校对（需再次点击确认）'}
+            onclick={onStatusPillClick}
           >
-            <i class="dot" style:background={statusVar(fmStatus)}></i>{fmStatus ?? '草稿'}
+            <i class="dot" style:background={statusVar(statusConfirm ?? fmStatus)}></i>{statusConfirm !== null ? `确认→${statusConfirm}？` : (fmStatus ?? '草稿')}
           </button>
           {#if fmPov}<span class="pill">POV · {fmPov}</span>{/if}
           {#each fmTags as t (t)}<span class="pill">{t}</span>{/each}
@@ -661,6 +691,11 @@
     border-color: var(--line);
     color: var(--muted);
     opacity: 0.65;
+  }
+  /* 两段式确认态：加边强调，等待第二击 */
+  .pill.status.confirming {
+    border-color: var(--st, var(--muted));
+    font-weight: 600;
   }
   .pill.status:disabled {
     opacity: 0.5;
