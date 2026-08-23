@@ -60,7 +60,7 @@ node core/scripts/e2e-workflow.mjs   # 写作闭环剧本:碰撞→留痕闸门�
 
 ## 验收口径
 
-- `npm run check` / `npm test`(967 用例:core 240 + domain 347 + shell 380;另 cargo test 17;写作闭环 e2e-workflow 12 步含碰撞闸门与触发式续写,真实 LLM key 在场才跑;GitHub Actions CI 门禁同口径)
+- `npm run check` / `npm test`(975 用例:core 240 + domain 347 + shell 388;另 cargo test 17;写作闭环 e2e-workflow 12 步含碰撞闸门与触发式续写,真实 LLM key 在场才跑;行为回归 `npm run promptfoo` 三用例——起草路由/skill 铁律/非正文负向,同样真实 LLM 手动跑;GitHub Actions CI 门禁同口径)
 - 每周出口 = 作者用本仓真实写作;不以测试绿为验收
 
 ## 已知现象
