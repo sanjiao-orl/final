@@ -1079,6 +1079,25 @@ export function writeMeta(workDir: string, relPath: string, content: string): { 
   return { ok: true, path: rel, bytes };
 }
 
+/**
+ * read_style：读书级声口档案 .novel/style.md 全文（块2·② 全文可读回）。
+ * 路径白名单与 write_meta 同口径（assertLedgerMetaPath，固定 .novel/style.md）；
+ * 文件不存在返回 { exists: false }（= 尚未建档），不报错——系统提示的「## 声口摘要」只是投影，本工具是事实源。
+ */
+export function readStyle(
+  workDir: string
+): { exists: true; relPath: string; content: string; bytes: number } | { exists: false } {
+  const wd = assertWorkDir(workDir);
+  const abs = assertLedgerMetaPath(wd, '.novel/style.md', 'ledger');
+  try {
+    const content = fs.readFileSync(abs, 'utf8');
+    return { exists: true, relPath: '.novel/style.md', content, bytes: Buffer.byteLength(content, 'utf8') };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { exists: false };
+    throw err;
+  }
+}
+
 /** 读文件当前状态（存在性 + mtimeMs + 内容摘要），供 upsert 的写前复核；文件不存在返回 exists=false。 */
 function ledgerFileState(abs: string): { exists: boolean; mtimeMs: number; content: string } {
   try {

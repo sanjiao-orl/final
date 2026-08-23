@@ -1,11 +1,12 @@
 /**
- * server.ts —— MCP stdio server 装配：注册三十六个工具并连接 stdio transport。
+ * server.ts —— MCP stdio server 装配：注册三十八个工具并连接 stdio transport。
  * 双侧合并口径：基础工具 8 个 + WS-9 scan_quality + A 组 8 工具 + WS-17 账本 4 工具 + 0008 skill_read 1 工具 + 0009 问题日志 2 工具（issue_append/issue_set_status）+ scheme_set_active 1 工具（激活/取消激活方案指针）。
  * 批三-3 新增 2 工具：ledger_chapter_slice（按章过滤的账本视图，只读）+ write_meta（书级元数据写入，不写账本/不写正文）。
  * 批一③ 碰撞模式 新增 3 工具：decision_append（裁决留痕追加）/ decision_tail（裁决留痕尾部只读）/ chapter_set_blueprint（章蓝图模式设置），并在 frontmatter 透出 blueprint、buildChapter 透传。
  * 块1 理解层供料 新增 4 工具：ledger_reconcile（证据锚对账）/ write_chapter_summary + read_chapter_summaries（章摘要导生缓存，机检字段首写冻结）/ list_trash（回收站收口）；ledger_diagnostics 输出并入节奏诊断（pacing-flat，加法）。
- * 块1 遗留缺陷修复 新增 1 工具：restore_trash（找回回收站条目 = move-back 移回原路径，trash 副本不再存在），现共 36 个工具。
- * 被 core 包经 MCP stdio spawn 调用；工具实现见 tools.ts / ledger.ts / reconcile.ts / summaries.ts。
+ * 块1 遗留缺陷修复 新增 1 工具：restore_trash（找回回收站条目 = move-back 移回原路径，trash 副本不再存在）。
+ * 块2 声口批 新增 2 工具：read_style（声口档案全文读回，摘要只是投影）+ voice_fingerprint（声口指纹确定性度量与偏离对照），现共 38 个工具。
+ * 被 core 包经 MCP stdio spawn 调用；工具实现见 tools.ts / ledger.ts / reconcile.ts / summaries.ts / voice.ts。
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -46,6 +47,7 @@ import {
   ledgerChapterSlice,
   ledgerSlice,
   readLedger,
+  readStyle,
   upsertLedger,
   writeMeta,
   type IssueFinding,
@@ -54,6 +56,7 @@ import {
 import { readSkillBody, schemeSetActive } from './prompts.js';
 import { reconcileLedger } from './reconcile.js';
 import { pacingDiagnostics, readChapterSummaries, writeChapterSummary } from './summaries.js';
+import { voiceFingerprint } from './voice.js';
 import domainPkg from '../package.json' with { type: 'json' };
 
 const server = new McpServer({
@@ -676,6 +679,41 @@ server.registerTool(
     },
   },
   async ({ workDir, trashPath }) => jsonResult(restoreTrash(workDir, trashPath)),
+);
+
+// 块2·② 声口档案全文读回（第 37 个工具；系统提示的「## 声口摘要」只是 1500 字投影，本工具是事实源）
+server.registerTool(
+  'read_style',
+  {
+    title: '读书级声口档案全文',
+    description:
+      '读回 workDir/.novel/style.md 声口档案全文（六透镜+证据）。系统提示注入的「## 声口摘要」只是投影——需要细看声口时（建档前确认现状、续写/改写前对齐口径、怀疑摘要截断丢信息）读本文件。不存在返回 { exists: false }（= 尚未建档，可跑「声口建档」skill），不报错。',
+    inputSchema: { workDir: z.string().describe('作品文件夹的绝对路径') },
+  },
+  async ({ workDir }) => jsonResult(readStyle(workDir)),
+);
+
+// 块2·③ 声口指纹确定性度量（第 38 个工具；句长/对白/段长/高频二字组，纯计算不涉 LLM，偏离提示作仪表不拦内容）
+server.registerTool(
+  'voice_fingerprint',
+  {
+    title: '声口指纹度量与偏离对照',
+    description:
+      '对章正文或内联文本计算声口量化指纹（句长分布/对白占比/段长/高频二字组），确定性计算。用途：①全书或逐章声口底数（缺省 relPaths/texts 时度量全书章，需 workDir）；②续写/改写产出对照（texts 给 [基线,产出] 两段，compare 指定下标）产出偏离提示 flags——作仪表不入门禁，样本 CJK 不足 100 字不出提示。',
+    inputSchema: {
+      workDir: z.string().optional().describe('作品文件夹的绝对路径（relPaths/全书模式必填；纯 texts 模式可省）'),
+      relPaths: z.array(z.string()).optional().describe('manuscript/ 下章相对路径清单（缺省=全书章）'),
+      texts: z.array(z.string().max(20_000)).max(4).optional().describe('内联文本样本（≤4 段，每段 ≤20000 字符；如改写原文与产出）'),
+      compare: z
+        .object({
+          baselineIndex: z.number().int().min(0).describe('基线样本在 samples 数组的下标'),
+          sampleIndex: z.number().int().min(0).describe('对照样本下标（relPaths 样本在前、texts 在后）'),
+        })
+        .optional()
+        .describe('对照两份样本产出偏离提示（deltas+flags）'),
+    },
+  },
+  async (input) => jsonResult(voiceFingerprint(input)),
 );
 
 // 挂起等待 stdio 上的 MCP 请求
