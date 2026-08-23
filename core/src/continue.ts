@@ -7,7 +7,9 @@ import { getLlmTimeoutSeconds } from './config.js';
 import { EventPump } from './event-pump.js';
 import { HttpError, toPublicErrorMessage, writeJson } from './http.js';
 import { loadPrompt, loadStyleSummary } from './prompts.js';
+import { voiceDeviationFor } from './voice-check.js';
 import { normalizeWorkDir } from './workdir.js';
+import type { ToolSet } from 'ai';
 
 /** 续写请求正文上限：壳通常只送约 3000 字，8000 为防止上下文挤占输出预算的硬护栏。 */
 const MAX_CONTEXT_CHARS = 8_000;
@@ -28,6 +30,9 @@ export type ContinueBody = z.infer<typeof continueBodySchema>;
 
 export interface ContinueDeps {
   modelForTier: (tier: 'background') => LanguageModel;
+  /** domain 工具集（可选）：在场则 done 附带声口偏离提示（块2·④，仪表非门禁，缺失/失败静默降级）。 */
+  tools?: ToolSet | undefined;
+  toolsAvailable?: (() => boolean) | undefined;
 }
 
 export async function handleContinueRequest(
@@ -86,7 +91,11 @@ export async function handleContinueRequest(
     }
     const finalText = text.trim();
     if (!finalText) pump.emit('error', { message: '模型返回了空续写结果' });
-    else pump.emit('done', { text: finalText });
+    else {
+      // 块2·④：续写产出对照正文尾巴的声口偏离（仪表；基线=context 尾巴即本场景语感）
+      const voice = await voiceDeviationFor(deps.tools, deps.toolsAvailable, context, finalText);
+      pump.emit('done', { text: finalText, ...(voice ? { voice } : {}) });
+    }
     pump.end();
   } catch (err) {
     if (abort.signal.aborted) pump.end();

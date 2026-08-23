@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import type { ToolSet } from 'ai';
 import { readSse, startTestServer, stepModel, textResult } from './helpers.js';
 
 function postRewrite(baseUrl: string, token: string, body: unknown): Promise<Response> {
@@ -43,6 +44,30 @@ describe('/v1/rewrite SSE 改写管道', () => {
 
       // 纯改写：不产生任何会话/消息
       expect(s.store.listSessions()).toEqual([]);
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('块2·④：voice_fingerprint 在场时 done 附带声口偏离（基线=选区原文），护栏拒绝时不算', async () => {
+    const deviation = { deltas: { dialogueRatio: { base: 0.3, out: 0.05 }, sentenceLenMean: { base: 12, out: 28 }, shortSentenceRatio: { base: 0.6, out: 0.2 }, longSentenceRatio: { base: 0, out: 0.4 }, gramOverlap: { base: 7, out: 7 } }, flags: ['平均句长 12 → 28 字'] };
+    const execute = vi.fn(async () => ({ deviation }));
+    const tools = { voice_fingerprint: { description: '声口指纹', execute } } as unknown as ToolSet;
+    const model = stepModel([textResult(['一段冗长而绵密的长句。']), textResult(['过短。'])]);
+    const s = await startTestServer({ modelForTier: () => model, tools });
+    try {
+      const events = await readSse(await postRewrite(s.baseUrl, s.token, { original: '原文一段有画面的话。', instruction: '改写' }));
+      expect(events.at(-1)?.event).toBe('done');
+      expect(events.at(-1)?.data.voice).toEqual(deviation);
+      expect(execute).toHaveBeenCalledWith(
+        expect.objectContaining({ texts: ['原文一段有画面的话。', '一段冗长而绵密的长句。'], compare: { baselineIndex: 0, sampleIndex: 1 } }),
+        expect.anything()
+      );
+      // 护栏拒绝的产出（过短）走 error，不触发偏离计算
+      execute.mockClear();
+      const rejected = await readSse(await postRewrite(s.baseUrl, s.token, { original: '原文一段有画面的话，长度足够过比率护栏的句子。', instruction: '改写' }));
+      expect(rejected.at(-1)?.event).toBe('error');
+      expect(execute).not.toHaveBeenCalled();
     } finally {
       await s.close();
     }

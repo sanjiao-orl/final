@@ -86,9 +86,13 @@ async function main(): Promise<void> {
     },
     rewrite: {
       modelForTier: (tier: Tier) => modelForPurpose(process.env, tier),
+      tools: mcp.tools,
+      toolsAvailable: () => mcp.isConnected(),
     },
     continue: {
       modelForTier: () => modelForPurpose(process.env, 'background'),
+      tools: mcp.tools,
+      toolsAvailable: () => mcp.isConnected(),
     },
     summary: {
       modelForTier: () => modelForPurpose(process.env, 'background'),

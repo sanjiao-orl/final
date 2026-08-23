@@ -7,7 +7,9 @@ import { getLlmTimeoutSeconds } from './config.js';
 import { EventPump } from './event-pump.js';
 import { toPublicErrorMessage, writeJson } from './http.js';
 import { loadPersona, loadPrompt, loadStyleSummary } from './prompts.js';
+import { voiceDeviationFor } from './voice-check.js';
 import { normalizeWorkDir } from './workdir.js';
+import type { ToolSet } from 'ai';
 
 export const rewriteBodySchema = z.object({
   /** 选区原文（锚定文本，改写对象）。 */
@@ -39,6 +41,9 @@ export type RewriteBody = z.infer<typeof rewriteBodySchema>;
 
 export interface RewriteDeps {
   modelForTier: (tier: 'writing' | 'background') => LanguageModel;
+  /** domain 工具集（可选）：在场则 done 附带声口偏离提示（块2·④，仪表非门禁，缺失/失败静默降级）。 */
+  tools?: ToolSet | undefined;
+  toolsAvailable?: (() => boolean) | undefined;
 }
 
 /** 改写输出护栏：绝对长度上限（字符）。 */
@@ -130,7 +135,9 @@ export async function handleRewriteRequest(
       pump.end();
       return;
     }
-    pump.emit('done', { text: finalText });
+    // 块2·④：改写产出对照原文的声口偏离（仪表；基线=选区原文）
+    const voice = await voiceDeviationFor(deps.tools, deps.toolsAvailable, original, finalText);
+    pump.emit('done', { text: finalText, ...(voice ? { voice } : {}) });
     pump.end();
   } catch (err) {
     if (abort.signal.aborted) {

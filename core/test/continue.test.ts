@@ -2,7 +2,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type { ToolSet } from 'ai';
 import { readSse, startTestServer, stepModel, textResult } from './helpers.js';
 
 function postContinue(baseUrl: string, token: string, body: unknown): Promise<Response> {
@@ -53,6 +54,53 @@ describe('/v1/continue SSE 触发式续写', () => {
       expect(withoutStyle.status).toBe(400);
     } finally {
       await s.close();
+    }
+  });
+
+  it('块2·④：voice_fingerprint 在场时 done 附带声口偏离（基线=正文尾巴）；工具缺失/报错静默降级不带 voice', async () => {
+    const deviation = {
+      deltas: {
+        dialogueRatio: { base: 0.4, out: 0.12 },
+        sentenceLenMean: { base: 9.5, out: 10.1 },
+        shortSentenceRatio: { base: 0.5, out: 0.52 },
+        longSentenceRatio: { base: 0.1, out: 0.1 },
+        gramOverlap: { base: 8, out: 8 },
+      },
+      flags: ['对白占比 40% → 12%'],
+    };
+    const execute = vi.fn(async () => ({ deviation }));
+    const tools = { voice_fingerprint: { description: '声口指纹', execute } } as unknown as ToolSet;
+    const s = await startTestServer({ modelForTier: () => stepModel([textResult(['他说完便走。'])]), tools });
+    try {
+      const events = await readSse(await postContinue(s.baseUrl, s.token, { context: '他说。她说。他说。' }));
+      const done = events.at(-1)!;
+      expect(done.event).toBe('done');
+      expect(done.data.voice).toEqual(deviation);
+      // 基线=请求的 context（正文尾巴），产出=最终续写文本；texts+compare 口径
+      expect(execute).toHaveBeenCalledWith(
+        expect.objectContaining({ texts: ['他说。她说。他说。', '他说完便走。'], compare: { baselineIndex: 0, sampleIndex: 1 } }),
+        expect.anything()
+      );
+    } finally {
+      await s.close();
+    }
+    // 工具缺失 → done 不带 voice 字段
+    const s2 = await startTestServer({ modelForTier: () => stepModel([textResult(['他说。'])]) });
+    try {
+      const events = await readSse(await postContinue(s2.baseUrl, s2.token, { context: '他说。' }));
+      expect(events.at(-1)?.data.voice).toBeUndefined();
+    } finally {
+      await s2.close();
+    }
+    // 工具报错 → 降级不拦产出
+    const bad = { voice_fingerprint: { description: '声口指纹', execute: vi.fn(async () => { throw new Error('炸了'); }) } } as unknown as ToolSet;
+    const s3 = await startTestServer({ modelForTier: () => stepModel([textResult(['照常。'])]), tools: bad });
+    try {
+      const events = await readSse(await postContinue(s3.baseUrl, s3.token, { context: '他说。' }));
+      expect(events.at(-1)?.event).toBe('done');
+      expect(events.at(-1)?.data.voice).toBeUndefined();
+    } finally {
+      await s3.close();
     }
   });
 });

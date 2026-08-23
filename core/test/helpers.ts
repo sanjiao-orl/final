@@ -53,8 +53,12 @@ export async function startTestServer(overrides: {
     chat,
     candidates,
     stats,
-    rewrite: { modelForTier: chat.modelForTier },
-    continue: { modelForTier: () => chat.modelForTier('background') },
+    rewrite: { modelForTier: chat.modelForTier, tools: chat.tools, ...(overrides.toolsAvailable ? { toolsAvailable: overrides.toolsAvailable } : {}) },
+    continue: {
+      modelForTier: () => chat.modelForTier('background'),
+      tools: chat.tools,
+      ...(overrides.toolsAvailable ? { toolsAvailable: overrides.toolsAvailable } : {}),
+    },
     summary: {
       modelForTier: overrides.summary?.modelForTier ?? chat.modelForTier,
       tools: overrides.summary?.tools ?? chat.tools,
