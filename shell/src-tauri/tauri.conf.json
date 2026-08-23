@@ -1,7 +1,7 @@
 {
   "$schema": "../../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "novel-ws",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "identifier": "com.novelws.app",
   "build": {
     "frontendDist": "../dist",
