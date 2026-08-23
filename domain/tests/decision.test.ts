@@ -160,3 +160,38 @@ describe('decisionTail', () => {
     expect(decisionTail(work, undefined, 10).total).toBe(2);
   });
 });
+
+/**
+ * 并发写竞态（评审T2）：decision_append 的 CAS 采样必须先于读内容（同 issue_append 口径）。
+ * 模拟「读旧内容之后、CAS 采样之前」窗口内外部进程追加了一条裁决——
+ * 修复前先读后采样，before 吸收了外部改动致 CAS 放行，stale 内容覆盖丢外部条目；
+ * 修复后先采样后读，外部条目随 existing 一起进入下一次写入，不丢。
+ */
+describe('decisionAppend 并发写竞态（CAS 采样顺序）', () => {
+  it('读旧内容与采样之间被外部改写 → 外部条目不被覆盖丢失，本次追加照常落盘', () => {
+    const work = makeWorkDir();
+    writeTree(work, {
+      'editorial_notes/decisions.md': '# 裁决留痕\n\n- D-007 | 2026-08-20 | a | b | 采纳 | c | -',
+    });
+    const abs = path.join(work, 'editorial_notes', 'decisions.md');
+    const realStat = fs.statSync;
+    let calls = 0;
+    const spy = vi.spyOn(fs, 'statSync').mockImplementation(((p: fs.PathLike) => {
+      calls += 1;
+      if (calls === 1) {
+        // 首个 statSync 落在 CAS 状态采样处；在其前注入外部追加，
+        // 复现「旧内容已读走、采样尚未发生」窗口内的并发写
+        fs.appendFileSync(abs, '\n- D-008 | 2026-08-20 | 外部 | 进程 | 采纳 | r | -\n');
+      }
+      return realStat(p);
+    }) as typeof fs.statSync);
+    try {
+      decisionAppend(work, appendParams());
+    } finally {
+      spy.mockRestore();
+    }
+    const after = fs.readFileSync(abs, 'utf8');
+    expect(after).toContain('- D-008 | 2026-08-20 | 外部'); // 外部条目原样保留（不被 stale 内容覆盖）
+    expect(after).toContain('- D-009 | '); // 本次追加照常写入（编号按含外部条目续）
+  });
+});

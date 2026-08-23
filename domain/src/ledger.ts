@@ -1916,13 +1916,13 @@ export function decisionAppend(
       ? params.chapters.map((c) => crField(c).trim()).filter((c) => c !== '').join(',')
       : '-';
 
+  const before = ledgerFileState(abs); // 先采样读时状态（同 issueAppend 口径），再读内容：杜绝「先读后采样」窗口内外部更新被 stale 内容覆盖丢失
   let existing = '';
   try {
     existing = fs.readFileSync(abs, 'utf8');
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
-  const before = ledgerFileState(abs); // 记录读时状态，写前复核用
 
   // 扫现有 `D-(\d+)` 取最大编号 +1 续号（3 位零填充）
   let nextNo = 0;
