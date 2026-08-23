@@ -402,6 +402,16 @@ describe('unwrapMcpEnvelope（domain 工具结果裸信封解包）', () => {
     expect(unwrapMcpEnvelope({ content: [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }] })).toBe('a\nb');
   });
 
+  it('多段拼接非 JSON 但恰一段可解析为对象 → 返回该对象（trashPathOf 依赖此路径）', () => {
+    const envelope = { content: [{ type: 'text', text: '已删除' }, { type: 'text', text: '{"trashPath":".novel/trash/x.md"}' }] };
+    expect(unwrapMcpEnvelope(envelope)).toEqual({ trashPath: '.novel/trash/x.md' });
+  });
+
+  it('多段均可解析为对象 → 返回对象数组；无对象段 → 拼接文本', () => {
+    expect(unwrapMcpEnvelope({ content: [{ type: 'text', text: '{"a":1}' }, { type: 'text', text: '{"b":2}' }] })).toEqual([{ a: 1 }, { b: 2 }]);
+    expect(unwrapMcpEnvelope({ content: [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }] })).toBe('a\nb');
+  });
+
   it('非信封形态原样返回（宁漏勿错）', () => {
     expect(unwrapMcpEnvelope({ ok: true })).toEqual({ ok: true }); // 本地工具直返对象
     expect(unwrapMcpEnvelope('字符串')).toBe('字符串');

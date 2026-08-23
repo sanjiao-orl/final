@@ -52,6 +52,8 @@ export function isToolMissingError(err: unknown, name: string): boolean {
  * MCP 信封解包：domain 工具统一走 jsonResult 序列化（{content:[{type:'text', text:'<JSON 字符串>'}]}，
  * 无 outputSchema），core 的 chat SSE tool-result 与历史会话回放里的 result 都是这层裸信封。
  * 识别到信封 → 拼接全部 text 段并尝试 JSON.parse（成功返回解析对象，失败返回拼接文本）；
+ * 多段拼接解析失败时退回逐段尝试：恰一段为 JSON 对象 → 返回该对象（domain jsonResult 混排说明文字的形态，
+ * trashPathOf 等字段读取依赖此路径不静默失效）、多段均为 JSON 对象 → 返回对象数组、其余返回拼接文本；
  * 非信封形态原样返回（本地工具/未来 structuredContent 等），宁漏勿错。
  */
 export function unwrapMcpEnvelope(result: unknown): unknown {
@@ -69,6 +71,20 @@ export function unwrapMcpEnvelope(result: unknown): unknown {
   try {
     return JSON.parse(joined);
   } catch {
+    // 多段拼接不是合法 JSON：逐段兜底，恰一段为 JSON 对象时返回它（trashPathOf 等字段读取不静默失效）
+    if (texts.length > 1) {
+      const objects: unknown[] = [];
+      for (const t of texts) {
+        try {
+          const p: unknown = JSON.parse(t);
+          if (p && typeof p === 'object' && !Array.isArray(p)) objects.push(p);
+        } catch {
+          // 非该段的形态，跳过
+        }
+      }
+      if (objects.length === 1) return objects[0];
+      if (objects.length > 1) return objects;
+    }
     return joined;
   }
 }
@@ -566,7 +582,11 @@ export async function connectCore(): Promise<{ client: CoreClient; workDir: stri
   throw new Error('缺少 core 连接信息：请在 Tauri 壳中打开，或带 ?corePort=&coreToken=&workDir= 参数');
 }
 
-/** 壳启动早于 sidecar 就绪，轮询 core_info 最多 ~15s。 */
+/** 壳启动早于 sidecar 就绪，轮询 core_info 最多 ~15s。
+ *  core_info 对 Failed 终态回「core sidecar 启动失败: …」（lib.rs CoreState::Failed）——
+ *  终态不会自愈，立即抛错而不是陪跑满 15s（评审 P3：Failed 终态仍轮询满 15s 才报错）。 */
+const CORE_FAILED_PREFIX = 'core sidecar 启动失败';
+
 async function waitCoreInfo(invoke: TauriInternals['invoke']): Promise<CoreInfo> {
   let lastError: unknown;
   for (let i = 0; i < 75; i++) {
@@ -574,6 +594,7 @@ async function waitCoreInfo(invoke: TauriInternals['invoke']): Promise<CoreInfo>
       return await invoke<CoreInfo>('core_info');
     } catch (err) {
       lastError = err;
+      if (String(err).startsWith(CORE_FAILED_PREFIX)) throw new Error(String(err));
       await new Promise((r) => setTimeout(r, 200));
     }
   }
