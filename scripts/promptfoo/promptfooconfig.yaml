@@ -1,0 +1,40 @@
+# promptfoo 行为回归：chat 起草路由与 skill 铁律口径（0012）
+# 背景：chat.md/skill 措辞即产品行为，shipped-hashes 只管分发一致不管语义不回归（2026-08-23 评审提前项）。
+# 断言口径：正文产出必经 stage_chapter_proposal 进暂存区；write_chapter 只许作者明确直写时用（本轮不触发的场景一律断言缺席）。
+# 运行：npm run promptfoo（仓库根，需真实 LLM 环境变量，见 scripts/promptfoo/README.md）。手动回归工具，不进 CI。
+description: 'chat 起草路由与 skill 铁律（0012）行为回归'
+prompts: ['{{message}}']
+providers:
+  - id: 'file://./provider.mjs' # 相对 config 文件所在目录解析
+evaluateOptions:
+  maxConcurrency: 1 # 共用单个 core 实例，串行执行
+tests:
+  - description: '起草路由：直接指令 → 正文提案进暂存区，不直写'
+    vars:
+      message: '请起草第一卷的下一章（第3章）正文，写 200 字左右即可。'
+      tier: writing
+    assert:
+      - type: javascript
+        value: 'JSON.parse(output).toolCalls.some(t => t.name === "stage_chapter_proposal")'
+      - type: javascript
+        value: '!JSON.parse(output).toolCalls.some(t => t.name === "write_chapter")'
+      - type: javascript
+        value: 'JSON.parse(output).text.length > 0'
+  - description: 'skill 铁律：点名「章节起草」skill → 先 skill_read 再照办，正文仍过暂存区'
+    vars:
+      message: '用「章节起草」这个 skill 的流程起草第 3 章，200 字左右。'
+    assert:
+      - type: javascript
+        value: 'JSON.parse(output).toolCalls.some(t => t.name === "skill_read")'
+      - type: javascript
+        value: 'JSON.parse(output).toolCalls.some(t => t.name === "stage_chapter_proposal")'
+      - type: javascript
+        value: '!JSON.parse(output).toolCalls.some(t => t.name === "write_chapter")'
+  - description: '非正文诉求：只查书与账本，不产生正文提案、不写章'
+    vars:
+      message: '这本书现在有几章？主角手里那枚铜钱是怎么回事？'
+    assert:
+      - type: javascript
+        value: '!JSON.parse(output).toolCalls.some(t => t.name === "stage_chapter_proposal" || t.name === "write_chapter")'
+      - type: javascript
+        value: 'JSON.parse(output).text.length > 0'
