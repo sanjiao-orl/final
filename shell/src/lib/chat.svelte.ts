@@ -8,7 +8,7 @@
  * 改名覆盖显示标题、归档从列表隐藏。
  */
 import type { CoreClient } from './core.js';
-import { isToolMissingError } from './core.js';
+import { isToolMissingError, unwrapMcpEnvelope } from './core.js';
 import type { ChapterNode, SessionRow } from './types.js';
 import { approval } from './approval.svelte.js';
 import { candidates } from './candidates.svelte.js';
@@ -400,12 +400,13 @@ export class ChatStore {
   }
 
   /** 找该调用的工具结果里的 trashPath（delete_chapter 返回 { trashPath }）。
-   *  不按卡片状态过滤：rejectApproval 先把本卡落定 rejected 再来找结果，按状态过滤会永远扑空。 */
+   *  不按卡片状态过滤：rejectApproval 先把本卡落定 rejected 再来找结果，按状态过滤会永远扑空。
+   *  result 真实形态是 MCP 信封（{content:[{type:'text',text:'<JSON>'}]}），先解包再读字段。 */
   private trashPathOf(callId: string, rel: string): string | null {
     for (const m of this.messages) {
       for (const t of m.tools ?? []) {
         if (t.id !== callId) continue;
-        const r = t.result as { trashPath?: string } | null | undefined;
+        const r = unwrapMcpEnvelope(t.result) as { trashPath?: string } | null | undefined;
         if (r?.trashPath) return r.trashPath;
       }
     }
@@ -486,6 +487,14 @@ export class ChatStore {
           if (this.scope === scopeAtSend) {
             this.sessionId = d.sessionId;
             void this.loadSessions(); // 新会话进列表/标题排序刷新
+            // 输出触顶可见性（finishReason=length）：回复不完整要有显式信号 + 一键预填「继续」引导
+            if (d.truncated) {
+              snapshot.showNotice('AI 回复因输出长度触顶被截断，内容不完整', {
+                label: '让它继续',
+                prefillChat:
+                  '继续——你上一条回复因输出长度触顶被截断了，请接着未完成的地方继续；如需输出长文，请分段发送、控制单次篇幅。',
+              });
+            }
           }
         },
         onError: (err) => {

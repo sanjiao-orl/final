@@ -7,7 +7,7 @@ import { MockLanguageModelV3 } from 'ai/test';
 import type { LanguageModelV3StreamPart } from '@ai-sdk/provider';
 import { z } from 'zod';
 import { describe, expect, it, vi } from 'vitest';
-import { readSse, startTestServer, stepModel, textResult, toolCallResult, hangingModel } from './helpers.js';
+import { readSse, startTestServer, stepModel, textResult, toolCallResult, hangingModel, lengthResult } from './helpers.js';
 
 /** 与 domain 约定对齐的示例领域工具（透传语义，参数细节 core 不关心）。 */
 const domainTools: ToolSet = {
@@ -1534,6 +1534,38 @@ describe('chat 数据层滚动前章摘要（多记录节组装与预算）', ()
     } finally {
       await s.close();
       fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('chat 输出触顶可见性（finishReason=length）', () => {
+  it('触顶：done 事件带 truncated:true，半截内容照常落库', async () => {
+    const s = await startTestServer({ modelForTier: () => stepModel([lengthResult(['半截话'])]) });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '写点什么' });
+      expect(res.status).toBe(200);
+      const events = await readSse(res);
+      const done = events[events.length - 1]!;
+      expect(done.event).toBe('done');
+      expect(done.data.truncated).toBe(true);
+      // 半截内容不落库就丢了——照常落库保真
+      const msgs = s.store.listMessages(String(done.data.sessionId));
+      expect(msgs[msgs.length - 1]?.content).toBe('半截话');
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('正常 stop：done 不带 truncated 字段', async () => {
+    const s = await startTestServer({ modelForTier: () => stepModel([textResult(['完整回复'])]) });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '写点什么' });
+      const events = await readSse(res);
+      const done = events[events.length - 1]!;
+      expect(done.event).toBe('done');
+      expect(done.data.truncated).toBeUndefined();
+    } finally {
+      await s.close();
     }
   });
 });

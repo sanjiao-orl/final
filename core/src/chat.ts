@@ -773,6 +773,8 @@ export async function handleChatRequest(
   const pump = new EventPump(res, sessionId, req.headers.origin);
   pump.start();
   let assistantText = '';
+  /** 末步 finishReason：'length' = 输出触顶截断，done 事件带 truncated 标记让壳弹引导（作者实测触顶无信号）。 */
+  let finishReason: string | undefined;
   const toolCalls: { id: string; name: string; args: unknown; result?: string }[] = [];
   /** 失败轮落库：非断连且已产出内容时，把部分 assistant 消息落库再发 error；落库失败只记 stderr，不掩盖原始错误。 */
   const persistPartial = (): void => {
@@ -865,8 +867,12 @@ export async function handleChatRequest(
         }
         case 'error':
           throw new Error(part.error instanceof Error ? part.error.message : String(part.error));
+        case 'finish':
+          // 捕获末步 finishReason（AI SDK 已归一为字符串）：'length' 触顶在 done 里带 truncated，其余忽略
+          finishReason = typeof part.finishReason === 'string' ? part.finishReason : undefined;
+          break;
         default:
-          // start-step / finish-step / finish 等元事件不转发
+          // start-step / finish-step 等元事件不转发
           break;
       }
     }
@@ -883,13 +889,17 @@ export async function handleChatRequest(
       return;
     }
 
-    // done 前把完整 assistant 消息落库。
+    // done 前把完整 assistant 消息落库。输出触顶（finishReason=length）时带 truncated 标记——内容不完整要让壳可见。
     const assistantMsg = deps.store.addMessage(sessionId, {
       role: 'assistant',
       content: assistantText,
       toolCalls,
     });
-    pump.emit('done', { sessionId, messageId: assistantMsg.id });
+    pump.emit('done', {
+      sessionId,
+      messageId: assistantMsg.id,
+      ...(finishReason === 'length' ? { truncated: true } : {}),
+    });
     pump.end();
   } catch (err) {
     if (abort.signal.aborted) {

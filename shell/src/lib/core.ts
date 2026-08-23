@@ -48,6 +48,31 @@ export function isToolMissingError(err: unknown, name: string): boolean {
   return msg.includes('工具不可用') && msg.includes(name);
 }
 
+/**
+ * MCP 信封解包：domain 工具统一走 jsonResult 序列化（{content:[{type:'text', text:'<JSON 字符串>'}]}，
+ * 无 outputSchema），core 的 chat SSE tool-result 与历史会话回放里的 result 都是这层裸信封。
+ * 识别到信封 → 拼接全部 text 段并尝试 JSON.parse（成功返回解析对象，失败返回拼接文本）；
+ * 非信封形态原样返回（本地工具/未来 structuredContent 等），宁漏勿错。
+ */
+export function unwrapMcpEnvelope(result: unknown): unknown {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return result;
+  const content = (result as { content?: unknown }).content;
+  if (!Array.isArray(content) || content.length === 0) return result;
+  const texts: string[] = [];
+  for (const item of content) {
+    if (!item || typeof item !== 'object') return result;
+    const c = item as { type?: unknown; text?: unknown };
+    if (c.type !== 'text' || typeof c.text !== 'string') return result;
+    texts.push(c.text);
+  }
+  const joined = texts.join('\n');
+  try {
+    return JSON.parse(joined);
+  } catch {
+    return joined;
+  }
+}
+
 export interface CoreInfo {
   port: number;
   token: string;
@@ -70,7 +95,8 @@ export interface ChatStreamHandlers {
   onDelta: (text: string) => void;
   onToolCall?: (call: { id: string; name: string; args: unknown }) => void;
   onToolResult?: (result: { id: string; name: string; result: unknown }) => void;
-  onDone?: (done: { sessionId: string; messageId: string }) => void;
+  /** truncated=true 表示模型输出触顶（finishReason=length），本轮内容不完整。 */
+  onDone?: (done: { sessionId: string; messageId: string; truncated?: boolean }) => void;
   onError?: (err: Error) => void;
 }
 
@@ -383,7 +409,7 @@ export class CoreClient {
           break;
         case 'done':
           flush();
-          handlers.onDone?.(data as { sessionId: string; messageId: string });
+          handlers.onDone?.(data as { sessionId: string; messageId: string; truncated?: boolean });
           break;
         case 'error': {
           flush();

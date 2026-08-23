@@ -1,6 +1,6 @@
 // core.ts 单测：health() 与 SSE POST 中 AbortSignal 行为 + 裸联调参数记忆（resolveBareParam）。
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CoreClient, CoreNetworkError, resolveBareParam, LS_CORE_TOKEN_KEY, LS_CORE_WORKDIR_KEY } from './core.js';
+import { CoreClient, CoreNetworkError, resolveBareParam, unwrapMcpEnvelope, LS_CORE_TOKEN_KEY, LS_CORE_WORKDIR_KEY } from './core.js';
 
 const origFetch = globalThis.fetch;
 
@@ -389,5 +389,26 @@ describe('SSE 干净断尾不算成功', () => {
     const promise = c.chatStream({ text: 'x' }, { onDelta: () => undefined }, outerAc.signal);
     queueMicrotask(() => outerAc.abort());
     await promise; // 不应因断尾检查抛错
+  });
+});
+describe('unwrapMcpEnvelope（domain 工具结果裸信封解包）', () => {
+  it('信封 JSON 文本 → 解析对象', () => {
+    const envelope = { content: [{ type: 'text', text: '{"ok":true,"trashPath":".novel/trash/x.md"}' }], isError: false };
+    expect(unwrapMcpEnvelope(envelope)).toEqual({ ok: true, trashPath: '.novel/trash/x.md' });
+  });
+
+  it('信封非 JSON 文本 → 拼接文本；多段 text 以换行连接', () => {
+    expect(unwrapMcpEnvelope({ content: [{ type: 'text', text: '已进暂存区' }] })).toBe('已进暂存区');
+    expect(unwrapMcpEnvelope({ content: [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }] })).toBe('a\nb');
+  });
+
+  it('非信封形态原样返回（宁漏勿错）', () => {
+    expect(unwrapMcpEnvelope({ ok: true })).toEqual({ ok: true }); // 本地工具直返对象
+    expect(unwrapMcpEnvelope('字符串')).toBe('字符串');
+    expect(unwrapMcpEnvelope(null)).toBe(null);
+    expect(unwrapMcpEnvelope(undefined)).toBe(undefined);
+    expect(unwrapMcpEnvelope({ content: [] })).toEqual({ content: [] }); // 空 content 不解
+    const nonText = { content: [{ type: 'image', data: 'x' }] };
+    expect(unwrapMcpEnvelope(nonText)).toEqual(nonText); // 非 text 段不解
   });
 });

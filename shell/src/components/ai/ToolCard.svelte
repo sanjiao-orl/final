@@ -6,6 +6,7 @@
   import { iconSvg } from '../../lib/icons.js';
   import { approval } from '../../lib/approval.svelte.js';
   import { chat } from '../../lib/chat.svelte.js';
+  import { unwrapMcpEnvelope } from '../../lib/core.js';
   import { WRITE_KEY_PREFIX, DELETE_KEY_PREFIX, EXPORT_KEY } from '../../lib/paths.js';
   import type { ToolLine } from '../../lib/chat.svelte.js';
 
@@ -83,36 +84,39 @@
     }
   }
 
-  /** 短结果：字符串直接截 600，JSON 缩进 1 空格后截 600。 */
+  /** 短结果：先解 MCP 信封（domain 工具结果是 {content:[{type:'text',text:'<JSON>'}]} 裸信封），字符串直接截 600，JSON 缩进 1 空格后截 600。 */
   function formatShort(result: unknown): string {
     if (result === undefined) return '';
-    if (typeof result === 'string') {
-      return result.length > 600 ? result.slice(0, 600) + '…' : result;
+    const unwrapped = unwrapMcpEnvelope(result);
+    if (typeof unwrapped === 'string') {
+      return unwrapped.length > 600 ? unwrapped.slice(0, 600) + '…' : unwrapped;
     }
     try {
-      const s = JSON.stringify(result, null, 1);
+      const s = JSON.stringify(unwrapped, null, 1);
       return s.length > 600 ? s.slice(0, 600) + '…' : s;
     } catch {
-      return String(result);
+      return String(unwrapped);
     }
   }
 
-  /** 完整结果：用于"看全文"—— JSON 缩进 2 空格，字符串原样。 */
+  /** 完整结果：用于"看全文"—— 同样先解信封；JSON 缩进 2 空格，字符串原样。 */
   function formatFull(result: unknown): string {
     if (result === undefined) return '';
-    if (typeof result === 'string') return result;
+    const unwrapped = unwrapMcpEnvelope(result);
+    if (typeof unwrapped === 'string') return unwrapped;
     try {
-      return JSON.stringify(result, null, 2);
+      return JSON.stringify(unwrapped, null, 2);
     } catch {
-      return String(result);
+      return String(unwrapped);
     }
   }
 
   function isTruncated(result: unknown): boolean {
     if (result === undefined) return false;
-    if (typeof result === 'string') return result.length > 600;
+    const unwrapped = unwrapMcpEnvelope(result);
+    if (typeof unwrapped === 'string') return unwrapped.length > 600;
     try {
-      return JSON.stringify(result).length > 600;
+      return JSON.stringify(unwrapped).length > 600;
     } catch {
       return false;
     }

@@ -137,6 +137,21 @@ export function textResult(deltas: string[]): LanguageModelV3StreamResult {
   };
 }
 
+/** 输出触顶（finishReason=length）的 v3 流结果：文本发完后按 length 收尾（provider 截断行为）。 */
+export function lengthResult(deltas: string[]): LanguageModelV3StreamResult {
+  return {
+    stream: new ReadableStream<LanguageModelV3StreamPart>({
+      start(controller) {
+        controller.enqueue({ type: 'text-start', id: 't1' });
+        for (const delta of deltas) controller.enqueue({ type: 'text-delta', id: 't1', delta });
+        controller.enqueue({ type: 'text-end', id: 't1' });
+        controller.enqueue({ type: 'finish', finishReason: { unified: 'length', raw: 'length' }, usage: EMPTY_USAGE });
+        controller.close();
+      },
+    }),
+  };
+}
+
 /** 只发一个工具调用、等待工具执行的一步流。 */
 export function toolCallResult(
   toolCallId: string,

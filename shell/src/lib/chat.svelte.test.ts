@@ -15,6 +15,7 @@ beforeEach(() => {
   work.workDir = '';
   work.error = null;
   work.notice = null;
+  snapshot.notice = null;
   work.current = null;
   work.structure = [];
   work.dirty = false;
@@ -645,6 +646,56 @@ describe('ChatStore · B6 审批联动', () => {
     expect(work.notice).toContain('已拒绝 AI 删章并找回 manuscript/a.md');
     expect(work.notice).toContain('trash 里仍留备份'); // 兜底口径
     expect(work.error).toBeNull();
+  });
+
+  it('拒绝 delete_chapter：result 为 MCP 信封形态（真实 domain 路径）也能解出 trashPath 找回', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+      h.onToolCall?.({ id: 'd1', name: 'delete_chapter', args: { relPath: 'manuscript/a.md' } });
+      // 真实 wire 形态：jsonResult 裸信封（无 outputSchema），trashPath 在 content[0].text 的 JSON 字符串里
+      h.onToolResult?.({
+        id: 'd1',
+        name: 'delete_chapter',
+        result: {
+          content: [{ type: 'text', text: JSON.stringify({ ok: true, trashPath: '.novel/trash/manuscript__a-20260812-000000000-ab12.md' }) }],
+          isError: false,
+        },
+      });
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const callTool = vi.fn().mockImplementation((name: string) => {
+      if (name === 'restore_trash') return Promise.resolve({ ok: true, restoredPath: 'manuscript/a.md', kind: 'chapter' });
+      if (name === 'list_structure') return Promise.resolve([]);
+      return Promise.resolve(undefined);
+    });
+    const client = streamClient({ chatStream, callTool });
+    const chat = new ChatStore();
+    chat.init(client);
+    work.init(client, 'C:/works/demo');
+    settings.approvalMode = 'ask';
+    await chat.send('删掉这一章');
+    await chat.resolveApproval('reject');
+    expect(chat.messages[1]?.tools?.[0]?.state).toBe('rejected');
+    expect(callTool).toHaveBeenCalledWith('restore_trash', {
+      workDir: 'C:/works/demo',
+      trashPath: '.novel/trash/manuscript__a-20260812-000000000-ab12.md',
+    });
+    expect(work.notice).toContain('已拒绝 AI 删章并找回 manuscript/a.md');
+  });
+
+  it('done 带 truncated（输出触顶）：弹触顶提示 + 「让它继续」预填 action', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+      h.onDelta('半截话');
+      h.onDone?.({ sessionId: 's1', messageId: 'm1', truncated: true });
+    });
+    const client = streamClient({ chatStream });
+    const chat = new ChatStore();
+    chat.init(client);
+    await chat.send('写点什么');
+    expect(chat.messages[1]?.content).toBe('半截话'); // 半截内容正常进消息
+    expect(snapshot.notice?.message).toContain('触顶');
+    expect(snapshot.notice?.action?.label).toBe('让它继续');
+    expect(snapshot.notice?.action?.prefillChat).toContain('继续');
+    snapshot.dismissNotice();
   });
 
   it('放行 write_chapter 且目标是当前打开章：重载当前章刷新 savedMd 与编辑器现场', async () => {
