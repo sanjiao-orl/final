@@ -50,7 +50,7 @@ node core/scripts/e2e-workflow.mjs   # 写作闭环剧本:碰撞→留痕闸门�
 - 护栏(0014):自增算出的版本其本地 tag 已存在即拦截(半途续传请显式指定版本号,如 `npm run release -- 0.2.5`);发版前建议先 `--dry-run` 空跑一遍看动作计划;CI 门禁见 `.github/workflows/ci.yml`(check+test+cargo test,e2e 需真实 key 不进 CI)。
 - 签名密钥在仓外 `%USERPROFILE%\.tauri\novel-ws.key`(本仓为空密码;pubkey 已写入 tauri.conf.json,私钥绝不入库)。可用 `TAURI_SIGNING_PRIVATE_KEY_PATH` 覆盖路径,或 `TAURI_SIGNING_PRIVATE_KEY` 直接给密钥内容;密码用 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。
 - 版本号改动由脚本自动落账(commit/tag/push),无需手动提交;工作树不干净时脚本会直接拦截。
-- 发布记录:v0.1.0 首发(真实更新通道基线);v0.1.1 升级通道闭环验证;v0.1.x 壳 v4 与真实使用反馈修复;v0.2.0 壳 v5;v0.2.1 批一安全修复 + prompt/skill 文件机制;v0.2.2 审计收口 + 批三-1/-2/-3 + 更新体验修复(实机 0.2.1→0.2.2 自动升级验证通过);v0.2.3 铁律回归批(chat 正文一律经 stage_chapter_proposal 进暂存区、设定路由防 manuscript 污染,决策 0012);v0.2.4 碰撞模式/触发式续写/编辑器联动(批一③④⑤,protocol 4);v0.2.5 作者反馈批 R1/R3/R4 + 批一⑥日更手感小包(protocol 6、31 工具)+ 工程护栏批(CI 门禁/release dry-run+事务化/esbuild 落账,当前最新)。
+- 发布记录:v0.1.0 首发(真实更新通道基线);v0.1.1 升级通道闭环验证;v0.1.x 壳 v4 与真实使用反馈修复;v0.2.0 壳 v5;v0.2.1 批一安全修复 + prompt/skill 文件机制;v0.2.2 审计收口 + 批三-1/-2/-3 + 更新体验修复(实机 0.2.1→0.2.2 自动升级验证通过);v0.2.3 铁律回归批(chat 正文一律经 stage_chapter_proposal 进暂存区、设定路由防 manuscript 污染,决策 0012);v0.2.4 碰撞模式/触发式续写/编辑器联动(批一③④⑤,protocol 4);v0.2.5 作者反馈批 R1/R3/R4 + 批一⑥日更手感小包(protocol 6、31 工具)+ 工程护栏批(CI 门禁/release dry-run+事务化/esbuild 落账);v0.2.6 块0 修复批(0822排查 30 条全结:全链超时取消/数据正确性/prompt·skill 口径,bugs.md 台账立账);v0.2.7 块1 理解层供料(对账器/章摘要/发布前质检/list_trash 收口,35 工具,CI windows-latest 首绿,当前最新)。
 
 ## production 打包（sidecar 随安装包分发）
 
@@ -60,7 +60,7 @@ node core/scripts/e2e-workflow.mjs   # 写作闭环剧本:碰撞→留痕闸门�
 
 ## 验收口径
 
-- `npm run check` / `npm test`(766 用例:core 194 + domain 271 + shell 301;另 cargo test 17;写作闭环 e2e-workflow 10 步含碰撞闸门与触发式续写,真实 LLM key 在场才跑;GitHub Actions CI 门禁同口径)
+- `npm run check` / `npm test`(916 用例:core 234 + domain 336 + shell 346;另 cargo test 17;写作闭环 e2e-workflow 12 步含碰撞闸门与触发式续写,真实 LLM key 在场才跑;GitHub Actions CI 门禁同口径)
 - 每周出口 = 作者用本仓真实写作;不以测试绿为验收
 
 ## 已知现象
