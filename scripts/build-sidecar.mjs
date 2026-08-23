@@ -8,7 +8,7 @@
 //   node scripts/build-sidecar.mjs --only core # 只构建 core（core/domain 包的 build script 用）
 import { build } from 'esbuild';
 import { execSync } from 'node:child_process';
-import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -54,6 +54,20 @@ if (only === undefined || only === 'core') {
   copyCorePrompts();
 }
 
+// 先写临时目标（带 pid 后缀避免并发冲突），成功后再 rename 替换正式目标；失败时清理临时产物。
+function copyViaTemp(copyFn, source, target) {
+  const temp = `${target}.${process.pid}.tmp`;
+  try {
+    rmSync(temp, { recursive: true, force: true });
+    copyFn(source, temp);
+    rmSync(target, { recursive: true, force: true });
+    renameSync(temp, target);
+  } catch (err) {
+    rmSync(temp, { recursive: true, force: true });
+    throw err;
+  }
+}
+
 // 把 core/prompts/ 拷到 core/dist/prompts/（与 main.mjs 同级旁），供 prod 包内释放缺省文件。
 // core/prompts/ 的内容文件由内容代理维护；目录缺失时跳过，不阻断构建。
 function copyCorePrompts() {
@@ -63,8 +77,7 @@ function copyCorePrompts() {
     console.warn('[build-sidecar] core/prompts 不存在，跳过提示词随包拷贝');
     return;
   }
-  rmSync(target, { recursive: true, force: true });
-  cpSync(source, target, { recursive: true });
+  copyViaTemp((src, dst) => cpSync(src, dst, { recursive: true }), source, target);
   console.log(`[build-sidecar] ${source} -> ${target}`);
 }
 
@@ -82,6 +95,6 @@ if (only === undefined) {
   if (!existsSync(nodeExe)) {
     throw new Error(`本机 node 不存在，无法复制运行时: ${nodeExe}`);
   }
-  copyFileSync(nodeExe, targetExe);
+  copyViaTemp(copyFileSync, nodeExe, targetExe);
   console.log(`[build-sidecar] ${nodeExe} -> ${targetExe}`);
 }
