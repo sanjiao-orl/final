@@ -216,6 +216,7 @@
                   {@const disposal = review.disposalOf(c.relPath, i)}
                   <div class="finding premium" class:disposed={disposal !== undefined}>
                     <span class="pill sev-{f.severity}">{SEV_LABEL[f.severity]}</span>
+                    {#if f.category}<span class="pill" title="问题类别">{f.category}</span>{/if}
                     <span class="fmsg">
                       <span class="quote">「{f.quote}」</span> {f.why}
                       {#if f.suggestion}<span class="sug">建议：{f.suggestion}</span>{/if}

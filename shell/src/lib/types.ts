@@ -72,6 +72,15 @@ export interface TrashEntry {
   name: string;
 }
 
+/** restore_trash 工具输出镜像（契约镜像）：move-back 找回成功的结果。 */
+export interface RestoreTrashResult {
+  ok: true;
+  /** 移回后相对 workDir 的原路径（正斜杠）。 */
+  restoredPath: string;
+  /** chapter | volume。 */
+  kind: 'chapter' | 'volume';
+}
+
 /** POST /v1/quality/check 的发现条目（契约镜像）：发布前章节风险提示（错别字/敏感词/用词不当）。 */
 export interface QualityFinding {
   kind: 'typo' | 'sensitive' | 'wording' | 'other';

@@ -582,6 +582,71 @@ describe('ChatStore · B6 审批联动', () => {
     });
   });
 
+  it('拒绝 delete_chapter：restore_trash move-back 找回（不再读回写）', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+      h.onToolCall?.({ id: 'd1', name: 'delete_chapter', args: { relPath: 'manuscript/a.md' } });
+      h.onToolResult?.({ id: 'd1', name: 'delete_chapter', result: { ok: true, trashPath: '.novel/trash/manuscript__a-20260812-000000000-ab12.md' } });
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const callTool = vi.fn().mockImplementation((name: string) => {
+      if (name === 'restore_trash') return Promise.resolve({ ok: true, restoredPath: 'manuscript/a.md', kind: 'chapter' });
+      if (name === 'list_structure') return Promise.resolve([]);
+      return Promise.resolve(undefined);
+    });
+    const client = streamClient({ chatStream, callTool });
+    const chat = new ChatStore();
+    chat.init(client);
+    work.init(client, 'C:/works/demo');
+    settings.approvalMode = 'ask';
+    await chat.send('删掉这一章');
+    expect(chat.messages[1]?.tools?.[0]?.state).toBe('pending');
+    await chat.resolveApproval('reject');
+    expect(chat.messages[1]?.tools?.[0]?.state).toBe('rejected');
+    expect(callTool).toHaveBeenCalledWith('restore_trash', {
+      workDir: 'C:/works/demo',
+      trashPath: '.novel/trash/manuscript__a-20260812-000000000-ab12.md',
+    });
+    expect(callTool).not.toHaveBeenCalledWith('read_chapter', expect.anything()); // 不再读回写
+    expect(work.notice).toContain('已拒绝 AI 删章并找回 manuscript/a.md');
+    expect(work.notice).toContain('移回原路径'); // 新口径：trash 副本已移走
+  });
+
+  it('拒绝 delete_chapter：旧版 core 无 restore_trash（404）→ 兜底读回写找回', async () => {
+    const chatStream = vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
+      h.onToolCall?.({ id: 'd1', name: 'delete_chapter', args: { relPath: 'manuscript/a.md' } });
+      h.onToolResult?.({ id: 'd1', name: 'delete_chapter', result: { ok: true, trashPath: '.novel/trash/manuscript__a-20260812-000000000-ab12.md' } });
+      h.onDone?.({ sessionId: 's1', messageId: 'm1' });
+    });
+    const callTool = vi.fn().mockImplementation((name: string) => {
+      if (name === 'restore_trash')
+        return Promise.reject(new Error('工具不可用: restore_trash（domain MCP 未连接或工具不存在）'));
+      if (name === 'read_chapter') return Promise.resolve({ content: '---\n---\n旧正文' });
+      if (name === 'write_chapter') return Promise.resolve(undefined);
+      if (name === 'list_structure') return Promise.resolve([]);
+      return Promise.resolve(undefined);
+    });
+    const client = streamClient({ chatStream, callTool });
+    const chat = new ChatStore();
+    chat.init(client);
+    work.init(client, 'C:/works/demo');
+    settings.approvalMode = 'ask';
+    await chat.send('删掉这一章');
+    await chat.resolveApproval('reject');
+    expect(chat.messages[1]?.tools?.[0]?.state).toBe('rejected');
+    expect(callTool).toHaveBeenCalledWith('read_chapter', {
+      workDir: 'C:/works/demo',
+      relPath: '.novel/trash/manuscript__a-20260812-000000000-ab12.md',
+    });
+    expect(callTool).toHaveBeenCalledWith('write_chapter', {
+      workDir: 'C:/works/demo',
+      relPath: 'manuscript/a.md',
+      content: '---\n---\n旧正文',
+    });
+    expect(work.notice).toContain('已拒绝 AI 删章并找回 manuscript/a.md');
+    expect(work.notice).toContain('trash 里仍留备份'); // 兜底口径
+    expect(work.error).toBeNull();
+  });
+
   it('放行 write_chapter 且目标是当前打开章：重载当前章刷新 savedMd 与编辑器现场', async () => {
     const chatStream = vi.fn().mockImplementation(async (_b: unknown, h: ChatStreamHandlers) => {
       h.onToolCall?.({ id: 'w1', name: 'write_chapter', args: { relPath: 'manuscript/a.md', content: 'AI 新文' } });

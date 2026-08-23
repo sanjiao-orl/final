@@ -3,7 +3,8 @@
  * 壳零产品逻辑的落点：结构/字数/快照/软删/导出全部调 domain 工具（经 core 代理），这里只搬数据。
  */
 import type { CoreClient, DailyStats } from './core.js';
-import type { ChapterNode, ReadChapterResult, TrashEntry, VolumeNode } from './types.js';
+import { isToolMissingError } from './core.js';
+import type { ChapterNode, ReadChapterResult, RestoreTrashResult, TrashEntry, VolumeNode } from './types.js';
 import { setFrontmatterStatus, nextChapterStatus } from './frontmatter.js';
 import { writeClipboardText } from './clipboard.js';
 
@@ -421,7 +422,7 @@ export class WorkStore {
     return this.editorApi.insertAfter(original, proposed);
   }
 
-  // ---------- 回收站：domain list_trash 为真相源，refreshTrash 拉取；找回=读 trash 写回 originalPath ----------
+  // ---------- 回收站：domain list_trash 为真相源，refreshTrash 拉取；找回 = restore_trash move-back ----------
   // 兼容窗口期：core 旧版没有 list_trash 工具时 refreshTrash 失败 → 静默保留空列表，面板显示为空。
   /**
    * 拉取回收站条目写入 trashEntries。失败静默（console.warn 留痕），不打扰界面。
@@ -447,6 +448,10 @@ export class WorkStore {
     }
   }
 
+  /**
+   * 找回回收站条目：先走 restore_trash（move-back，trash 副本不再存在）；
+   * 旧版 core 无该工具（404「工具不可用」）时回退读回写兜底（副本仍保留）。
+   */
   async restoreTrash(trashPath: string): Promise<boolean> {
     const entry = this.trashEntries.find((e) => e.trashPath === trashPath);
     if (!entry) {
@@ -454,11 +459,32 @@ export class WorkStore {
       return false;
     }
     if (!entry.originalPath) {
-      // 无时间戳垃圾文件等拿不到原路径：无法自动写回，提示手动处理
+      // 无时间戳垃圾文件等拿不到原路径：无法自动找回，提示手动处理
       this.notice = `该条目无法还原原路径，请到 .novel/trash/ 手动处理（${entry.name}）`;
       return false;
     }
     this.error = null;
+    try {
+      await this.client.callTool<RestoreTrashResult>('restore_trash', {
+        workDir: this.workDir,
+        trashPath,
+      });
+      void this.refreshTrash(); // 后台重拉列表（失败静默）。move-back 后条目已移出回收站
+      this.notice = `已找回 ${entry.originalPath}（已从回收站移回原路径）`;
+      await this.loadStructure();
+      return true;
+    } catch (err) {
+      // 兜底：core 旧版没有 restore_trash（404 工具不可用）→ 走旧的读回写找回
+      if (!isToolMissingError(err, 'restore_trash')) {
+        this.error = `找回失败：${err instanceof Error ? err.message : String(err)}`;
+        return false;
+      }
+      return this.restoreTrashByCopy(entry);
+    }
+  }
+
+  /** 旧版 core 兜底：read_chapter(trash) + write_chapter(originalPath) 读回写——非移动，trash 副本仍保留。 */
+  private async restoreTrashByCopy(entry: TrashEntry): Promise<boolean> {
     try {
       const r = await this.client.callTool<{ content: string }>('read_chapter', {
         workDir: this.workDir,
@@ -466,10 +492,10 @@ export class WorkStore {
       });
       await this.client.callTool('write_chapter', {
         workDir: this.workDir,
-        relPath: entry.originalPath,
+        relPath: entry.originalPath!,
         content: r.content,
       });
-      void this.refreshTrash(); // 后台重拉列表（失败静默）。注意：找回=读回写非移动，trash 副本仍在回收站里
+      void this.refreshTrash(); // 后台重拉列表。注意：找回=读回写非移动，trash 副本仍在回收站里
       this.notice = `已找回 ${entry.originalPath}（写回原路径；trash 副本仍保留，可从回收站手动清理）`;
       await this.loadStructure();
       return true;

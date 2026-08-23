@@ -299,7 +299,7 @@
     return n.toLocaleString('zh-CN');
   }
 
-  // ---------- 回收站：domain list_trash 为真相源（work.trashEntries），展开时拉取；找回=读 trash 写回原路径 ----------
+  // ---------- 回收站：domain list_trash 为真相源（work.trashEntries），展开时拉取；找回 = restore_trash 移回原路径 ----------
   let trashOpen = $state(false);
   let trashBusy = $state(false);
   const trashEntries = $derived(work.trashEntries);
@@ -516,7 +516,7 @@
                 <span class="ti-name" title={e.originalPath ?? e.trashPath}>{e.name}</span>
                 <span class="ti-time">{trashTimeOf(e.deletedAt)}</span>
               </div>
-              <button class="ti-btn" disabled={trashBusy} onclick={() => void restoreOne(e.trashPath)} title={e.originalPath ? `找回：写回 ${e.originalPath}` : '该条目无原路径记录，需手动处理'}>找回</button>
+              <button class="ti-btn" disabled={trashBusy} onclick={() => void restoreOne(e.trashPath)} title={e.originalPath ? `找回：移回 ${e.originalPath}` : '该条目无原路径记录，需手动处理'}>找回</button>
             </div>
           {/each}
         {/if}

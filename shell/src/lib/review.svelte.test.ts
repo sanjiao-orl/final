@@ -173,6 +173,17 @@ describe('applyPremiumFindings', () => {
     expect(twice.counts).toEqual(once.counts);
     expect(twice.chapters[0]!.premium).toEqual(premium);
   });
+
+  it('MINOR 级 + 可选 category 的贵档发现照常合并与计数', () => {
+    const minor: PremiumFinding[] = [
+      { severity: 'MINOR', category: 'VOICE', quote: '他忽然道。', why: '对白标签冗余' },
+    ];
+    const r = applyPremiumFindings(emptyReviewReport(), new Map([['manuscript/卷一/第1章.md', minor]]));
+    expect(r.chapters[0]!.premium).toEqual(minor);
+    expect(r.counts.MINOR).toBe(1);
+    expect(r.blockerTotal).toBe(0);
+    expect(r.hasBlockers).toBe(false);
+  });
 });
 
 describe('ReviewStore', () => {

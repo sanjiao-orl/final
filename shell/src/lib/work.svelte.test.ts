@@ -349,11 +349,10 @@ describe('WorkStore', () => {
     warnSpy.mockRestore();
   });
 
-  it('restoreTrash：读 trash → 按 originalPath 写回 → 重拉列表 → 刷结构', async () => {
-    const trashContent = '---\nfoo: 1\n---\n旧章内容';
+  it('restoreTrash：restore_trash move-back 成功 → 重拉列表 → 刷结构，不走读回写', async () => {
     const callTool = vi.fn().mockImplementation((name: string) => {
-      if (name === 'read_chapter') return Promise.resolve({ content: trashContent }); // restore read_chapter on trash path
-      if (name === 'write_chapter') return Promise.resolve(undefined);
+      if (name === 'restore_trash')
+        return Promise.resolve({ ok: true, restoredPath: '第一卷/第一章.md', kind: 'chapter' });
       if (name === 'list_trash') return Promise.resolve({ entries: [] }); // 找回后重拉：条目已移出
       if (name === 'list_structure') return Promise.resolve(VOLUME);
       return Promise.resolve(undefined);
@@ -364,19 +363,46 @@ describe('WorkStore', () => {
     work.trashEntries = [TRASH_ENTRY]; // 预置回收站状态（refreshTrash 已拉取过的现场）
     const ok = await work.restoreTrash('.novel/trash/第一卷__第一章-x.md');
     expect(ok).toBe(true);
+    expect(callTool).toHaveBeenCalledWith('restore_trash', {
+      workDir: 'C:/works/demo',
+      trashPath: '.novel/trash/第一卷__第一章-x.md',
+    });
     expect(work.notice).toContain('第一卷/第一章.md');
+    expect(work.notice).toContain('已从回收站移回原路径'); // 新口径：move-back，副本不再残留
+    expect(callTool).not.toHaveBeenCalledWith('read_chapter', expect.anything()); // 不再读回写
+    expect(callTool).not.toHaveBeenCalledWith('write_chapter', expect.anything());
+    expect(work.trashEntries).toEqual([]); // 重拉后条目已移出
+    expect(work.structure).toEqual(VOLUME);
+  });
+
+  it('restoreTrash：旧版 core 无 restore_trash（404 工具不可用）→ 兜底读回写，notice 保留「副本仍保留」口径', async () => {
+    const trashContent = '---\nfoo: 1\n---\n旧章内容';
+    const callTool = vi.fn().mockImplementation((name: string) => {
+      // 按旧版 core 实际文案：对未注册工具回 404「工具不可用: <name>（…）」
+      if (name === 'restore_trash') return Promise.reject(new Error('工具不可用: restore_trash（domain MCP 未连接或工具不存在）'));
+      if (name === 'read_chapter') return Promise.resolve({ content: trashContent });
+      if (name === 'write_chapter') return Promise.resolve(undefined);
+      if (name === 'list_trash') return Promise.resolve({ entries: [TRASH_ENTRY] }); // 读回写非移动：条目仍在
+      if (name === 'list_structure') return Promise.resolve(VOLUME);
+      return Promise.resolve(undefined);
+    });
+    const client = mockClient({ callTool });
+    const work = new WorkStore();
+    work.init(client, 'C:/works/demo');
+    work.trashEntries = [TRASH_ENTRY];
+    const ok = await work.restoreTrash('.novel/trash/第一卷__第一章-x.md');
+    expect(ok).toBe(true);
     expect(callTool).toHaveBeenCalledWith('read_chapter', {
       workDir: 'C:/works/demo',
       relPath: '.novel/trash/第一卷__第一章-x.md',
     });
-    // 写回目标是 domain 给的 originalPath（不再是壳侧记录的 relPath）
     expect(callTool).toHaveBeenCalledWith('write_chapter', {
       workDir: 'C:/works/demo',
       relPath: '第一卷/第一章.md',
       content: trashContent,
     });
-    expect(work.trashEntries).toEqual([]); // 重拉后条目已移出
-    expect(work.structure).toEqual(VOLUME);
+    expect(work.notice).toContain('trash 副本仍保留'); // 兜底口径
+    expect(work.error).toBeNull();
   });
 
   it('restoreTrash：trashPath 不在当前列表 → 报错返回 false', async () => {
@@ -402,11 +428,8 @@ describe('WorkStore', () => {
     expect(callTool).not.toHaveBeenCalledWith('write_chapter', expect.anything());
   });
 
-  it('restoreTrash：write_chapter 失败 → work.error 红条', async () => {
-    const callTool = vi.fn((name: string) => {
-      if (name === 'read_chapter') return Promise.resolve({ content: '---\n---\n旧' });
-      return Promise.reject(new Error('写盘炸了'));
-    });
+  it('restoreTrash：restore_trash 业务失败（非缺工具）→ work.error 红条，不兜底', async () => {
+    const callTool = vi.fn().mockRejectedValue(new Error('目标已存在（不覆盖，请先处理冲突）: manuscript/a.md'));
     const client = mockClient({ callTool });
     const work = new WorkStore();
     work.init(client, 'C:/works/demo');
@@ -416,6 +439,9 @@ describe('WorkStore', () => {
     const ok = await work.restoreTrash('.novel/trash/a-x.md');
     expect(ok).toBe(false);
     expect(work.error).toContain('找回失败');
+    expect(work.error).toContain('目标已存在');
+    expect(callTool).toHaveBeenCalledTimes(1); // 只调了 restore_trash，未走读回写兜底
+    expect(callTool).toHaveBeenCalledWith('restore_trash', expect.anything());
   });
 });
 

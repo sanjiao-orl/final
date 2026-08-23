@@ -37,6 +37,17 @@ export class CoreNetworkError extends Error {
   }
 }
 
+/**
+ * 判定 callTool 报错是否为「工具不存在」：旧版 core 经 /v1/tools/ 代理对未注册工具回
+ * 404，错误文案为 `工具不可用: <name>（domain MCP 未连接或工具不存在）`（client 把 body.error
+ * 原样抛成普通 Error）。按该文案判定，供新工具新增时的旧版兜底分支使用；
+ * 503（MCP 重连中「工具暂不可用」）不算缺失——此时工具其实存在，不应走兜底。
+ */
+export function isToolMissingError(err: unknown, name: string): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes('工具不可用') && msg.includes(name);
+}
+
 export interface CoreInfo {
   port: number;
   token: string;
@@ -107,9 +118,10 @@ export interface LlmStatus {
   legacy?: { baseUrl: string; model: string; modelCheap: string; apiKeyMasked: string; error?: string };
 }
 
-/** POST /v1/review 的贵档审阅发现（契约镜像）。 */
+/** POST /v1/review 的贵档审阅发现（契约镜像；severity/category 对齐 domain FindingSeverity/FindingCategory）。 */
 export interface ReviewFinding {
-  severity: 'BLOCKER' | 'MAJOR' | 'MODERATE';
+  severity: 'BLOCKER' | 'MAJOR' | 'MODERATE' | 'MINOR';
+  category?: 'CONT' | 'CANON' | 'VOICE' | 'CRAFT' | 'STRUCT' | 'PACE' | 'REPEAT' | 'META';
   quote: string;
   why: string;
   suggestion?: string;

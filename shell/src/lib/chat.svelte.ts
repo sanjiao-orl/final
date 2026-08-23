@@ -8,6 +8,7 @@
  * 改名覆盖显示标题、归档从列表隐藏。
  */
 import type { CoreClient } from './core.js';
+import { isToolMissingError } from './core.js';
 import type { ChapterNode, SessionRow } from './types.js';
 import { approval } from './approval.svelte.js';
 import { candidates } from './candidates.svelte.js';
@@ -321,7 +322,7 @@ export class ChatStore {
    * B6 审批裁决：允许一次 / 允许本会话 / 拒绝（拒绝走补偿还原）。
    * callId 可选：审批卡按 active 裁决；工具卡上的拒绝按钮按本卡 callId 裁决，避免误拒最旧卡。
    * 拒绝语义（core 在事件流内已执行，壳做撤销）：write_chapter → 事前快照还原；
-   * delete_chapter → 从 .novel/trash/ 读回原内容写回原路径；export_txt → 提示文件保留路径。
+   * delete_chapter → restore_trash 移回原路径（旧版 core 无该工具时回退读回写）；export_txt → 提示文件保留路径。
    */
   async resolveApproval(verdict: 'once' | 'session' | 'reject', callId?: string): Promise<void> {
     const req = callId ? approval.pending.find((p) => p.callId === callId) : approval.active;
@@ -364,20 +365,28 @@ export class ChatStore {
       } else if (req.name === 'delete_chapter') {
         const rel = typeof req.args.relPath === 'string' ? req.args.relPath : '';
         if (rel) {
-          // 删除是软删：从 trash 里找回最新一份同名内容写回原路径（read_chapter 特许读 .novel/trash/ 内的 .md）
+          // 删除是软删：优先 restore_trash move-back 移回原路径（trash 副本不再存在）；
+          // 旧版 core 无该工具（404）时回退读回写（read_chapter 特许读 .novel/trash/ 内的 .md，副本仍保留）
           const trashPath = this.trashPathOf(req.callId, rel);
           if (trashPath) {
-            const r = await this.client.callTool<{ content: string }>('read_chapter', {
-              workDir: work.workDir,
-              relPath: trashPath,
-            });
-            await this.client.callTool('write_chapter', {
-              workDir: work.workDir,
-              relPath: rel,
-              content: r.content,
-            });
-            await work.loadStructure();
-            work.notice = `已拒绝 AI 删章并找回 ${rel}（trash 副本还原，trash 里仍留备份）`;
+            try {
+              await this.client.callTool('restore_trash', { workDir: work.workDir, trashPath });
+              await work.loadStructure();
+              work.notice = `已拒绝 AI 删章并找回 ${rel}（已从回收站移回原路径）`;
+            } catch (err) {
+              if (!isToolMissingError(err, 'restore_trash')) throw err; // 非缺工具错误交给外层报红条
+              const r = await this.client.callTool<{ content: string }>('read_chapter', {
+                workDir: work.workDir,
+                relPath: trashPath,
+              });
+              await this.client.callTool('write_chapter', {
+                workDir: work.workDir,
+                relPath: rel,
+                content: r.content,
+              });
+              await work.loadStructure();
+              work.notice = `已拒绝 AI 删章并找回 ${rel}（trash 副本还原，trash 里仍留备份）`;
+            }
           } else {
             work.notice = `已拒绝 AI 删章；未找到 trash 副本，${rel} 仍在回收站`;
           }
@@ -390,11 +399,12 @@ export class ChatStore {
     }
   }
 
-  /** 找该调用的工具结果里的 trashPath（delete_chapter 返回 { trashPath }）。 */
+  /** 找该调用的工具结果里的 trashPath（delete_chapter 返回 { trashPath }）。
+   *  不按卡片状态过滤：rejectApproval 先把本卡落定 rejected 再来找结果，按状态过滤会永远扑空。 */
   private trashPathOf(callId: string, rel: string): string | null {
     for (const m of this.messages) {
       for (const t of m.tools ?? []) {
-        if (t.id !== callId || t.state === 'rejected') continue;
+        if (t.id !== callId) continue;
         const r = t.result as { trashPath?: string } | null | undefined;
         if (r?.trashPath) return r.trashPath;
       }
