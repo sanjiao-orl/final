@@ -15,6 +15,7 @@ import {
   moveVolume,
   renameChapter,
   renameVolume,
+  yamlSafeScalar,
 } from '../src/tools.js';
 import { makeWorkDir, writeTree } from './helpers.js';
 
@@ -408,5 +409,49 @@ describe('move_volume', () => {
     expect(() => moveVolume(work, 'manuscript/第1卷·风起', 1)).toThrow(/冲突/);
     expect(() => moveVolume(work, 'manuscript/第1卷·风起', 5)).toThrow(/越界/);
     expect(sortedNames(fs.readdirSync(path.join(work, 'manuscript')))).toEqual(['第1卷·风起', '第2卷·风起']);
+  });
+});
+
+/**
+ * title 含 YAML 特殊字符的 frontmatter 安全序列化（评审T1）：
+ * 写 fm 一律经 yamlSafeScalar（plain 不安全时 JSON 双引号风格引号包裹+转义），
+ * parseFrontmatter 读回 round-trip 不丢标题；plain 安全标题落盘字节不变。
+ */
+describe('title 特殊字符安全序列化（round-trip）', () => {
+  it('yamlSafeScalar：plain 安全原样返回；特殊字符/首尾空白走 JSON 双引号并转义', () => {
+    expect(yamlSafeScalar('第1章·少年')).toBe('第1章·少年'); // plain 安全：字节不变
+    expect(yamlSafeScalar('客栈: 序幕')).toBe('"客栈: 序幕"'); // `: `
+    expect(yamlSafeScalar('风#起')).toBe('"风#起"'); // 注释符
+    expect(yamlSafeScalar('说"不"')).toBe('"说\\"不\\""'); // 双引号转义
+    expect(yamlSafeScalar('路\\径')).toBe('"路\\\\径"'); // 反斜杠转义
+    expect(yamlSafeScalar(' 头尾空格 ')).toBe('" 头尾空格 "');
+  });
+
+  it('写入→读回 round-trip：`: `/#`/双引号/反斜杠/首尾空格标题经 parseFrontmatter 原样读回', () => {
+    const titles = ['客栈: 序幕', '风#起', '说"不"', '路\\径', ' 头尾空格 ', '普通·标题'];
+    for (const t of titles) {
+      const content = `---\ntitle: ${yamlSafeScalar(t)}\nstatus: 草稿\n---\n\n正文。\n`;
+      expect(parseFrontmatter(content).title, t).toBe(t);
+    }
+  });
+
+  it('createChapter 特殊字符标题（文件名合法的 #）→ fm 引号包裹、读回一致', () => {
+    const work = makeWorkDir();
+    const res = createChapter(work, undefined, '客栈#1');
+    const content = fs.readFileSync(path.join(work, ...res.relPath.split('/')), 'utf8');
+    expect(content).toContain('title: "第1章·客栈#1"');
+    expect(parseFrontmatter(content).title).toBe('第1章·客栈#1');
+  });
+
+  it('renameChapter 改成特殊字符标题 → setFrontmatterTitle 安全序列化，其余字段与正文不动', () => {
+    const work = makeWorkDir();
+    writeTree(work, {
+      'manuscript/第1章·少年.md': '---\ntitle: 第1章·少年\nstatus: 完稿\n---\n\n正文内容。\n',
+    });
+    const res = renameChapter(work, 'manuscript/第1章·少年.md', '风#起');
+    const content = fs.readFileSync(path.join(work, ...res.relPath.split('/')), 'utf8');
+    expect(content).toContain('title: "第1章·风#起"');
+    expect(content).toContain('status: 完稿');
+    expect(parseFrontmatter(content).title).toBe('第1章·风#起');
   });
 });

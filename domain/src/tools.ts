@@ -651,18 +651,31 @@ export function exportTxt(workDir: string, signal?: AbortSignal): ExportTxtResul
 // ---------- 章节/卷的生产与组织 ----------
 
 /**
+ * 标题写入 frontmatter 的安全序列化：plain 标量一旦含 YAML 特殊字符
+ * （`: `/` #` 注释/引号/反斜杠/流指示符等，统一从严整字符拒绝）或首尾空白，
+ * 改写为 JSON 双引号风格字符串（转义 `"` 与 `\` 等，YAML 双引号标量同语法，
+ * parseFrontmatter 经 yaml 库原样读回）；plain 安全则原样返回（既有标题落盘字节不变）。
+ */
+export function yamlSafeScalar(value: string): string {
+  const UNSAFE = /[:#"'\\{}[\]&*!|>%@`,]/;
+  return UNSAFE.test(value) || value.trim() !== value ? JSON.stringify(value) : value;
+}
+
+/**
  * 同步 frontmatter 的 title 行为 newTitle（文件名去 .md 的完整名，如 第1章·少年）。
+ * title 经 yamlSafeScalar 安全序列化（含 YAML 特殊字符的标题不再静默丢）。
  * 其余 frontmatter 字段字节级保留、正文不动；没有 title 行则在开栏 `---` 后插入一行；
  * 完全没有 frontmatter 时在最前补一个完整 fm 块（保证「frontmatter title 与文件名一致」）。
  */
 function setFrontmatterTitle(content: string, newTitle: string): string {
+  const safeTitle = yamlSafeScalar(newTitle);
   const fmEnd = frontmatterEnd(content);
-  if (fmEnd === 0) return `---\ntitle: ${newTitle}\n---\n${content}`;
+  if (fmEnd === 0) return `---\ntitle: ${safeTitle}\n---\n${content}`;
   const head = content.slice(0, fmEnd); // fm 块（含闭合行），title 行只可能在这里
   const rest = content.slice(fmEnd);
-  const replaced = head.replace(/^title:[^\n]*$/m, `title: ${newTitle}`);
+  const replaced = head.replace(/^title:[^\n]*$/m, `title: ${safeTitle}`);
   if (replaced !== head) return replaced + rest;
-  return head.replace(/^---\r?\n/, `---\ntitle: ${newTitle}\n`) + rest;
+  return head.replace(/^---\r?\n/, `---\ntitle: ${safeTitle}\n`) + rest;
 }
 
 /**
@@ -710,7 +723,7 @@ export function chapterSetBlueprint(
       next = content; // 无 fm 且删除 → 本就缺省 none，文件不变
     } else {
       const name = path.basename(abs, '.md'); // 文件名去后缀作 title
-      next = `---\ntitle: ${name}\nblueprint: ${value}\n---\n\n${content}`;
+      next = `---\ntitle: ${yamlSafeScalar(name)}\nblueprint: ${value}\n---\n\n${content}`;
     }
   } else {
     const head = content.slice(0, fmEnd); // fm 块（含闭合行）
@@ -798,7 +811,7 @@ export function createChapter(
   if (fs.existsSync(abs)) {
     throw new Error(`create_chapter 章文件已存在（不覆盖）: ${relPath}`);
   }
-  const lines = ['---', `title: ${name}`, 'status: 草稿', `id: ${randomUUID()}`];
+  const lines = ['---', `title: ${yamlSafeScalar(name)}`, 'status: 草稿', `id: ${randomUUID()}`];
   if (goal !== undefined) lines.push(`goal: ${goal}`);
   const content = lines.join('\n') + '\n---\n\n';
   atomicWrite(abs, content);

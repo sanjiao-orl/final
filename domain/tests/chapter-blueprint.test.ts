@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parseFrontmatter } from '../src/frontmatter.js';
 import { chapterSetBlueprint } from '../src/tools.js';
 import { makeWorkDir, writeTree } from './helpers.js';
 
@@ -57,6 +58,15 @@ describe('chapterSetBlueprint', () => {
     expect(out).not.toContain('id:');
     expect(out).not.toContain('status:');
     expect(out.endsWith('整章只有正文,没有 frontmatter。\n')).toBe(true); // 原正文原样
+  });
+
+  it('无 fm 新建最小块：title 含特殊字符（文件名合法的 #）→ 安全序列化、读回一致', () => {
+    const work = makeWorkDir();
+    writeTree(work, { 'manuscript/第2章·客栈#1.md': '整章只有正文,没有 frontmatter。\n' });
+    chapterSetBlueprint(work, 'manuscript/第2章·客栈#1.md', 'locked');
+    const out = read(work, 'manuscript/第2章·客栈#1.md');
+    expect(out.startsWith('---\ntitle: "第2章·客栈#1"\nblueprint: locked\n---\n\n')).toBe(true);
+    expect(parseFrontmatter(out).title).toBe('第2章·客栈#1'); // round-trip 不丢标题
   });
 
   it('无 fm 且 value=none → 缺省即 none,文件不变', () => {
