@@ -222,4 +222,51 @@ describe('before 参数（前章摘要注入用）', () => {
     expect(readChapterSummaries(work, undefined, { before: 'manuscript/第1章.md' }).summaries).toEqual([]);
     expect(readChapterSummaries(work, undefined, { before: 'manuscript/第99章.md' }).summaries).toEqual([]);
   });
+
+  it('limit=3：滚动收集该章之前最近 3 章有摘要的记录（跳过无摘要章），按章序升序返回', () => {
+    const work = makeWorkDir();
+    const files: Record<string, string> = {};
+    for (let i = 1; i <= 6; i++) files[`manuscript/第${i}章.md`] = `---\ntitle: 第${i}章\n---\n正文${i}。`;
+    writeTree(work, files);
+    // 只有 2/4/5 章有摘要：before=第6章、limit=3 → 收集 5、4、2（第3章无摘要被跳过）
+    writeChapterSummary(work, 'manuscript/第2章.md', { summary: '摘2' });
+    writeChapterSummary(work, 'manuscript/第4章.md', { summary: '摘4', tension: 8 });
+    writeChapterSummary(work, 'manuscript/第5章.md', { summary: '摘5' });
+    const r = readChapterSummaries(work, undefined, { before: 'manuscript/第6章.md', limit: 3 });
+    // 升序 = 阅读序（最旧在前），供滚动前章摘要直接拼接
+    expect(r.summaries.map((s) => s.relPath)).toEqual([
+      'manuscript/第2章.md',
+      'manuscript/第4章.md',
+      'manuscript/第5章.md',
+    ]);
+    expect(r.summaries.map((s) => s.summary)).toEqual(['摘2', '摘4', '摘5']);
+  });
+
+  it('limit 缺省=1 兼容现行为（只回最近一章有摘要的记录）', () => {
+    const work = workWithTensions([5, 6, 7, 8, 9, 4]);
+    const r = readChapterSummaries(work, undefined, { before: 'manuscript/第4章.md' });
+    expect(r.summaries.map((s) => s.relPath)).toEqual(['manuscript/第3章.md']);
+    expect(r.summaries).toHaveLength(1);
+  });
+
+  it('limit=1 显式传入与缺省同口径；不足 limit 条时全量返回', () => {
+    const work = makeWorkDir();
+    writeTree(work, {
+      'manuscript/第1章.md': '正文。',
+      'manuscript/第2章.md': '正文。',
+    });
+    writeChapterSummary(work, 'manuscript/第1章.md', { summary: '摘1' });
+    expect(
+      readChapterSummaries(work, undefined, { before: 'manuscript/第2章.md', limit: 1 }).summaries,
+    ).toEqual(readChapterSummaries(work, undefined, { before: 'manuscript/第2章.md' }).summaries);
+    // 只有 1 条可用，limit=3 也只回这 1 条
+    expect(readChapterSummaries(work, undefined, { before: 'manuscript/第2章.md', limit: 3 }).summaries).toHaveLength(1);
+  });
+
+  it('limit 非法（0 / 3.5 / 11）抛中文错', () => {
+    const work = workWithTensions([5, 6, 7, 8, 9, 4]);
+    for (const bad of [0, 3.5, 11]) {
+      expect(() => readChapterSummaries(work, undefined, { before: 'manuscript/第4章.md', limit: bad })).toThrow('limit');
+    }
+  });
 });

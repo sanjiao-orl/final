@@ -312,11 +312,13 @@ describe('chat 数据层前章摘要注入', () => {
       await readSseAll(res);
       const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system')!;
       const sysText = promptText(sys);
-      expect(sysText).toContain(`## 前章摘要（${PREV_RECORD.relPath}）`);
+      expect(sysText).toContain('## 前章摘要（最近 1 章）');
+      expect(sysText).toContain(`### ${PREV_RECORD.relPath}`);
       expect(sysText).toContain(PREV_RECORD.summary);
       expect(sysText).toContain('[机检] tension: 5 · sceneType: 悬念 · 字数: 800');
+      // T11：滚动多章——入参带 limit=3（domain 侧缺省仍为 1）
       expect(tools.read_chapter_summaries!.execute).toHaveBeenCalledWith(
-        { workDir, before: REL },
+        { workDir, before: REL, limit: 3 },
         expect.objectContaining({ toolCallId: 'chat-prev-summary' }),
       );
     } finally {
@@ -397,17 +399,20 @@ describe('chat 数据层前章摘要注入', () => {
       const res = await postChat(s2.baseUrl, s2.token, { text: '继续', workDir, chapter: REL });
       await readSseAll(res);
       const sysText = promptText(model2.doStreamCalls[0]!.prompt.find((m) => m.role === 'system')!);
-      expect(sysText).toContain(`## 前章摘要（${PREV_RECORD.relPath}）`);
+      expect(sysText).toContain(`### ${PREV_RECORD.relPath}`);
       expect(sysText).not.toContain('[机检]');
     } finally {
       await s2.close();
     }
   });
 
-  it('摘要散文超预算截断并加省略标注', async () => {
-    const longSummary = '长'.repeat(2000);
+  it('摘要散文超配额逐条截断并加省略标注（T11：预算语义改为整节总预算 4000）', async () => {
+    const longSummary = '长'.repeat(3000);
     const tools = prevSummaryTool({
-      summaries: [{ ...PREV_RECORD, summary: longSummary }],
+      summaries: [
+        { ...PREV_RECORD, summary: longSummary },
+        { relPath: 'manuscript/第一卷·风起/第1章·下山.md', summary: '少年下山。', tension: 3, generatedAt: GENERATED_AT },
+      ],
     });
     const model = stepModel([textResult(['好'])]);
     const s = await startTestServer({ modelForTier: () => model, tools });
@@ -415,8 +420,10 @@ describe('chat 数据层前章摘要注入', () => {
       const res = await postChat(s.baseUrl, s.token, { text: '继续', workDir, chapter: REL });
       await readSseAll(res);
       const sysText = promptText(model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system')!);
-      expect(sysText).toContain('前章摘要超 1500 字符，已截断');
-      expect(sysText.indexOf('[机检]')).toBeGreaterThan(sysText.indexOf('已截断')); // 机检行仍在节尾
+      // 每条配额 = floor(4000/2) = 2000，长散文逐条截断标注；短的那条原样保留
+      expect(sysText).toContain('前章摘要超 2000 字符，已截断');
+      expect(sysText).not.toContain('长'.repeat(2500));
+      expect(sysText.indexOf('[机检]')).toBeGreaterThan(sysText.indexOf('已截断')); // 截断标注后仍有机检行
     } finally {
       await s.close();
     }

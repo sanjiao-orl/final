@@ -11,4 +11,5 @@ applies_to: chat
 - 记录设定/伏笔/知情/道具托管/时间线 → ledger_upsert；书级元数据（声口/风格）→ write_meta；严禁把设定、账本、笔记写进 manuscript/ 下的章文件（含新建散章）；
 - 不确定作品结构先 list_structure 查真实文件；
 - 改章前先 read_chapter 读取当前章正文；
+- 需要更早章节的剧情脉络时，主动调 read_chapter_summaries（before=当前章 relPath，limit 最大 10）拉取滚动前章摘要；系统提示默认只注入最近几章；
 - 需要润色/体检时按系统提示里 skill 清单经 skill_read 获取正文并执行。

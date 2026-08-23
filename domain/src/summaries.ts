@@ -81,26 +81,35 @@ function loadCache(workDir: string): SummaryCacheFile {
 /**
  * 读章摘要视图：
  * - relPath 给了 → 只返回该章（不在缓存 → 空数组）；
- * - opts.before（章 relPath）给了 → 返回章序中该章之前最近一章有摘要的记录（0 或 1 条，
- *   供「前章摘要」注入；before 不在章序内 → 空数组）；
+ * - opts.before（章 relPath）给了 → 返回章序中该章之前有摘要的记录：缺省 limit=1 只回
+ *   最近一章（0 或 1 条，现行为不变）；limit=N（仅 before 模式生效，1-10 整数）从该章
+ *   前一章往章序首部滚动收集有摘要的章直到 N 条，按章序升序返回（最旧在前，阅读序，
+ *   供「滚动前章摘要」注入）；中间无摘要的章跳过；before 不在章序内 → 空数组；
+ *   limit 非法抛中文错（风格同 writeChapterSummary 的校验错）。
  * - 都不给 → 返回全部，按 chapterOrderForWork 章序排；
  *   不在章序的（被删/改名）stale:true 排最后，彼此间按 relPath 字典序兜底。
  */
 export function readChapterSummaries(
   workDir: string,
   relPath?: string,
-  opts?: { before?: string },
+  opts?: { before?: string; limit?: number },
 ): { summaries: ChapterSummaryView[] } {
   const cache = loadCache(workDir);
   if (opts?.before !== undefined) {
+    const limit = opts.limit ?? 1;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 10) {
+      throw new Error(`limit 必须是 1-10 的整数: ${String(limit)}`);
+    }
     const order = chapterOrderForWork(workDir);
     const idx = order.findIndex((c) => c.relPath === toPosix(opts.before!));
     if (idx <= 0) return { summaries: [] };
-    for (let i = idx - 1; i >= 0; i--) {
+    // 从前一章往章序首部滚动收集，收满 limit 条为止；再反转成升序（最旧在前，阅读序）
+    const collected: ChapterSummaryView[] = [];
+    for (let i = idx - 1; i >= 0 && collected.length < limit; i--) {
       const rec = cache.chapters[order[i]!.relPath];
-      if (rec) return { summaries: [{ ...rec, relPath: order[i]!.relPath }] };
+      if (rec) collected.push({ ...rec, relPath: order[i]!.relPath });
     }
-    return { summaries: [] };
+    return { summaries: collected.reverse() };
   }
   if (relPath !== undefined) {
     const rec = cache.chapters[toPosix(relPath)];

@@ -1435,3 +1435,105 @@ describe('/v1/chat SSE 管道', () => {
     }
   });
 });
+
+// ---------- T11：滚动前章摘要注入（多章窗口） ----------
+
+describe('chat 数据层滚动前章摘要（多记录节组装与预算）', () => {
+  const CHAPTER = 'manuscript/卷一/第三章.md';
+
+  function makeWorkDir(): string {
+    return fs.mkdtempSync(path.join(os.tmpdir(), 'core-chat-prev-summary-'));
+  }
+
+  function prevSummaryTool(result: unknown): ToolSet {
+    return {
+      read_chapter_summaries: { description: '读摘要缓存', execute: vi.fn(async () => result) },
+    } as unknown as ToolSet;
+  }
+
+  it('多记录 → 节头「最近 N 章」+ 每条 ### relPath 小标 + 各自机检行；execute 入参带 before+limit=3', async () => {
+    const workDir = makeWorkDir();
+    // domain 升序返回：最旧在前
+    const tools = prevSummaryTool({
+      summaries: [
+        { relPath: 'manuscript/卷一/第一章.md', summary: '少年下山，初遇故人。', tension: 4, sceneType: '过渡', wordCount: 2100, generatedAt: 'x' },
+        { relPath: 'manuscript/卷一/第二章.md', summary: '旧宅残信，父亲失踪线索指向青崖山。', tension: 7, generatedAt: 'y' },
+        { relPath: 'manuscript/卷二/第四章.md', summary: '雾夜客栈，警觉不安。', sceneType: '悬念', generatedAt: 'z' },
+      ],
+    });
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model, tools });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '继续写', workDir, chapter: CHAPTER });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      expect(tools.read_chapter_summaries!.execute).toHaveBeenCalledWith(
+        { workDir, before: CHAPTER, limit: 3 },
+        expect.objectContaining({ toolCallId: 'chat-prev-summary' }),
+      );
+      const sysText = promptText(model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system')!);
+      expect(sysText).toContain('## 前章摘要（最近 3 章）');
+      // 每条一个 ### 小标，relPath 含卷目录（跨卷窗口的卷级标注口径）
+      expect(sysText).toContain('### manuscript/卷一/第一章.md');
+      expect(sysText).toContain('### manuscript/卷一/第二章.md');
+      expect(sysText).toContain('### manuscript/卷二/第四章.md');
+      // 各自机检行：缺哪个字段省哪个
+      expect(sysText).toContain('[机检] tension: 4 · sceneType: 过渡 · 字数: 2100');
+      expect(sysText).toContain('[机检] tension: 7');
+      expect(sysText).toContain('[机检] sceneType: 悬念');
+      // 升序（最旧在前）：第一章小标在第四章之前
+      expect(sysText.indexOf('### manuscript/卷一/第一章.md')).toBeLessThan(sysText.indexOf('### manuscript/卷二/第四章.md'));
+    } finally {
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('预算截断：整节总预算 4000——每条散文按 floor(4000/N) 配额逐条截断', async () => {
+    const workDir = makeWorkDir();
+    const tools = prevSummaryTool({
+      summaries: [
+        { relPath: 'manuscript/卷一/第一章.md', summary: '长'.repeat(3000), generatedAt: 'x' },
+        { relPath: 'manuscript/卷一/第二章.md', summary: '长'.repeat(3000), generatedAt: 'y' },
+      ],
+    });
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model, tools });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '继续写', workDir, chapter: CHAPTER });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      const sysText = promptText(model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system')!);
+      // 每条配额 = floor(4000/2) = 2000 → 逐条截断标注
+      expect(sysText).toContain('前章摘要超 2000 字符，已截断');
+      // 整节不超总预算：截断后每条散文 ≤2000 字（未截断是 3000 连串）
+      expect(sysText).not.toContain('长'.repeat(2500));
+    } finally {
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('预算兜底：逐条配额内拼完仍超 4000 → 整节再截断', async () => {
+    const workDir = makeWorkDir();
+    // 10 条 × 500 字：每条配额 400 逐条截断后全节仍 > 4000 → 整体兜底截断
+    const summaries = Array.from({ length: 10 }, (_, i) => ({
+      relPath: `manuscript/卷一/第${i + 1}章.md`,
+      summary: '长'.repeat(500),
+      generatedAt: `${i}`,
+    }));
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model, tools: prevSummaryTool({ summaries }) });
+    try {
+      const res = await postChat(s.baseUrl, s.token, { text: '继续写', workDir, chapter: CHAPTER });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      const sysText = promptText(model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system')!);
+      expect(sysText).toContain('前章摘要超 400 字符，已截断'); // 逐条配额截断
+      expect(sysText).toContain('前章摘要超 4000 字符，已截断'); // 整节兜底截断
+    } finally {
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+});

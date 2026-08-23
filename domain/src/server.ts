@@ -627,21 +627,28 @@ server.registerTool(
     ),
 );
 
-// 块1 理解层供料：章摘要导生缓存读取（第 34 个工具）
+// 块1 理解层供料：章摘要导生缓存读取（第 34 个工具；before+limit 滚动多章为加法，契约不改动）
 server.registerTool(
   'read_chapter_summaries',
   {
     title: '读取章摘要缓存',
     description:
-      '读章摘要导生缓存（.novel/cache/chapter-summaries.json；可焚可重建，损坏按空缓存处理不抛错）。给 relPath 只返回该章（不在缓存→空数组）；不给返回全部，按章序排，被删/改名的章标 stale:true 排最后。返回 { summaries: [{ relPath, summary, tension?, sceneType?, wordCount?, generatedAt, stale? }] }。',
+      '读章摘要导生缓存（.novel/cache/chapter-summaries.json；可焚可重建，损坏按空缓存处理不抛错）。给 relPath 只返回该章（不在缓存→空数组）；给 before 返回章序中该章之前最近 N 章有摘要的记录（缺省 N=1 即最近一章；N 最大 10，按章序升序返回，供「滚动前章摘要」注入）；不给返回全部，按章序排，被删/改名的章标 stale:true 排最后。返回 { summaries: [{ relPath, summary, tension?, sceneType?, wordCount?, generatedAt, stale? }] }。',
     inputSchema: {
       workDir: z.string().describe('作品文件夹的绝对路径'),
       relPath: z.string().optional().describe('可选：章相对 workDir 路径'),
-      before: z.string().optional().describe('可选：章相对 workDir 路径——给了就只返回章序中该章之前最近一章有摘要的记录（0 或 1 条，供「前章摘要」注入）；与 relPath 同给时 before 优先'),
+      before: z.string().optional().describe('可选：章相对 workDir 路径——给了就只返回章序中该章之前有摘要的记录（配合 limit 滚动多章，缺省只回最近一章）；与 relPath 同给时 before 优先'),
+      limit: z.number().int().min(1).max(10).optional().describe('可选：before 模式下返回最近 N 章有摘要的记录（1-10，缺省 1，按章序升序）'),
     },
   },
-  async ({ workDir, relPath, before }) =>
-    jsonResult(readChapterSummaries(workDir, relPath, before !== undefined ? { before } : undefined)),
+  async ({ workDir, relPath, before, limit }) =>
+    jsonResult(
+      readChapterSummaries(
+        workDir,
+        relPath,
+        before !== undefined ? { before, ...(limit !== undefined ? { limit } : {}) } : undefined,
+      ),
+    ),
 );
 
 // 块1：回收站收口进 domain（第 35 个工具；壳不再用 localStorage 跟踪软删）
