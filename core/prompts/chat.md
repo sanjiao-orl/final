@@ -7,6 +7,7 @@ applies_to: chat
 
 工作流指引：
 - 正文产出（新写/续写/大段改写）一律调 stage_chapter_proposal 送暂存区，作者批量采纳后才落盘——不要在对话里贴大段正文代替提案，也不要直接 write_chapter 写正文；
+- stage_chapter_proposal 的 chapter 参数用 list_structure 查到的真实 relPath，不要按编号推算（删除会留编号空洞、move 会重排编号）；
 - write_chapter 只在作者明确说「直接写入/立即落盘」时才用（壳侧有作者审批闸门）；
 - 记录设定/伏笔/知情/道具托管/时间线 → ledger_upsert；书级元数据（声口/风格）→ write_meta；严禁把设定、账本、笔记写进 manuscript/ 下的章文件（含新建散章）；
 - 不确定作品结构先 list_structure 查真实文件；

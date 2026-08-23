@@ -78,6 +78,9 @@ export interface ChatDeps {
 /** ledger_chapter_slice 工具名：core 侧数据层注入契约（domain 并行开发的账本按章切片工具）。 */
 const LEDGER_CHAPTER_SLICE_TOOL = 'ledger_chapter_slice';
 
+/** read_chapter 工具名：stage_chapter_proposal 目标章存在性校验用（D6）。 */
+const READ_CHAPTER_TOOL = 'read_chapter';
+
 /** decision_tail 工具名：core 侧碰撞模式讨论沉淀注入契约（domain 并行开发的裁决检索摘要工具）。 */
 const DECISION_TAIL_TOOL = 'decision_tail';
 
@@ -92,6 +95,9 @@ const PREV_SUMMARY_LIMIT = 3;
 
 /** 前章摘要整节注入字符预算（多条摘要散文 + 机检行合计；每条按配额逐条截断后，整节超限再兜底截断）。 */
 const PREV_SUMMARY_INJECT_MAX_CHARS = 4000;
+
+/** 本章账本切片注入字符预算（D4）：切片长度只随账本条目数增长无封顶，超限截断并指路模型自调 ledger_chapter_slice 取全量。 */
+const LEDGER_SLICE_INJECT_MAX_CHARS = 3000;
 
 /**
  * 契约层注入字符预算：skill 清单 / persona 正文 / 碰撞协议各自上限。
@@ -185,7 +191,12 @@ async function systemPrompt(
   if (workDir && chapter && tools) {
     const sliceResult = await fetchChapterSlice(workDir, chapter, tools, abortSignal);
     if (sliceResult?.found && sliceResult.slice) {
-      prompt += `\n\n## 本章账本切片(${sliceResult.chapterTitle ?? chapter})\n仅含与当前章相关的账本条目，非全书。\n\n${sliceResult.slice}`;
+      // D4 预算闸：切片无封顶随账本增长，超限截断并指路模型自调 ledger_chapter_slice 取全量（buildDecisionTailSection 同风格）
+      let slice = sliceResult.slice;
+      if (slice.length > LEDGER_SLICE_INJECT_MAX_CHARS) {
+        slice = `${slice.slice(0, LEDGER_SLICE_INJECT_MAX_CHARS)}\n…（账本切片超 ${LEDGER_SLICE_INJECT_MAX_CHARS} 字符已截断；需要完整切片可调 ledger_chapter_slice 工具）`;
+      }
+      prompt += `\n\n## 本章账本切片(${sliceResult.chapterTitle ?? chapter})\n仅含与当前章相关的账本条目，非全书。\n\n${slice}`;
     }
   }
   // 数据层 b2：滚动前章摘要（章挂载会话 + domain 工具可用才注；取最近 3 章有摘要的记录按章序升序拼节；
@@ -294,6 +305,51 @@ function extractChapterSlice(result: unknown): ChapterSlice | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * stage_chapter_proposal 目标章存在性校验（D6「append 编号全文匹配跳号」）：调 read_chapter，能读到即存在。
+ * AI 按自算编号拼 relPath（删除留空洞/move 重排/汉字阿拉伯混写）时在这里拦下，让模型在工具回路里自查自纠。
+ * 返回三态：true=存在；false=确定不存在（ENOENT 或路径守卫拒绝）；undefined=判不了（工具缺失/超时/未知错误），
+ * undefined 一律降级放行不拦产出（与数据层注入同纪律），warn 留痕。挂独立注入超时，domain 挂起不拖满 LLM 超时。
+ */
+async function chapterExists(
+  workDir: string | undefined,
+  relPath: string,
+  tools: ToolSet | undefined,
+  abortSignal: AbortSignal
+): Promise<boolean | undefined> {
+  const tool = tools?.[READ_CHAPTER_TOOL];
+  if (!workDir || !tool?.execute) {
+    console.warn('[chat] read_chapter 工具不可用（domain MCP 未连接或工具不存在），跳过提案目标章存在性校验');
+    return undefined;
+  }
+  const injectSeconds = getDataInjectTimeoutSeconds();
+  const injectSignal = AbortSignal.any([abortSignal, AbortSignal.timeout(injectSeconds * 1000)]);
+  /** ENOENT（文件缺失）与 read_chapter 路径守卫拒绝（「只允许 manuscript/ …」）都判「目标章无效」；其余报错判不了。 */
+  const invalidTarget = (message: string): boolean => /ENOENT|只允许/i.test(message);
+  try {
+    const result: unknown = await tool.execute({ workDir, relPath } as never, {
+      toolCallId: 'chat-stage-verify',
+      messages: [],
+      context: undefined,
+      abortSignal: injectSignal,
+    });
+    if (!result || typeof result !== 'object' || (result as { isError?: unknown }).isError !== true) return true;
+    const text =
+      (result as { content?: Array<{ type?: string; text?: string }> }).content?.find(
+        (c) => c && c.type === 'text' && typeof c.text === 'string'
+      )?.text ?? '';
+    if (invalidTarget(text)) return false;
+    console.warn('[chat] read_chapter 校验返回异常结果，降级放行：', text || '未知错误');
+    return undefined;
+  } catch (err) {
+    if (abortSignal.aborted || injectSignal.aborted) return undefined; // 断连/校验超时：静默降级（外层已有归因）
+    const message = err instanceof Error ? err.message : String(err);
+    if (invalidTarget(message)) return false;
+    console.warn('[chat] read_chapter 校验调用失败，降级放行：', message);
+    return undefined;
+  }
 }
 
 /**
@@ -804,7 +860,9 @@ export async function handleChatRequest(
         original: z.string().describe('mode=replace 时必填：本章中将被替换的原文（锚定）').optional(),
         chapter: z
           .string()
-          .describe('目标章 relPath（manuscript/ 内 .md）；缺省用本请求 chat body 的 chapter 字段（挂载章）')
+          .describe(
+            '目标章 relPath（manuscript/ 内 .md）；缺省用本请求 chat body 的 chapter 字段（挂载章）。用 list_structure 查到的真实路径，不要按编号推算（删除会留空洞、move 会重排编号）'
+          )
           .optional(),
         instruction: z.string().max(2_000).describe('提案说明').optional(),
       }),
@@ -815,6 +873,14 @@ export async function handleChatRequest(
         }
         if (input.mode === 'replace' && !input.original) {
           return 'mode=replace 需要 original 锚定原文：请提供本章中将被替换的原文。本次未创建候选。';
+        }
+        // D6：AI 显式指定的目标章做存在性校验；缺省回退挂载章（壳侧按 frontmatter id 解析）可信不校验。
+        // 校验确定无效 → 只引导不落库（编号推算路径在工具回路里自查自纠）；判不了（MCP 断连/超时）→ 降级放行保持旧行为。
+        if (input.chapter && input.chapter !== parsed.data.chapter) {
+          const exists = await chapterExists(workDir, input.chapter, deps.tools, combinedSignal);
+          if (exists === false) {
+            return `目标章节不存在：${input.chapter}。chapter 必须是 list_structure 返回的真实 relPath（删除会留编号空洞、move 会重排编号，不要按编号推算路径）。若要新建章节，先 create_chapter。本次未创建候选，请修正后重提。`;
+          }
         }
         const candidate = deps.candidates.create({
           chapter,

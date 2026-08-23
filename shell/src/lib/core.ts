@@ -576,6 +576,8 @@ export function tauriInvoke(): TauriInternals['invoke'] | undefined {
  * 连接 core：Tauri 环境走 core_info 命令（壳进程已拉起 sidecar），
  * 浏览器裸联调走 ?corePort=&coreToken=&workDir=（与 /dev 页同级的调试通道）；
  * token/workDir 缺省时回落到 localStorage 记忆，再缺则 prompt 用户输入并记忆。
+ * 裸联调通道仅限开发构建（D11）：生产构建下 query/localStorage 一概不读不写，
+ * token 经 query 传递与 localStorage 落盘的面在正式版收死（与 /v1/dev 页的 __CORE_COMMIT__ 门禁同向）。
  */
 export async function connectCore(): Promise<{ client: CoreClient; workDir: string }> {
   const invoke = tauriInvoke();
@@ -585,6 +587,9 @@ export async function connectCore(): Promise<{ client: CoreClient; workDir: stri
       client: new CoreClient(`http://127.0.0.1:${info.port}`, info.token),
       workDir: info.workDir,
     };
+  }
+  if (!import.meta.env.DEV) {
+    throw new Error('裸联调（query/localStorage 传 corePort/coreToken）仅限开发构建；正式版请在 Tauri 壳内使用');
   }
   const q = new URLSearchParams(window.location.search);
   const port = q.get('corePort');

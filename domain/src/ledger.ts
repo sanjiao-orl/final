@@ -1742,7 +1742,10 @@ function unquoteQuote(text: string): string {
 
 /**
  * 在 chapter 文件里找 quote 首次出现的文件实际行号（1 起始，含 frontmatter 行，与 search_content 口径一致）。
- * chapter 越界/非 manuscript 内 .md/不存在或 quote 找不到 → 返回 null（CR 行 line 段写 `?`）。
+ * 两过匹配：先逐行精确子串（原行为，命中即返回）；未中再紧凑匹配（D7「跨行 quote 定位必失配」）——
+ * 双侧剥掉全部空白字符（\s 含 \u00a0/\u3000，换行一并剥去）后在整章紧凑串里找首现，
+ * quote 跨行/跨段（内含 \n、\r\n、段间空行）也能定位，返回首字符所在行号。
+ * chapter 越界/非 manuscript 内 .md/不存在或两过都找不到 → 返回 null（CR 行 line 段写 `?`）。
  * 导出供对账器（reconcile.ts）复用同一套定位口径。
  */
 export function locateQuoteLine(workDir: string, chapterRelPath: string, quote: string): number | null {
@@ -1767,7 +1770,23 @@ export function locateQuoteLine(workDir: string, chapterRelPath: string, quote: 
   for (let i = 0; i < lines.length; i++) {
     if ((lines[i] ?? '').toLowerCase().includes(lowerQ)) return i + 1;
   }
-  return null;
+  // 紧凑兜底：剥全部空白后整章匹配。lineOf 与紧凑串同长，记录每个紧凑字符的原始行号（\n 计行、\r 不计）。
+  const compactQ = lowerQ.replace(/\s/g, '');
+  if (compactQ === '') return null;
+  const compactChars: string[] = [];
+  const lineOf: number[] = [];
+  let line = 1;
+  for (const ch of content) {
+    if (ch === '\n') {
+      line += 1;
+      continue;
+    }
+    if (/\s/.test(ch)) continue;
+    compactChars.push(ch);
+    lineOf.push(line);
+  }
+  const idx = compactChars.join('').indexOf(compactQ);
+  return idx >= 0 ? (lineOf[idx] ?? null) : null;
 }
 
 /**

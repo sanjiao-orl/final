@@ -114,6 +114,44 @@ describe('findTextRanges', () => {
   });
 });
 
+describe('findTextRanges 紧凑兜底（D7 跨行 quote 定位）', () => {
+  it('段间空行 needle（源文件式 \\n\\n 摘录）：紧凑命中，范围 round-trip 回文档约定文本', () => {
+    const needle = '青崖山。\n\n临行'; // 源 md 段间空行，拼接串块间只有一个 \n——精确必失配
+    const ranges = findTextRanges(SAMPLE, needle);
+    expect(ranges).toHaveLength(1);
+    expect(captureSelection(SAMPLE, ranges[0]!.from, ranges[0]!.to)).toBe('青崖山。\n临行');
+  });
+
+  it('CRLF needle（\\r\\n 摘录）：紧凑命中', () => {
+    const ranges = findTextRanges(SAMPLE, '青崖山。\r\n临行');
+    expect(ranges).toHaveLength(1);
+    expect(captureSelection(SAMPLE, ranges[0]!.from, ranges[0]!.to)).toBe('青崖山。\n临行');
+  });
+
+  it('全空白 needle 紧凑后为空串：不兜底，返回空', () => {
+    expect(findTextRanges(SAMPLE, ' \n\u3000\r\n')).toEqual([]);
+  });
+
+  it('多段锚（replace 候选 original 跨段原必 not-found）：locateUnique 紧凑兜底后唯一命中', () => {
+    const r = locateUnique(SAMPLE, '林渡捏着铜钱，觉得分量不对。\n\n他没有声张。');
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(captureSelection(SAMPLE, r.range.from, r.range.to)).toBe('林渡捏着铜钱，觉得分量不对。\n他没有声张。');
+    }
+  });
+
+  it('紧凑仍找不到（内容不存在）→ 空', () => {
+    expect(findTextRanges(SAMPLE, '不存在的句子\n\n另一段也没有')).toEqual([]);
+  });
+
+  it('精确命中优先：单 \n 跨块 needle 不受兜底影响（行为回归保护）', () => {
+    const needle = '青崖山。\n临行';
+    const ranges = findTextRanges(SAMPLE, needle);
+    expect(ranges).toHaveLength(1);
+    expect(captureSelection(SAMPLE, ranges[0]!.from, ranges[0]!.to)).toBe(needle);
+  });
+});
+
 describe('locateUnique', () => {
   it('唯一命中 ok；零命中 not-found；多命中 ambiguous', () => {
     expect(locateUnique(SAMPLE, '临行')).toEqual({ ok: true, range: findTextRanges(SAMPLE, '临行')[0] });

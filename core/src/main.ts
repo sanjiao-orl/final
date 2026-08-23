@@ -104,9 +104,22 @@ async function main(): Promise<void> {
     },
   });
 
-  // listen 失败（如端口占用）会走 main().catch 直接 process.exit——而此时 runtime 文件尚未写入
-  //（writeRuntimeFile 只在 listen 成功后、ready 行之前执行，见下方），故无 core-runtime.local.json 残留需清理。
-  await listen(server, args.port);
+  // listen 失败（如端口占用）：固定端口场景向 stdout 打 fatal 单行 JSON——壳侧 watch_core 据此带具体原因置 Failed
+  //（prod 下 stderr 走 inherit 在 windows 子系统下不可见）；随机端口（e2e/promptfoo 自拉）无此约束，失败仍走 catch 兜底日志。
+  // 此时 runtime 文件尚未写入（writeRuntimeFile 只在 listen 成功后执行），无 core-runtime.local.json 残留需清理。
+  try {
+    await listen(server, args.port);
+  } catch (err) {
+    if (args.port !== undefined) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      const message =
+        code === 'EADDRINUSE'
+          ? `端口 ${args.port} 已被占用：请关闭已在运行的工作台实例或占用该端口的程序后重试`
+          : `监听 127.0.0.1:${args.port} 失败（${code ?? '未知错误'}）`;
+      console.log(JSON.stringify({ event: 'fatal', message }));
+    }
+    throw err;
+  }
   const port = getPort(server);
 
   // 握手自报（D2）：先落盘 runtime 文件、成功后才打印 ready 行——壳解析到 ready 即认为 core 已就绪，

@@ -138,18 +138,49 @@ function frontmatterLineOffset(payload: unknown): number {
  * 对每条 finding 做 indexOf 定位：
  * - quote 先 trim 并剥成对引号（「」『』“”‘’"'）再匹配——LLM 可能带引号复述；
  * - line = 全文中首现位置的 1 起始文件行号（content.slice(0, idx) 按换行切数行数）；
+ * - 精确 indexOf 未中 → 紧凑兜底（D7「跨行 quote 定位必失配」）：双侧剥全部空白
+ *   （\s 含 \u00a0/\u3000，换行一并剥去）后在整文紧凑串里找首现——LLM 复述的跨行 quote
+ *   与 CRLF/LF、段间空行差异在此命中，返回首字符所在文件行号；
  * - paraLine = 所在段落的段首行号（正文按空行分组，段首行=该段第一行的文件行号；
  *   body 与 content 的行号偏移 = frontmatter 行数）；
- * - 找不到 → located:false，line/paraLine 不出。
+ * - 两过都找不到 → located:false，line/paraLine 不出。
  */
 function locateFindings(findings: QualityFindingRaw[], content: string, body: string, offsetLines: number): QualityFinding[] {
   const bodyLines = body.split(/\r?\n/);
+  // 紧凑索引按需构建一次（有 finding 精确未中才建）：紧凑串剥全部空白，lineOf 同长记录每个紧凑字符的文件行号。
+  let compact: { text: string; lineOf: number[] } | undefined;
+  const compactIndex = (): { text: string; lineOf: number[] } => {
+    if (compact) return compact;
+    const chars: string[] = [];
+    const lineOf: number[] = [];
+    let line = 1;
+    for (const ch of content) {
+      if (ch === '\n') {
+        line += 1;
+        continue;
+      }
+      if (/\s/.test(ch)) continue;
+      chars.push(ch);
+      lineOf.push(line);
+    }
+    compact = { text: chars.join(''), lineOf };
+    return compact;
+  };
   return findings.map((f) => {
     const needle = f.quote.trim().replace(/^[「『“'"']+/, '').replace(/[」』”'"']+$/, '').trim();
     if (needle === '') return { ...f, located: false };
     const idx = content.indexOf(needle);
-    if (idx < 0) return { ...f, located: false };
-    const line = content.slice(0, idx).split(/\r?\n/).length;
+    let line: number;
+    if (idx >= 0) {
+      line = content.slice(0, idx).split(/\r?\n/).length;
+    } else {
+      const compactNeedle = needle.replace(/\s/g, '');
+      if (compactNeedle === '') return { ...f, located: false };
+      const ci = compactIndex();
+      const compactIdx = ci.text.indexOf(compactNeedle);
+      if (compactIdx < 0) return { ...f, located: false };
+      line = ci.lineOf[compactIdx]!;
+    }
     const paraLine = paragraphStartLine(bodyLines, line - offsetLines, offsetLines);
     return { ...f, located: true, line, paraLine };
   });

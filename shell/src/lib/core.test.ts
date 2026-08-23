@@ -1,6 +1,6 @@
-// core.ts 单测：health() 与 SSE POST 中 AbortSignal 行为 + 裸联调参数记忆（resolveBareParam）。
+// core.ts 单测：health() 与 SSE POST 中 AbortSignal 行为 + 裸联调参数记忆（resolveBareParam）+ 裸联调 DEV 门禁（D11）。
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CoreClient, CoreNetworkError, resolveBareParam, unwrapMcpEnvelope, LS_CORE_TOKEN_KEY, LS_CORE_WORKDIR_KEY } from './core.js';
+import { CoreClient, CoreNetworkError, connectCore, resolveBareParam, unwrapMcpEnvelope, LS_CORE_TOKEN_KEY, LS_CORE_WORKDIR_KEY } from './core.js';
 
 const origFetch = globalThis.fetch;
 
@@ -148,6 +148,30 @@ describe('resolveBareParam（裸联调 token/workDir 记忆）', () => {
     });
     expect(v).toBeUndefined();
     expect(lsSet).not.toHaveBeenCalled();
+  });
+});
+
+describe('connectCore 裸联调 DEV 门禁（D11）', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    delete (globalThis as { window?: unknown }).window;
+  });
+
+  it('非 Tauri + 生产构建 → 直接拒绝，不进 query/localStorage/prompt 解析', async () => {
+    vi.stubEnv('DEV', false);
+    // node 测试环境无 window → tauriInvoke() 得 undefined（非 Tauri），正好落在裸联调分支
+    await expect(connectCore()).rejects.toThrow('仅限开发构建');
+    await expect(connectCore()).rejects.toThrow('Tauri 壳');
+  });
+
+  it('非 Tauri + 开发构建 → 门禁放行，照常走裸联调参数解析（缺参报缺参错误而非门禁错误）', async () => {
+    vi.stubEnv('DEV', true);
+    // 补一个最小 window（无 __TAURI_INTERNALS__ = 非 Tauri；location 无 corePort；prompt 取消返回 null）
+    (globalThis as { window?: unknown }).window = {
+      location: { search: '' },
+      prompt: () => null,
+    };
+    await expect(connectCore()).rejects.toThrow('缺少 core 连接信息'); // 走到参数解析，不弹 DEV 门禁
   });
 });
 

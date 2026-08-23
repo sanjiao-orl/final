@@ -237,4 +237,27 @@ describe('locateQuoteLine 导出', () => {
     expect(locateQuoteLine(wd, CH1, '不存在的句子')).toBeNull();
     expect(locateQuoteLine(wd, 'manuscript/没有这章.md', Q1)).toBeNull();
   });
+
+  it('D7 跨行 quote：quote 含换行（逐行必失配）→ 紧凑兜底命中起始行；LF/CRLF/段间空行差异同样命中', () => {
+    const wd = makeWorkDir();
+    writeTree(wd, { [CH1]: chapterBody(Q1) });
+    // quote 跨第 5-6 行带 LF：原逐行 includes 必失配，紧凑剥空白后命中首字符所在行 5
+    expect(locateQuoteLine(wd, CH1, `林渡接过铜钱，${Q1}。\n茶棚外雨声不停。`)).toBe(5);
+    // quote 换行为 CRLF、且段间多夹一个空行 → 同样命中起始行 5
+    expect(locateQuoteLine(wd, CH1, `林渡接过铜钱，${Q1}。\r\n\r\n茶棚外雨声不停。`)).toBe(5);
+  });
+
+  it('D7 空白差异：CRLF 文件逐行精确不受影响；全角/半角空格差异经紧凑兜底命中', () => {
+    const crlfWd = makeWorkDir();
+    writeTree(crlfWd, { [CH1]: chapterBody(Q1).replace(/\n/g, '\r\n') });
+    expect(locateQuoteLine(crlfWd, CH1, `${Q1}。`)).toBe(5); // 单行 quote 逐行精确命中（回归保护）
+    const spWd = makeWorkDir();
+    writeTree(spWd, { [CH1]: `---\ntitle: 章\n---\n\n林渡接过铜钱，\u3000${Q1}。\n茶棚外雨声不停。` });
+    expect(locateQuoteLine(spWd, CH1, `林渡接过铜钱， ${Q1}`)).toBe(5); // quote 半角空格 vs 正文全角空格
+  });
+
+  it('D7 紧凑兜底仍找不到（内容确实不存在）→ null', () => {
+    const wd = setupChapters();
+    expect(locateQuoteLine(wd, CH1, `不存在的句子\n另一句也没有`)).toBeNull();
+  });
 });

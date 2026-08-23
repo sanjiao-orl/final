@@ -913,6 +913,32 @@ describe('/v1/chat SSE 管道', () => {
     }
   });
 
+  it('D4 预算闸：账本切片超 3000 字符 → 截断 + 指路 ledger_chapter_slice 工具的省略标注', async () => {
+    const workDir = makeWorkDir('## 摘要\n\n冷峻克制。');
+    const longSlice = '账'.repeat(3_500);
+    const model = stepModel([textResult(['好'])]);
+    const s = await startTestServer({ modelForTier: () => model, tools: chapterSliceTools(longSlice) });
+    try {
+      const res = await postChat(s.baseUrl, s.token, {
+        text: '这章节奏如何',
+        workDir,
+        chapter: 'manuscript/第1章.md',
+      });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      const sys = model.doStreamCalls[0]!.prompt.find((m) => m.role === 'system');
+      const sysText = promptText(sys!);
+      expect(sysText).toContain('## 本章账本切片(第一章)');
+      expect(sysText).toContain('账本切片超 3000 字符已截断');
+      expect(sysText).toContain('需要完整切片可调 ledger_chapter_slice 工具');
+      expect(sysText).toContain('账'.repeat(3_000)); // 截断保住前 3000 字符
+      expect(sysText).not.toContain('账'.repeat(3_001)); // 不再全量注入
+    } finally {
+      await s.close();
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
   it('本地工具 stage_chapter_proposal：body 带 chapter、模型调（mode=append）→ 候选落库 kind=append', async () => {
     const model = stepModel([
       toolCallResult('tc-stage', 'stage_chapter_proposal', { proposed: '续写内容', mode: 'append' }),
@@ -984,6 +1010,170 @@ describe('/v1/chat SSE 管道', () => {
       expect(s.candidates.list()).toHaveLength(0); // 未落库
     } finally {
       await s.close();
+    }
+  });
+
+  // ---- D6：提案目标章存在性校验（显式传 chapter 且 ≠ 挂载章才校验；三态：存在放行/确定无效引导/判不了降级放行） ----
+
+  /** 含 read_chapter 的 domain 工具集（D6 校验通道），execute 可注入。 */
+  function readChapterTools(execute: (input: unknown) => Promise<unknown>): ToolSet {
+    return {
+      read_chapter: {
+        description: '读章',
+        inputSchema: z.object({ workDir: z.string(), relPath: z.string() }),
+        execute,
+      },
+    } as unknown as ToolSet;
+  }
+
+  it('D6：显式传不存在的目标章（ENOENT）→ 引导文本不落库，read_chapter 校验确实发起', async () => {
+    const d6WorkDir = makeWorkDir();
+    const readExec = vi.fn(async () => ({
+      isError: true,
+      content: [{ type: 'text', text: "ENOENT: no such file or directory, open 'manuscript/第9章.md'" }],
+    }));
+    const model = stepModel([
+      toolCallResult('tc-d6a', 'stage_chapter_proposal', {
+        proposed: '续写内容',
+        mode: 'append',
+        chapter: 'manuscript/第9章.md',
+      }),
+      textResult(['我去查一下真实结构。']),
+    ]);
+    const s = await startTestServer({ modelForTier: () => model, tools: readChapterTools(readExec) });
+    try {
+      const res = await postChat(s.baseUrl, s.token, {
+        text: '续写第九章',
+        workDir: d6WorkDir,
+        chapter: 'manuscript/第2章.md',
+      });
+      const events = await readSse(res);
+      const toolResult = events.find((e) => e.event === 'tool-result');
+      expect(toolResult).toBeDefined();
+      expect(String(toolResult!.data.result)).toContain('目标章节不存在：manuscript/第9章.md');
+      expect(String(toolResult!.data.result)).toContain('list_structure'); // 引导查真实 relPath
+      expect(String(toolResult!.data.result)).toContain('未创建候选');
+      expect(s.candidates.list()).toHaveLength(0);
+      expect(readExec).toHaveBeenCalledTimes(1);
+    } finally {
+      await s.close();
+      fs.rmSync(d6WorkDir, { recursive: true, force: true });
+    }
+  });
+
+  it('D6：显式传章 = 挂载章 → 不发起校验，照常落库', async () => {
+    const d6WorkDir = makeWorkDir();
+    const readExec = vi.fn(async () => ({ content: 'x', body: 'x' }));
+    const model = stepModel([
+      toolCallResult('tc-d6b', 'stage_chapter_proposal', {
+        proposed: '续写内容',
+        mode: 'append',
+        chapter: 'manuscript/第2章.md',
+      }),
+      textResult(['已送暂存区。']),
+    ]);
+    const s = await startTestServer({ modelForTier: () => model, tools: readChapterTools(readExec) });
+    try {
+      const res = await postChat(s.baseUrl, s.token, {
+        text: '续写本章',
+        workDir: d6WorkDir,
+        chapter: 'manuscript/第2章.md',
+      });
+      const events = await readSse(res);
+      expect(String(events.find((e) => e.event === 'tool-result')!.data.result)).toContain('已进暂存区');
+      expect(readExec).not.toHaveBeenCalled(); // 挂载章可信，跳过校验
+      expect(s.candidates.list()).toHaveLength(1);
+    } finally {
+      await s.close();
+      fs.rmSync(d6WorkDir, { recursive: true, force: true });
+    }
+  });
+
+  it('D6：显式传另一真实章（read_chapter 正常返回）→ 校验通过照常落库', async () => {
+    const d6WorkDir = makeWorkDir();
+    const readExec = vi.fn(async () => ({ content: '正文', frontmatter: { title: '第9章' }, body: '正文' }));
+    const model = stepModel([
+      toolCallResult('tc-d6c', 'stage_chapter_proposal', {
+        proposed: '续写内容',
+        mode: 'append',
+        chapter: 'manuscript/第9章.md',
+      }),
+      textResult(['已送暂存区。']),
+    ]);
+    const s = await startTestServer({ modelForTier: () => model, tools: readChapterTools(readExec) });
+    try {
+      const res = await postChat(s.baseUrl, s.token, {
+        text: '续写第九章',
+        workDir: d6WorkDir,
+        chapter: 'manuscript/第2章.md',
+      });
+      const events = await readSse(res);
+      expect(String(events.find((e) => e.event === 'tool-result')!.data.result)).toContain('已进暂存区');
+      expect(readExec).toHaveBeenCalledTimes(1);
+      const list = s.candidates.list();
+      expect(list).toHaveLength(1);
+      expect(list[0]!.chapter).toBe('manuscript/第9章.md');
+    } finally {
+      await s.close();
+      fs.rmSync(d6WorkDir, { recursive: true, force: true });
+    }
+  });
+
+  it('D6：校验通道判不了（传输错误非 ENOENT/守卫）→ 降级放行保持旧行为', async () => {
+    const d6WorkDir = makeWorkDir();
+    const readExec = vi.fn(async () => {
+      throw new Error('MCP 连接中断');
+    });
+    const model = stepModel([
+      toolCallResult('tc-d6d', 'stage_chapter_proposal', {
+        proposed: '续写内容',
+        mode: 'append',
+        chapter: 'manuscript/第9章.md',
+      }),
+      textResult(['已送暂存区。']),
+    ]);
+    const s = await startTestServer({ modelForTier: () => model, tools: readChapterTools(readExec) });
+    try {
+      const res = await postChat(s.baseUrl, s.token, {
+        text: '续写第九章',
+        workDir: d6WorkDir,
+        chapter: 'manuscript/第2章.md',
+      });
+      const events = await readSse(res);
+      expect(String(events.find((e) => e.event === 'tool-result')!.data.result)).toContain('已进暂存区');
+      expect(s.candidates.list()).toHaveLength(1); // 判不了不拦产出
+    } finally {
+      await s.close();
+      fs.rmSync(d6WorkDir, { recursive: true, force: true });
+    }
+  });
+
+  it('D6：显式传守卫拒绝的路径（非 manuscript 内 .md）→ 引导文本不落库', async () => {
+    const d6WorkDir = makeWorkDir();
+    const readExec = vi.fn(async () => {
+      throw new Error('read_chapter 只允许 manuscript/ 或 .novel/trash/ 内的 .md 文件: 设定.md');
+    });
+    const model = stepModel([
+      toolCallResult('tc-d6e', 'stage_chapter_proposal', {
+        proposed: '续写内容',
+        mode: 'append',
+        chapter: '设定.md',
+      }),
+      textResult(['我去查一下真实结构。']),
+    ]);
+    const s = await startTestServer({ modelForTier: () => model, tools: readChapterTools(readExec) });
+    try {
+      const res = await postChat(s.baseUrl, s.token, {
+        text: '续写',
+        workDir: d6WorkDir,
+        chapter: 'manuscript/第2章.md',
+      });
+      const events = await readSse(res);
+      expect(String(events.find((e) => e.event === 'tool-result')!.data.result)).toContain('目标章节不存在');
+      expect(s.candidates.list()).toHaveLength(0);
+    } finally {
+      await s.close();
+      fs.rmSync(d6WorkDir, { recursive: true, force: true });
     }
   });
 

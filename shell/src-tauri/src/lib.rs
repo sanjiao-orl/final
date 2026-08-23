@@ -14,6 +14,12 @@ use tauri_plugin_updater::UpdaterExt;
 /// 协议契约版本（core 侧自报，docs/decisions/0007）。壳只认这个版本，不匹配即拒接。批一③ 升 v3。
 const EXPECTED_PROTOCOL: u64 = 6;
 
+/// core sidecar 固定监听端口（决策 0016，D10 CSP 收口）：Tauri 2 无运行时 CSP，随机端口迫 connect-src 通配
+/// 全部本地端口；固定端口才能在生产 CSP 里精确放行。与 tauri.conf.json 生产 csp 的 connect-src 绑定同一数值
+///（防漂移测试 csp_pins_core_port——两处事实源漂移即红）。代价：同机双开实例第二个 core 绑不上端口，
+/// core 打 {"event":"fatal"} 提前退出、壳侧置 Failed 显式提示；多作品并发需求落地时再做端口仲裁（重审触发）。
+const CORE_PORT: u16 = 47832;
+
 /// 应用配置文件（app_config_dir 下）。字段可空：空=回落环境变量/缺省。
 const CONFIG_FILE: &str = "config.json";
 
@@ -116,11 +122,14 @@ enum CoreState {
 type Shared = Arc<Mutex<CoreState>>;
 
 /// 纯函数（可单测）：core 退出（stdout 关闭）时依当前状态决定下一状态。
-/// Starting→启动失败（提前退出）；Ready→进程退出需重启；Failed→保持不动（已有更具体错误不覆盖）。
-fn state_on_core_exit(current: &CoreState) -> Option<CoreState> {
+/// Starting→启动失败（提前退出，fatal_message 有值时用 core 自报的具体原因，如固定端口被占用）；
+/// Ready→进程退出需重启；Failed→保持不动（已有更具体错误不覆盖）。
+fn state_on_core_exit(current: &CoreState, fatal_message: Option<&str>) -> Option<CoreState> {
   match current {
     CoreState::Starting => Some(CoreState::Failed(
-      "core 进程提前退出（检查 LLM_* 环境变量）".to_string(),
+      fatal_message
+        .map(str::to_string)
+        .unwrap_or_else(|| "core 进程提前退出（检查 LLM_* 环境变量）".to_string()),
     )),
     CoreState::Ready(_) => Some(CoreState::Failed(
       "core 进程已退出，请重启（core 生命周期）".to_string(),
@@ -636,6 +645,8 @@ fn spawn_core(resource_dir: Option<PathBuf>, work: &Path, prompt_dir: &Path, cfg
       .arg(&core_js)
       .arg("--parent-pid")
       .arg(std::process::id().to_string())
+      .arg("--port")
+      .arg(CORE_PORT.to_string())
       .current_dir(&resources)
       .env("NOVEL_DIR", &novel_dir)
       .env("CORE_RUNTIME_FILE", novel_dir.join("core-runtime.local.json"))
@@ -653,6 +664,8 @@ fn spawn_core(resource_dir: Option<PathBuf>, work: &Path, prompt_dir: &Path, cfg
       .arg(root.join("core").join("src").join("main.ts"))
       .arg("--parent-pid")
       .arg(std::process::id().to_string())
+      .arg("--port")
+      .arg(CORE_PORT.to_string())
       .current_dir(&root)
       .env("NOVEL_DIR", &novel_dir);
   }
@@ -693,10 +706,23 @@ fn watch_core(core: &Arc<CoreProcess>, shared: Shared, work_dir: String) {
   *core.child.lock().expect("watch_core 锁 core.child 失败") = Some(child);
   let core_thread = Arc::clone(core);
   std::thread::spawn(move || {
+    // D10：core 固定端口绑定失败等致命启动错误以 {"event":"fatal","message"} 单行自报（stdout 送达，prod 下 stderr 不可见）；
+    // 暂存消息，EOF 转 Starting→Failed 时用作具体原因。
+    let mut fatal_message: Option<String> = None;
     for line in BufReader::new(stdout).lines() {
       let Ok(line) = line else { break };
       // ready 行含明文 token：不打原始日志，解析后只打脱敏摘要；其余行照常
       if !line.contains("\"event\":\"ready\"") {
+        if line.contains("\"event\":\"fatal\"") {
+          let message = serde_json::from_str::<serde_json::Value>(&line)
+            .ok()
+            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_string));
+          if let Some(message) = message {
+            log::error!("[core] fatal: {message}");
+            fatal_message = Some(message);
+          }
+          continue;
+        }
         log::info!("[core] {line}");
         continue;
       }
@@ -752,7 +778,7 @@ fn watch_core(core: &Arc<CoreProcess>, shared: Shared, work_dir: String) {
     // 不再让僵尸 Ready 挂着壳持续分发已死的 port/token；Failed 保持原有更具体错误。换代防旧 watcher 误报。
     if core_thread.generation.load(Ordering::SeqCst) == my_gen {
       if let Ok(mut guard) = shared.lock() {
-        if let Some(next) = state_on_core_exit(&guard) {
+        if let Some(next) = state_on_core_exit(&guard, fatal_message.as_deref()) {
           *guard = next;
         }
       }
@@ -987,7 +1013,7 @@ mod tests {
     // Starting→Failed（提前退出）
     assert!(
       matches!(
-        state_on_core_exit(&CoreState::Starting),
+        state_on_core_exit(&CoreState::Starting, None),
         Some(CoreState::Failed(ref m)) if m.contains("提前退出")
       ),
       "Starting 退出应转 Failed(提前退出)"
@@ -1003,15 +1029,42 @@ mod tests {
     };
     assert!(
       matches!(
-        state_on_core_exit(&CoreState::Ready(info)),
+        state_on_core_exit(&CoreState::Ready(info), None),
         Some(CoreState::Failed(ref m)) if m.contains("请重启")
       ),
       "Ready 退出应转 Failed(请重启)"
     );
     // Failed→None（保持既有更具体错误，不被覆盖）
     assert!(
-      state_on_core_exit(&CoreState::Failed("更具体错误".to_string())).is_none(),
+      state_on_core_exit(&CoreState::Failed("更具体错误".to_string()), None).is_none(),
       "Failed 态退出不应覆盖原错误"
+    );
+  }
+
+  /// D10：core 以 {"event":"fatal"} 自报的启动失败原因（如固定端口被占用）应原样进 Failed，替代泛泛的「提前退出」。
+  #[test]
+  fn state_on_core_exit_prefers_fatal_message() {
+    assert!(
+      matches!(
+        state_on_core_exit(&CoreState::Starting, Some("端口 47832 已被占用：请关闭已在运行的工作台实例")),
+        Some(CoreState::Failed(ref m)) if m.contains("47832")
+      ),
+      "Starting 退出带 fatal 消息时应转 Failed(具体原因)"
+    );
+  }
+
+  /// D10 防漂移：CORE_PORT（lib.rs spawn --port）与 tauri.conf.json 生产 csp 的 connect-src 精确端口
+  /// 是两处事实源，漂移（改了一处忘了另一处）前端将被 CSP 拦死——此处钉死一致性。
+  #[test]
+  fn csp_pins_core_port() {
+    let conf = include_str!("../tauri.conf.json");
+    assert!(
+      conf.contains(&format!("http://127.0.0.1:{CORE_PORT}")),
+      "tauri.conf.json csp/devCsp 未精确固定 CORE_PORT={CORE_PORT}"
+    );
+    assert!(
+      !conf.contains("127.0.0.1:*") && !conf.contains("localhost:*"),
+      "csp 不得保留通配端口（D10）"
     );
   }
 

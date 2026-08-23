@@ -89,6 +89,33 @@ describe('POST /v1/quality/check 发布前质检', () => {
     }
   });
 
+  it('D7 跨行 quote 紧凑兜底：CRLF 文件 vs LF quote、段间空行差异 → located:true 行号正确', async () => {
+    const crlf = (s: string): string => s.replace(/\n/g, '\r\n');
+    const crlfContent = crlf(CONTENT);
+    const tools = readChapterTool(() => ({
+      content: crlfContent,
+      frontmatter: { title: TITLE },
+      frontmatterRaw: crlf(FRONTMATTER_RAW),
+      body: crlf(BODY),
+    }));
+    const findings = [
+      // 跨行 quote（LF）对 CRLF 文件：精确 indexOf 必未中 → 紧凑命中起始行 8（第二段段首即自身）
+      { kind: 'typo', quote: '他听见远处传来一声铃响。\n刀出鞘的声音很轻。', reason: '跨行复述' },
+      // 段间空行差异：正文两段隔一个空行（\r\n\r\n），quote 只用单个换行 → 紧凑命中行 6（第一段段首）
+      { kind: 'wording', quote: '雾从山坳里漫上来。\n林渡握紧刀柄', reason: '段间空白差异' },
+    ];
+    const s = await startTestServer({ qualityCheck: { modelForTier: () => generateModel([JSON.stringify({ elements: findings })]), tools } });
+    try {
+      const res = await postCheck(s.baseUrl, s.token, { workDir, relPath: REL });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { findings: Array<{ located: boolean; line?: number; paraLine?: number }> };
+      expect(body.findings[0]).toMatchObject({ located: true, line: 8, paraLine: 8 });
+      expect(body.findings[1]).toMatchObject({ located: true, line: 6, paraLine: 6 });
+    } finally {
+      await s.close();
+    }
+  });
+
   it('quote 不在正文（LLM 复述而非逐字摘录）→ located:false，line/paraLine 不出现，不报错', async () => {
     const findings = [
       { kind: 'other', quote: '这句原文里根本没有', reason: '编造的引用也能优雅降级' },

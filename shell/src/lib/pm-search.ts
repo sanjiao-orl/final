@@ -59,6 +59,10 @@ export function captureSelection(doc: PMNode, from: number, to: number): string 
 /**
  * 全文搜索 needle，返回全部命中的 PM 范围（可能 0/1/N 个）。
  * 块间 '\n' 占拼接串 1 字符，对应 PM 里块间隙整体（2 个位置：前块闭合+后块开启）。
+ * 两过匹配（D7「跨行 quote 定位必失配」）：先精确 indexOf（命中即返回，行为不变）；
+ * 未中再紧凑兜底——双侧剥全部空白（\s 含 \u00a0/\u3000，换行一并剥去）后匹配，
+ * 源文件摘录的 needle（带 \r\n 或段间 \n\n）在块间单 '\n' 的拼接串里原本必失配，紧凑后可命中；
+ * 命中偏移经「紧凑偏移→拼接串偏移」映射回 PM 位置。全空白 needle 紧凑后为空串，不兜底。
  */
 export function findTextRanges(doc: PMNode, needle: string): TextRange[] {
   if (!needle) return [];
@@ -84,6 +88,28 @@ export function findTextRanges(doc: PMNode, needle: string): TextRange[] {
     if (hit < 0) break;
     ranges.push({ from: posAt(hit), to: posAt(hit + needle.length) });
     idx = hit + 1;
+  }
+  if (ranges.length > 0) return ranges;
+
+  const compactNeedle = needle.replace(/\s/g, '');
+  if (compactNeedle === '') return [];
+  const compactChars: string[] = [];
+  const flatOf: number[] = [];
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!;
+    if (/\s/.test(ch)) continue;
+    compactChars.push(ch);
+    flatOf.push(i);
+  }
+  const compact = compactChars.join('');
+  let cIdx = 0;
+  for (;;) {
+    const hit = compact.indexOf(compactNeedle, cIdx);
+    if (hit < 0) break;
+    const fromFlat = flatOf[hit]!;
+    const toFlat = flatOf[hit + compactNeedle.length - 1]! + 1;
+    ranges.push({ from: posAt(fromFlat), to: posAt(toFlat) });
+    cIdx = hit + 1;
   }
   return ranges;
 }

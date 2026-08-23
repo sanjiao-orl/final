@@ -22,6 +22,17 @@
 - 验证：`npm run check` 0 错（显式 exit=0，不再管道吞退出码）、`npm test` 全绿 993（core 242 / domain 361 / shell 390，较 975 +18）、`npm run promptfoo` 真实 LLM 4/4（OX_ALPHA_FREE 档，9m55s）。
 - 本批过程中修的仓级问题：promptfoo 进 devDependencies 把 @types/json-schema 提升进根 node_modules/@types，ambient 类型全局生效打挂 core tsc（zod.fromJSONSchema 的 JSONSchema7 比对，v0.2.10 提交起 CI 三连红）——promptfoo 退出 devDependencies 改 `npx -y promptfoo@0.122.0` 钉版本（205623b）；此前「check 全绿」的汇报因 `| tail` 吞了管道退出码而失实，教训已写入验证习惯（显式 echo $?）。
 
+## R4 修复批核销（2026-08-23：优先级清单定档后作者圈定推荐批，六件全结；随本批提交未发版）
+
+- [R4·D6] stage 提案目标章存在性校验：core `chat.ts` stageChapterProposal——AI 显式传 chapter 且 ≠ 挂载章时经 `deps.tools` 调 read_chapter 验存在（`chapterExists` 三态：存在放行 / ENOENT·路径守卫拒绝 → 引导文本不落库、指路 list_structure 与 create_chapter / 工具缺失·超时·未知错误 → 降级放行不拦产出，与数据层注入同纪律）；挂载章回退值（壳侧按 frontmatter id 解析）不校验。配套：chapter 参数 describe 加「不要按编号推算」纪律、chat.md 工作流指引加同款一行（shipped-hashes 追加 7d604dec…）。core 测试 +5（ENOENT 引导/挂载章免校验/真实章放行/传输错误降级/守卫拒绝引导）。
+- [R4·D7] quote 跨行定位三处统一「紧凑匹配」兜底（精确首过不变，未中→双侧剥全部空白 `\s`（含 \u00a0/\u3000、换行）后匹配，命中映射回原行/原位）：domain `ledger.ts locateQuoteLine` 重写（对账器 quoteMissing 误报与问题日志 line 段受益）；core `qualityCheck.ts locateFindings` 惰性紧凑索引（CRLF/LF 与段间空行差异的质检定位受益）；shell `pm-search.ts findTextRanges`（紧凑偏移→拼接串偏移→posAt；跳转/候选 replace 锚定/内联装饰全链受益，locateUnique 唯一性判定不变）。domain +3 / core +1 / shell +6。
+- [R4·D4] 账本切片注入预算闸：`LEDGER_SLICE_INJECT_MAX_CHARS=3000`，超限截断并指路模型自调 ledger_chapter_slice 取全量（此前唯一无预算的注入段，切片随账本条目数无封顶增长）。core 测试 +1。
+- [R4·D10] 固定端口收死 CSP（决策 0016，作者在「固定端口/仅拆 devCsp」两案中定案前者）：`lib.rs CORE_PORT=47832` 两分支 spawn 传 `--port`；core listen 失败向 stdout 打 `{"event":"fatal","message":"端口 47832 已被占用…"}` 退出，壳 watch_core 识别 fatal 行、Starting→Failed 带具体原因；tauri.conf.json 拆 `csp`/`devCsp`——生产 connect-src 精确到 `http://127.0.0.1:47832`，全部通配删除（ws:// 无消费方一并删），dev 另放行 vite `localhost:1420`；Rust 防漂移测试 `csp_pins_core_port` 钉死两处事实源。实证：占住 47832 → core fatal 事件退出码 1；释放 → 重启精确绑回 47832。e2e/promptfoo 自拉 core 不传 --port 照旧随机。cargo 17→19。
+- [R4·D11] 裸联调 DEV 门禁：shell `core.ts connectCore` 非 Tauri 分支 `import.meta.env.DEV` 门禁——生产构建不读 query/localStorage、不弹 prompt（token 落盘面收死）；与 /v1/dev 页 `__CORE_COMMIT__` 门禁同向。shell 测试 +2（生产拒绝/开发放行走到参数解析）。
+- [R4·D9] 字数双口径文档：新建 `docs/reference/02-字数与统计口径.md`——正文口径 countWords（非空白字符，TreeView/章头/日历/章摘要冻结字段）与汉字口径 countCjk（scan_quality 指标/声口指纹分母）的定义、可见面、差异示例（7 vs 14）与事实源坐标；不改旧决策 0004。
+- 验证：`npm run check` 0 错、`npm test` 全绿 1011（core 249 / domain 364 / shell 398，较 993 +18）、`cargo test` 19 绿、`npm run promptfoo` 真实 LLM（写作档 GPT_LUNA 余额不足 CreditsError，以 `LLM_ASSIGN_WRITING=OX_ALPHA_FREE` 覆盖跑，与 v0.2.10 批同口径）。e2e-workflow 未复跑（本批不动其链路：REST 直连不经 stage 工具与 CSP；chat 行为面由 promptfoo 覆盖）。
+- 本批教训：promptfoo 首跑 4 error 全是 LLM 余额不足（内部错误 500），非本批改动——排查路径：手动拉 core 复现抓 stderr，CreditsError 现形；跑行为回归前先看余额。
+
 ## P3（遗留备查）
 
 - [块1遗留] `shell/src/lib/candidates.svelte.test.ts` 是 CRLF/LF 混合行尾文件（历史遗留；编辑时注意保持所在区域一致，git 的 LF→CRLF 提示是既有状态非新引入）。
