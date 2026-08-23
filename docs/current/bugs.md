@@ -6,7 +6,7 @@
 
 来源标注：[0822排查]=2026-08-22 四路全链路排查（core端点/壳调用层/MCP生命周期/skill体系，报告见 `docs/archive/`）；[评审]=2026-08-22 两轮外部评审（工程质量+写作能力，任务单 `final-评审整改任务单.md` 与 `final-前端审查报告.md`）。
 
-## 流程安排核销（2026-08-23：块 2 前置批 A 净化 + 批 B promptfoo 基建，全结；随本批提交未发版）
+## 流程安排核销（2026-08-23：块 2 前置批 A 净化 + 批 B promptfoo 基建，全结；已随 v0.2.10 发布，下版随版归档）
 
 - [评审-流程安排②] marked 输出净化提前（原 R3 缓做 D12，不等 D10-D12 安全整批）：shell 新增 `lib/sanitize.ts`（DOMPurify；白名单=html profile 覆盖 marked GFM 全部产物——表格/任务列表/删除线/代码块，显式 FORBID `style` 防 LLM 经 raw HTML 块注入全应用样式；裸 node 无 DOM 环境调用直接抛错、宁炸不放行）。三入口统一接线：chat 整泡 `renderAiHtml`、碰撞四节（ChatColumn 两处 marked.parse 并成同一条净化路径）、编辑器桥 `markdown.ts mdToHtml`（AI 采纳的 proposed 同为 LLM 输出，Editor innerHTML/insertContentAt 前过闸）。ChatColumn「本地单用户不引入 DOMPurify」旧注释口径废除。CSP 仍是兜底（script-src 'self' 拦内联脚本/外联图片），净化是第一道闸——markup/样式注入从此出不来。shell 测试 +8（sanitize 7：script/iframe/onerror/javascript:/style 剥除 + GFM 产物保留 + md→净化端到端；markdown 注入 1）；jsdom 仅测试 devDep。
 - [评审-流程安排①] promptfoo 行为回归基建（从缓做提级块 2 前置）：`scripts/promptfoo/` 三件套——provider.mjs（promptfoo 0.122 类式自定义 provider：拉起真实 core+domain MCP、.demo-work 临时副本、POST /v1/chat 完整消费 SSE 聚合 `{text, toolCalls, truncated}`；整轮共用一个 core，进程退出自动清理）、promptfooconfig.yaml（首轮三用例：直接指令起草→`stage_chapter_proposal` 且 `write_chapter` 缺席；点名「章节起草」skill→先 `skill_read` 再提案、仍不直写；非正文诉求→零提案零直写）、README.md（运行口径）。root devDep promptfoo ^0.122 + `npm run promptfoo`。定位=本地手动回归（改 prompts 措辞/发版前跑，不进 CI，与 e2e 同口径）；shipped-hashes 只管分发一致，promptfoo 管语义不回归。
