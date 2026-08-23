@@ -3,7 +3,7 @@
 // 测试间会话独立（每次 POST 不带 sessionId，core 各建新会话，互不读对方消息）。
 // 环境要求与 e2e-workflow 同口径：LLM_BASE_URL / LLM_API_KEY / LLM_MODEL。
 import { spawn } from 'node:child_process';
-import { cpSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,6 +29,9 @@ async function boot() {
   const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'novel-promptfoo-'));
   const workDirNative = path.join(tmpDir, 'work');
   cpSync(path.join(repoRoot, '.demo-work'), workDirNative, { recursive: true });
+  // 测试 fixture（只进临时副本，不改仓库 .demo-work）：演示书仅一章完整正文（第2章 79 字），
+  // 不满足「声口建档」skill 的三章样本门槛——补足第2章正文并预建第3章，让建档用例走完整 happy path。
+  seedFixtureChapters(workDirNative);
   const workDir = workDirNative.replaceAll('\\', '/');
 
   // 与 e2e-workflow 同模式：不经 npx（Windows EINVAL），直接用 node 跑 tsx cli 入口。
@@ -76,6 +79,18 @@ function shutdown() {
   try { state.child.kill('SIGTERM'); } catch { /* 已退出 */ }
   try { rmSync(state.tmpDir, { recursive: true, force: true }); } catch { /* 忽略清理失败 */ }
   state = null;
+}
+
+/** 建档样本 fixture：第2章补正文段、预建第3章（口径与第一章的林渡/铜钱线一致）。 */
+function seedFixtureChapters(workDirNative) {
+  const vol = path.join(workDirNative, 'manuscript', '第一卷·风起');
+  const ch2 = path.join(vol, '第2章·山道.md');
+  try {
+    appendFileSync(ch2, '\n\n日头爬到头顶时，林渡在道旁歇脚。货郎告诉他，山下的集子上最近有人专收旧铜钱，给价是市价的三倍。他捏着怀里那枚沉甸甸的铜钱，没有接话。\n\n「小兄弟，你那枚要是出手，我引荐。」货郎压低声音。\n\n「不卖。」林渡起身，继续往西走。催行的日头把影子压得很短，他没有回头。\n', 'utf8');
+  } catch { /* 演示书结构变了就跳过（fixture 失败由断言暴露） */ }
+  try {
+    writeFileSync(path.join(vol, '第3章·客栈.md'), '---\ntitle: 第3章·客栈\nstatus: 草稿\npov: 林渡\n---\n\n入夜前，林渡到了镇子。客栈的伙计多看了他两眼——一个背着包袱的少年，独自走了三天的山路。\n\n他要了一间最便宜的房，把铜钱压在枕头底下。半夜里，他听见隔壁有人低声争执，提到「青崖山」三个字。\n\n林渡睁开眼，没有动。窗纸上映着晃动的人影，过了一阵，脚步声往楼下去了。\n\n他摸了摸枕下的铜钱，比白天又沉了些。\n', 'utf8');
+  } catch { /* 同上 */ }
 }
 
 /** 完整消费 SSE 流，返回事件数组 [{ event, data }]（与 e2e-workflow 同一套解析）。 */

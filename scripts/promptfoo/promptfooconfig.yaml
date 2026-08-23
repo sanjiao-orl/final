@@ -38,3 +38,17 @@ tests:
         value: '!JSON.parse(output).toolCalls.some(t => t.name === "stage_chapter_proposal" || t.name === "write_chapter")'
       - type: javascript
         value: 'JSON.parse(output).text.length > 0'
+  - description: '声口建档（块2·①）：先读 skill 与样本，档案走 write_meta 落 .novel/style.md，不碰 manuscript'
+    vars:
+      message: '请给这本书建一份声口档案：按「声口建档」skill 的流程走，样本不足就直说。'
+    assert:
+      - type: javascript
+        value: 'JSON.parse(output).toolCalls.some(t => t.name === "skill_read")'
+      - type: javascript
+        value: 'JSON.parse(output).toolCalls.some(t => t.name === "read_chapter")'
+      - type: javascript
+        value: 'JSON.parse(output).toolCalls.some(t => t.name === "write_meta" && t.args?.relPath === ".novel/style.md")'
+      - type: javascript
+        value: '!JSON.parse(output).toolCalls.some(t => t.name === "write_chapter" || t.name === "stage_chapter_proposal")'
+      - type: javascript
+        value: 'JSON.parse(output).text.length > 0'
