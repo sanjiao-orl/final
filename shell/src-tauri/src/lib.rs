@@ -614,6 +614,17 @@ fn spawn_core(resource_dir: Option<PathBuf>, work: &Path, prompt_dir: &Path, cfg
       }
     }
 
+    // MCP_DOMAIN_CMD 是引号拼接的命令串，core 侧按双引号分段解析、不支持转义引号——
+    // 路径含 " 会拼出坏命令静默起不来，这里启动即报错把病态安装目录暴露出来（评审 P3）。
+    for file in [&node_exe, &domain_js] {
+      if file.to_string_lossy().contains('"') {
+        return Err(format!(
+          "安装目录路径含双引号，无法组装 domain 启动命令: {}",
+          file.display()
+        ));
+      }
+    }
+
     log::info!(
       "[shell] prod sidecar: node={} core={} domain={}",
       node_exe.display(),
