@@ -111,6 +111,22 @@ describe('core HTTP 服务', () => {
     }
   });
 
+  it('Bearer token 校验三态：长度不等、等长相异均 401，正确 token 放行', async () => {
+    const s = await startTestServer();
+    try {
+      // 长度不等（timingSafeEqual 前短路 false）
+      expect((await fetch(`${s.baseUrl}/v1/llm`, { headers: { Authorization: `Bearer ${s.token}x` } })).status).toBe(401);
+      expect((await fetch(`${s.baseUrl}/v1/llm`, { headers: { Authorization: `Bearer ${s.token.slice(0, -1)}` } })).status).toBe(401);
+      // 等长相异
+      const wrong = 'x'.repeat(s.token.length);
+      expect((await fetch(`${s.baseUrl}/v1/llm`, { headers: { Authorization: `Bearer ${wrong}` } })).status).toBe(401);
+      // 相等
+      expect((await fetch(`${s.baseUrl}/v1/llm`, { headers: { Authorization: `Bearer ${s.token}` } })).status).toBe(200);
+    } finally {
+      await s.close();
+    }
+  });
+
   it('/v1/dev 免鉴权返回内嵌联调页，不内嵌 token 且提供 token 输入框', async () => {
     const s = await startTestServer();
     try {

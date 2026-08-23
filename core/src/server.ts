@@ -1,5 +1,6 @@
 // 模块职责：本地 HTTP 服务——路由（协议版本化：全部业务路由在 /v1/ 前缀下，契约见 docs/decisions/0007）、
 // Bearer 鉴权（/v1/health 豁免；/v1/dev 免鉴权但受 devEnabled 门禁——prod bundle 下关闭回 404）、CORS；业务委托给 chat 管道与 session-store。
+import { timingSafeEqual } from 'node:crypto';
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { asSchema, type FlexibleSchema } from 'ai';
 import { z } from 'zod';
@@ -140,8 +141,8 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
     return;
   }
 
-  // 其余端点一律校验 Authorization: Bearer
-  if (req.headers.authorization !== `Bearer ${deps.token}`) {
+  // 其余端点一律校验 Authorization: Bearer（评审T8：timingSafeEqual 常量时间比较，防时序侧信道）
+  if (!bearerTokenMatches(req.headers.authorization, deps.token)) {
     writeJson(res, 401, { error: '未授权：需要 Authorization: Bearer <token>' }, req.headers.origin);
     return;
   }
@@ -303,6 +304,20 @@ function localDate(): string {
   const now = new Date();
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
+/**
+ * Bearer token 常量时间比较：先比对 "Bearer " 前缀，再对凭证部分做 timingSafeEqual。
+ * timingSafeEqual 要求两 Buffer 等长，长度不等直接 false（长度本身可泄露，但前缀已定长、
+ * 长度不等时短路不会泄露凭证内容）。
+ */
+function bearerTokenMatches(authorization: string | undefined, expected: string): boolean {
+  const prefix = 'Bearer ';
+  if (!authorization || !authorization.startsWith(prefix)) return false;
+  const provided = Buffer.from(authorization.slice(prefix.length), 'utf8');
+  const wanted = Buffer.from(expected, 'utf8');
+  if (provided.length !== wanted.length) return false;
+  return timingSafeEqual(provided, wanted);
 }
 
 /**
