@@ -12,14 +12,6 @@
 
 **转参考 2 条**：settings Tauri invoke 无超时（疑似低概率，未实证）；导出 vs 扫描容错哲学相反（扫描侧已改 warn+skipped，导出侧整体抛错属有意，口径是否统一留待真实误报驱动）。
 
-## 待排批（2026-08-22 外部评审登记，未修）
-
-### P3（[评审] 前端审查报告登记）
-
-- [评审] `shell/src/lib/core.ts:532-543`：工具调用 Failed 终态仍轮询满 15s 才报错。
-- [评审] `shell/src-tauri/src/lib.rs:632-635`：MCP_DOMAIN_CMD 引号拼接，路径含 `"` 会坏（安装目录可控，实际风险低）。
-- [评审] 发布状态 pill 循环点击无确认，易误触。
-
 ## R1 核销（2026-08-23 评审修复批：T1-T8 全结，T15 随核销）
 
 - [评审T1] frontmatter title 安全序列化：新增 `yamlSafeScalar`（含 YAML 特殊字符或首尾空白时走 JSON 双引号+转义，yaml 库读回 round-trip 不丢；plain 安全标题落盘字节不变），createChapter/setFrontmatterTitle/chapterSetBlueprint 三处写 fm 统一接入；assertUserTitle 口径本就一致零改动。domain 测试 +5。
@@ -59,6 +51,15 @@
 
 - [作者实测] 工具卡「结果」显示裸 MCP 信封：domain 工具统一 `jsonResult` 序列化（`{content:[{type:'text', text:'<JSON 字符串>'}]}`，无 outputSchema），core chat SSE `tool-result` 原样转发 `part.output`，ToolCard 直接 `JSON.stringify` 渲染——前端看到带 `\n` 转义的信封全文。修复：shell 新增 `unwrapMcpEnvelope`（识别信封→拼接 text 段→尝试 JSON.parse；非信封原样返回，宁漏勿错），ToolCard formatShort/formatFull/isTruncated 三处接入。同根因揪出隐藏 bug：`trashPathOf` 直读 `result.trashPath`，真实 MCP 路径下永远扑空——拒绝删章的自动找回静默失效、落进「未找到 trash 副本」分支（既有单测 mock 的是已解包形态所以测不出来），已一并接入解包。壳测试 +5（unwrap 3 + 信封找回 1 + 触顶 1）。
 - [作者实测] chat 输出触顶（finishReason=length）零信号：core 流循环忽略 finish 事件，半截回复照常落库发 done，作者观感「发不出来、催几轮才自己压缩发出来」。修复：core 捕获末步 finishReason，='length' 时 done 带 `truncated: true`（加法不改契约）；壳 onDone 收到 truncated 弹 notice +「让它继续」按钮（复用 T12 预填机制，预填「继续+分段输出」引导）。core 测试 +2（length/stop 两态）。续写端点本就有 MAX_OUTPUT_TOKENS=1200 上限，chat 不设上限靠 provider 默认、触顶靠本标记可见。
+
+## 评审余量核销（2026-08-23：外部评审验收保留意见 2/3 修复，待排批 P3 三条全结）
+
+- [评审] waitCoreInfo Failed 终态快速失败（原坐标 core.ts:532-543 已漂移至 waitCoreInfo）：core_info 对 CoreState::Failed 回「core sidecar 启动失败: …」，该态仅 restart_core 能复位、轮询不会自愈——识别此前缀立即抛错，不再陪跑满 15s（shell/src/lib/core.ts）。
+- [评审] MCP_DOMAIN_CMD 引号拼接：core 侧 splitCommandLine 按双引号分段、不支持转义引号，路径含 `"` 会拼出坏命令静默起不来——lib.rs spawn_core 对 node/domain 两路径含 `"` 启动即报错（「安装目录路径含双引号，无法组装 domain 启动命令」），把病态安装目录暴露出来；转义方案因 Windows 路径尾部 `\` 与 `\"` 歧义弃用。
+- [评审] 发布状态 pill 两段式确认：第一击进入确认态（pill 显「确认→已发布？」、边框强调、dot 预览目标态色），3s 内再击才流转；超时/切章（$effect 随 relPath 复位）自动取消。复刻 T14 yolo 两段式口径。
+- [评审保留意见2] unwrapMcpEnvelope 多 text 段边界：拼接解析失败时逐段兜底——恰一段为 JSON 对象返回该对象（trashPathOf 字段读取不静默失效）、多段均对象返回数组、其余维持拼接文本。shell 测试 +2。
+- [评审保留意见1] e2e-workflow 12 步真实 LLM 已复跑成功（作者 2026-08-23 确认），块 1 以来的端到端回归欠账清零；现状.md 验证基线同步。
+- 验证：`npm run check` 0 错（六处一致 v0.2.9）、`npm test` 全绿 967（core 240 / domain 347 / shell 380，较 965 +2）、`cargo test` 17 绿。
 
 ## P3（遗留备查）
 
