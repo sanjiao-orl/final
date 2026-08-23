@@ -276,6 +276,28 @@ class SettingsStore {
     else delete this.appLlmAssign[purpose];
   }
 
+  /**
+   * 用途分配下拉可选项：配置预设 ∪ llmStatus.presets 中未被配置预设覆盖的项
+   * （归一化后同 id 去重，与组件只读卡片的过滤口径一致）。环境变量来源的项标注来源。
+   */
+  get assignablePresets(): Array<{ id: string; label: string; fromEnv: boolean }> {
+    const out: Array<{ id: string; label: string; fromEnv: boolean }> = [];
+    const seen = new Set<string>();
+    for (const p of this.appLlmPresets) {
+      const nid = normalizePresetId(p.id);
+      if (!nid || seen.has(nid)) continue;
+      seen.add(nid);
+      out.push({ id: p.id, label: p.name.trim() || p.id, fromEnv: false });
+    }
+    for (const p of this.llmStatus?.presets ?? []) {
+      const nid = normalizePresetId(p.id);
+      if (!nid || seen.has(nid)) continue;
+      seen.add(nid);
+      out.push({ id: p.id, label: `${p.id}（环境变量）`, fromEnv: true });
+    }
+    return out;
+  }
+
   // ---------- 应用级配置（config.json，Tauri 侧持久化） ----------
 
   init(client: CoreClient): void {
@@ -348,7 +370,11 @@ class SettingsStore {
     };
     for (const purpose of ['writing', 'background', 'review'] as const) {
       const pid = this.appLlmAssign[purpose];
-      if (pid && !ids.has(pid)) {
+      // assign 可指向 配置预设 ∪ llmStatus.presets（各自归一化后比对）：环境变量预设虽不在
+      // config.json，经 Tauri 注入后 core 一样能解析。llmStatus 未加载时保持原口径（只认配置预设）。
+      const allowed = new Set<string>([...ids].map((id) => normalizePresetId(id)));
+      for (const p of this.llmStatus?.presets ?? []) allowed.add(normalizePresetId(p.id));
+      if (pid && !allowed.has(normalizePresetId(pid))) {
         this.appError = `${purposeNames[purpose]}指向不存在的预设：${pid}`;
         return false;
       }

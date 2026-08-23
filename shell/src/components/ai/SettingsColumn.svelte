@@ -159,8 +159,8 @@
         onchange={(e) => settings.setLlmAssign(a.purpose, e.currentTarget.value || undefined)}
       >
         <option value="">未指定 → 实际用 {settings.llmStatus?.effective[a.purpose]?.model ?? '未配置'}</option>
-        {#each settings.appLlmPresets as p (p.id)}
-          <option value={p.id}>{p.name || p.id}</option>
+        {#each settings.assignablePresets as p (p.id)}
+          <option value={p.id}>{p.label}</option>
         {/each}
       </select>
     </div>
@@ -185,22 +185,26 @@
 
 <div class="group">
   <div class="label">模 型 配 置（兼容回退）</div>
-  <div class="r-desc">以下四字段仅在「无任何预设」时生效：写作档→LLM_MODEL，后台/审阅档→LLM_MODEL_CHEAP（缺省同写作档）。已配置预设时忽略以下字段。</div>
+  {#if settings.llmStatus?.mode === 'presets'}
+    <div class="r-desc">当前已有预设生效，以下四个字段被 core 忽略（留空即可，无需填写）。</div>
+  {:else}
+    <div class="r-desc">以下四字段仅在「无任何预设」时生效：写作档→LLM_MODEL，后台/审阅档→LLM_MODEL_CHEAP（缺省同写作档）。已配置预设时忽略以下字段。</div>
+  {/if}
   <div class="row">
     <div class="r-label">Base URL</div>
-    <input class="text" placeholder={ph(settings.configStatus?.baseUrl, '回落环境变量 LLM_BASE_URL')} bind:value={settings.appBaseUrl} />
+    <input class="text" placeholder={ph(settings.configStatus?.baseUrl, '回落环境变量 LLM_BASE_URL')} bind:value={settings.appBaseUrl} disabled={settings.llmStatus?.mode === 'presets'} />
   </div>
   <div class="row">
     <div class="r-label">API Key</div>
-    <input class="text" type="password" placeholder={ph(settings.configStatus?.apiKey, '回落环境变量 LLM_API_KEY')} bind:value={settings.appApiKey} />
+    <input class="text" type="password" placeholder={ph(settings.configStatus?.apiKey, '回落环境变量 LLM_API_KEY')} bind:value={settings.appApiKey} disabled={settings.llmStatus?.mode === 'presets'} />
   </div>
   <div class="row">
     <div class="r-label">写作档模型</div>
-    <input class="text" placeholder={ph(settings.configStatus?.model, '回落环境变量 LLM_MODEL')} bind:value={settings.appModel} />
+    <input class="text" placeholder={ph(settings.configStatus?.model, '回落环境变量 LLM_MODEL')} bind:value={settings.appModel} disabled={settings.llmStatus?.mode === 'presets'} />
   </div>
   <div class="row">
     <div class="r-label">后台档模型（便宜）</div>
-    <input class="text" placeholder={ph(settings.configStatus?.modelCheap, '回落环境变量 LLM_MODEL_CHEAP，再缺省同写作档')} bind:value={settings.appModelCheap} />
+    <input class="text" placeholder={ph(settings.configStatus?.modelCheap, '回落环境变量 LLM_MODEL_CHEAP，再缺省同写作档')} bind:value={settings.appModelCheap} disabled={settings.llmStatus?.mode === 'presets'} />
   </div>
 </div>
 

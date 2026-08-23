@@ -327,6 +327,73 @@ describe('LLM core 生效态', () => {
     expect(settings.appError).toContain('重启 core 失败');
   });
 
+  it('saveAppConfig：assign 指向环境变量预设 id 放行（llmStatus.presets 口径）', async () => {
+    // 用户场景：GPT_LUNA 等预设来自 OS 环境变量，config.json 预设为空，assign 直接指向 env 预设 id。
+    settings.llmStatus = {
+      mode: 'presets',
+      presets: [
+        { id: 'GPT_LUNA', baseUrl: 'https://a/v1', model: 'gpt-luna-m', apiKeyMasked: 'sk-1•••' },
+        { id: 'DEEPSEEK_FLASH', baseUrl: 'https://b/v1', model: 'ds-flash', apiKeyMasked: 'sk-2•••' },
+      ],
+      assign: {},
+      effective: { writing: {}, background: {}, review: {} },
+    };
+    settings.appLlmAssign = { writing: 'GPT_LUNA', background: 'DEEPSEEK_FLASH' };
+    const invoke = mockTauri(async (cmd) => {
+      if (cmd === 'write_config') return undefined;
+      if (cmd === 'config_status') return STATUS;
+      throw new Error(`unexpected ${cmd}`);
+    });
+    expect(await settings.saveAppConfig()).toBe(true);
+    expect(invoke).toHaveBeenCalledWith('write_config', expect.anything());
+    expect(settings.appError).toBeNull();
+  });
+
+  it('saveAppConfig：assign 指向归一化等值的配置预设 id 也放行（大小写/连字符归一化）', async () => {
+    settings.appLlmPresets = [
+      { id: 'MAIN-WRITER-1', name: '主笔', baseUrl: 'https://w.example/v1', apiKey: 'sk-w', model: 'writer-m' },
+    ];
+    settings.appLlmAssign = { writing: 'main_writer_1' }; // 归一化后与 MAIN-WRITER-1 等值
+    mockTauri(async (cmd) => {
+      if (cmd === 'write_config') return undefined;
+      if (cmd === 'config_status') return STATUS;
+      throw new Error(`unexpected ${cmd}`);
+    });
+    expect(await settings.saveAppConfig()).toBe(true);
+    expect(settings.appError).toBeNull();
+  });
+
+  it('saveAppConfig：llmStatus 未加载时保持原口径——assign 指向不存在 id 仍拒绝', async () => {
+    // beforeEach 已置 llmStatus=null；env 风格 id 在无 llmStatus 时不得误放行
+    settings.appLlmAssign = { writing: 'OX_ALPHA_FREE' };
+    mockTauri(async (cmd) => {
+      if (cmd === 'write_config') return undefined;
+      throw new Error(`unexpected ${cmd}`);
+    });
+    expect(await settings.saveAppConfig()).toBe(false);
+    expect(settings.appError).toContain('指向不存在的预设');
+  });
+
+  it('assignablePresets：配置预设 ∪ 未被覆盖的环境变量预设，同 id 归一化去重并标注来源', async () => {
+    settings.appLlmPresets = [
+      { id: 'gpt-luna', name: '露娜主笔', baseUrl: 'https://c/v1', apiKey: 'sk-c', model: 'gpt-luna-c' },
+    ];
+    settings.llmStatus = {
+      mode: 'presets',
+      presets: [
+        { id: 'GPT_LUNA', baseUrl: 'https://e/v1', model: 'gpt-luna-e', apiKeyMasked: 'sk-e•••' }, // 与配置预设同 id（归一化），去重
+        { id: 'DEEPSEEK_FLASH', baseUrl: 'https://e2/v1', model: 'ds-flash', apiKeyMasked: 'sk-f•••' }, // 仅环境变量
+      ],
+      assign: {},
+      effective: { writing: {}, background: {}, review: {} },
+    };
+    const opts = settings.assignablePresets;
+    expect(opts).toEqual([
+      { id: 'gpt-luna', label: '露娜主笔', fromEnv: false },
+      { id: 'DEEPSEEK_FLASH', label: 'DEEPSEEK_FLASH（环境变量）', fromEnv: true },
+    ]);
+  });
+
   it('normalizePresetId：与 core 统一为大写下划线', () => {
     expect(normalizePresetId('MAIN-WRITER-AB12')).toBe('MAIN_WRITER_AB12');
     expect(normalizePresetId(' main writer ab12 ')).toBe('MAIN_WRITER_AB12');
