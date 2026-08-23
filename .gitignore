@@ -14,3 +14,4 @@ shell/src-tauri/target/
 .w3-accident-backup/
 prototype/.shot-*.png
 prototype/.wb-*.json
+.zcode/
