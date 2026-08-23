@@ -1,6 +1,6 @@
 {
   "name": "shell",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "private": true,
   "type": "module",
   "description": "小说写作工作台的 Tauri 壳（Tauri 2 + Svelte 5 + TipTap，纯渲染零产品逻辑，数据面走 core sidecar）",
