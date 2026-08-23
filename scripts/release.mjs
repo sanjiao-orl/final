@@ -228,14 +228,23 @@ function buildEnv() {
   return env;
 }
 
+// 从 origin 远端 URL 解析目标仓（owner/repo）；解析失败打印醒目警告并回落硬编码默认仓，
+// 提醒操作者 latest.json 下载地址与 gh release 目标都跟着它走，避免发错仓还不自知。
+// 显式 --repo 时 main 不会调用本函数，故警告只在静默回落路径出现。
 function detectRepo() {
+  const fallback = 'sanjiao-orl/final';
   const res = runCapture('git', ['remote', 'get-url', 'origin'], { cwd: root });
-  if (res.status === 0) {
-    const url = res.stdout.trim();
-    const m = url.match(/github\.com[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?$/);
-    if (m) return `${m[1]}/${m[2]}`;
+  if (res.status !== 0) {
+    console.error(`[release] [警告] git remote get-url origin 失败（退出码 ${res.status}${res.stderr.trim() ? `: ${res.stderr.trim()}` : ''}），将使用默认目标仓 ${fallback}——如非预期请用 --repo owner/repo 显式指定`);
+    return fallback;
   }
-  return 'sanjiao-orl/final';
+  const url = res.stdout.trim();
+  const m = url.match(/github\.com[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?$/);
+  if (!m) {
+    console.error(`[release] [警告] 无法从 origin URL 解析 GitHub owner/repo（url: ${url || '<空>'}），将使用默认目标仓 ${fallback}——如非预期请用 --repo owner/repo 显式指定`);
+    return fallback;
+  }
+  return `${m[1]}/${m[2]}`;
 }
 
 // 版本文件：发版半途中止（如 build 失败）会在工作树留下这些文件的版本号改动；重跑时 syncVersions 会
