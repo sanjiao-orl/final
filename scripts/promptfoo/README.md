@@ -9,7 +9,7 @@
 npm run promptfoo
 ```
 
-等价于 `npx promptfoo eval -c scripts/promptfoo/promptfooconfig.yaml`。结果表在终端；加 `--ui` 起本地网页看明细。
+`npm run promptfoo` = `npx -y promptfoo@0.122.0 eval -c scripts/promptfoo/promptfooconfig.yaml`（版本钉死在脚本里；首次运行 npx 会联网下载到缓存）。**promptfoo 不进 devDependencies**：它是重依赖 CLI，安装会把 `@types/json-schema` 等提升进根 `node_modules/@types`，ambient 类型全局生效曾把 core 的 `tsc` 打挂（2026-08-23 实证，CI 三连红后修复）——升版本就改脚本里的钉死值。
 
 ## 环境变量（与 core/scripts/e2e-workflow.mjs 同口径）
 
