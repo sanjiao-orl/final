@@ -199,6 +199,32 @@ describe('CoreClient.rewriteStream（workDir 透传）', () => {
     const body = JSON.parse(String(callArgs?.body)) as Record<string, unknown>;
     expect(body).toMatchObject({ workDir: 'C:/works/demo', original: '旧文', instruction: '润色' });
   });
+
+  it('块2·④：done 带 voice 时 onDone 收到 voice；不带时字段缺席（续写/改写同款管道）', async () => {
+    const deviation = {
+      deltas: { dialogueRatio: { base: 0.4, out: 0.1 }, sentenceLenMean: { base: 10, out: 22 }, shortSentenceRatio: { base: 0.5, out: 0.3 }, longSentenceRatio: { base: 0, out: 0.3 }, gramOverlap: { base: 8, out: 8 } },
+      flags: ['对白占比 40% → 10%'],
+    };
+    globalThis.fetch = vi.fn().mockImplementationOnce(() =>
+      Promise.resolve(new Response(`event: done\ndata: ${JSON.stringify({ text: '产出', voice: deviation })}\n\n`, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      })),
+    ).mockImplementationOnce(() =>
+      Promise.resolve(new Response('event: done\ndata: {"text":"产出2"}\n\n', {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      })),
+    );
+    const c = new CoreClient('http://127.0.0.1:1', 't');
+    let withVoice: { text: string; voice?: typeof deviation } | undefined;
+    let withoutVoice: { text: string; voice?: typeof deviation } | undefined;
+    await c.continueText({ context: '尾巴' }, { onText: () => undefined, onDone: (d) => (withVoice = d) });
+    await c.continueText({ context: '尾巴' }, { onText: () => undefined, onDone: (d) => (withoutVoice = d) });
+    expect(withVoice).toMatchObject({ text: '产出', voice: deviation });
+    expect(withoutVoice).toMatchObject({ text: '产出2' });
+    expect(withoutVoice!.voice).toBeUndefined();
+  });
 });
 
 describe('CoreClient.posture / review persona（决策 0010）', () => {

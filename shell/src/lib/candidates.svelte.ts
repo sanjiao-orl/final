@@ -11,6 +11,9 @@ import { ISSUE_LOG_DEFAULT } from './paths.js';
 
 export const CONTINUE_CONTEXT_CHARS = 3000;
 
+/** 暂存候选的壳侧展示扩展（不持久化，core sqlite 只有 Candidate 本体）：声口偏离提示（块2·④ 仪表，生成时刻快照，刷新列表即失）。 */
+export type StagedCandidate = Candidate & { voiceNote?: string[] };
+
 /** ledger_diagnostics 返回的机械诊断结果（契约镜像，只消费 findings 计数）。 */
 interface LedgerDiagnosticsNotice {
   findings?: Array<{ severity: string; code?: string; message?: string; category?: string }>;
@@ -27,7 +30,7 @@ interface LedgerReconcileNotice {
 
 export class CandidatesStore {
   /** 待处理候选（status=pending，按更新时间倒序）。 */
-  items = $state<Candidate[]>([]);
+  items = $state<StagedCandidate[]>([]);
   /** 抽屉里勾选的候选 id。 */
   selected = $state<Set<string>>(new Set());
   /** 左栏暂存 tab 是否打开。 */
@@ -42,7 +45,7 @@ export class CandidatesStore {
   /** 全览视图（弹出展示全部候选：列表/双栏对照/批量操作/快照还原）。 */
   overviewOpen = $state(false);
   /** 全览视图数据源：全部状态的候选（status 不限，新在前）。 */
-  allItems = $state<Candidate[]>([]);
+  allItems = $state<StagedCandidate[]>([]);
   /** 装饰插件刷新信号：items 任何变化递增（Editor 监听它重建删除线装饰）。 */
   revision = $state(0);
   pendingCount = $derived(this.items.length);
@@ -54,7 +57,7 @@ export class CandidatesStore {
     this.client = client;
   }
 
-  private setItems(list: Candidate[]): void {
+  private setItems(list: StagedCandidate[]): void {
     this.items = list;
     this.revision++;
   }
@@ -141,12 +144,13 @@ export class CandidatesStore {
     this.continueAbort = ac;
     let text = '';
     const failure: { err: Error | null } = { err: null };
+    const voice: { note: string[] | null } = { note: null };
     try {
       await this.client.continueText(
         { context, instruction: '续写', ...(work.workDir ? { workDir: work.workDir } : {}) },
         {
           onText: (d) => { text += d; },
-          onDone: ({ text: done }) => { text = done; },
+          onDone: ({ text: done, voice: v }) => { text = done; voice.note = v?.flags?.length ? v.flags : null; },
           onError: (err) => { failure.err = err; },
         },
         ac.signal,
@@ -155,7 +159,7 @@ export class CandidatesStore {
       if (failure.err) throw failure.err;
       if (!text.trim()) return false;
       const r = await this.client.createCandidate({ chapter: chapter.relPath, original: '', proposed: text, instruction: '续写', kind: 'append' });
-      this.setItems([r.candidate, ...this.items]);
+      this.setItems([{ ...r.candidate, ...(voice.note ? { voiceNote: voice.note } : {}) }, ...this.items]);
       return true;
     } catch (err) {
       if (!ac.signal.aborted) work.error = `AI 续写失败：${err instanceof Error ? err.message : String(err)}`;
@@ -190,6 +194,7 @@ export class CandidatesStore {
   ): Promise<boolean> {
     let text = '';
     const failure: { err: Error | null } = { err: null }; // 闭包赋值，TS 收窄不跨闭包，用对象持有
+    const voice: { note: string[] | null } = { note: null };
     this.generating = { chapter, original, instruction: instruction.trim(), text: '' };
     this.stagingTab = true; // 左栏实时展示生成状态
     const ac = new AbortController();
@@ -205,8 +210,9 @@ export class CandidatesStore {
             if (this.generating) this.generating = { ...this.generating, text };
             onProgress?.(text);
           },
-          onDone: ({ text: t }) => {
+          onDone: ({ text: t, voice: v }) => {
             text = t;
+            voice.note = v?.flags?.length ? v.flags : null;
           },
           onError: (err) => {
             failure.err = err;
@@ -218,7 +224,7 @@ export class CandidatesStore {
       this.generating = null;
       if (ac.signal.aborted) return false; // 已取消：迟到完成也不落候选、不报错
       const r = await this.client.createCandidate({ chapter, original, proposed: text, instruction });
-      this.setItems([r.candidate, ...this.items]);
+      this.setItems([{ ...r.candidate, ...(voice.note ? { voiceNote: voice.note } : {}) }, ...this.items]);
       return true;
     } catch (err) {
       this.generating = null;
@@ -451,6 +457,7 @@ export class CandidatesStore {
         if (ac.signal.aborted) break; // 取消：剩余条目不再发起，已完成条目保留
         let text = '';
         const failure: { err: Error | null } = { err: null };
+        const voice: { note: string[] | null } = { note: null };
         try {
           await this.client.rewriteStream(
             { original: c.original, instruction: `上一版改写：\n${c.proposed}\n\n整改要求：${ask}`, ...(work.workDir ? { workDir: work.workDir } : {}), ...(persona ? { persona } : {}) },
@@ -465,8 +472,9 @@ export class CandidatesStore {
                   this.allItems = this.allItems.map((i) => (i.id === c.id ? next : i));
                 }
               },
-              onDone: ({ text: t }) => {
+              onDone: ({ text: t, voice: v }) => {
                 text = t;
+                voice.note = v?.flags?.length ? v.flags : null;
               },
               onError: (err) => {
                 failure.err = err;
@@ -481,7 +489,7 @@ export class CandidatesStore {
             instruction: `${c.instruction || '润色'} / 整改：${ask}`,
           });
           // 本地即时更新（流式期间装饰已随旧 proposed 显示，整改后刷新）
-          this.setItems(this.items.map((i) => (i.id === c.id ? { ...i, proposed: text, instruction: `${c.instruction || '润色'} / 整改：${ask}` } : i)));
+          this.setItems(this.items.map((i) => (i.id === c.id ? { ...i, proposed: text, instruction: `${c.instruction || '润色'} / 整改：${ask}`, ...(voice.note ? { voiceNote: voice.note } : {}) } : i)));
         } catch (err) {
           // 单条失败收集进汇总红条，继续处理其余条目
           failures.push(`第 ${n + 1} 条整改失败：${err instanceof Error ? err.message : String(err)}`);

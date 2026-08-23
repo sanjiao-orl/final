@@ -588,6 +588,36 @@ describe('CandidatesStore · 触发式续写', () => {
     expect(createCandidate).toHaveBeenCalledWith({ chapter: '章节A.md', original: '', proposed: '续写文本', instruction: '续写', kind: 'append' });
   });
 
+  it('块2·④：done 带 voice 时候选项带 voiceNote（flags 空或缺失不带）', async () => {
+    const flags = ['对白占比 40% → 10%', '平均句长 10 → 24 字'];
+    let release!: () => void;
+    const continueText = vi.fn().mockImplementation((_body: unknown, h: { onText: (text: string) => void; onDone?: (done: { text: string; voice?: { flags: string[] } }) => void }) =>
+      new Promise<void>((resolve) => {
+        release = () => { h.onDone?.({ text: '续写文本', voice: { flags } }); resolve(); };
+      }),
+    );
+    const createCandidate = vi.fn().mockResolvedValue({ candidate: { ...CAND, kind: 'append', original: '', proposed: '续写文本', instruction: '续写' } });
+    const store = new CandidatesStore();
+    store.init(clientOf({ continueText, createCandidate }));
+    work.init(clientOf(), 'C:/works/demo');
+    work.current = { relPath: '章节A.md', title: '章节A', frontmatter: {}, frontmatterRaw: '', savedMd: '正文' };
+    work.registerEditor({ getMd: () => '当前正文', applyEdit: () => 'ok', appendMd: () => 'ok', replaceBodyMd: () => 'ok' });
+    const p = store.continueFromChapter();
+    release();
+    expect(await p).toBe(true);
+    expect(store.items[0]?.voiceNote).toEqual(flags);
+
+    // voice 缺席（旧版 core / 降级）→ 无 voiceNote 字段
+    const continueText2 = vi.fn().mockImplementation((_body: unknown, h: { onDone?: (done: { text: string }) => void }) =>
+      Promise.resolve().then(() => { h.onDone?.({ text: '续写2' }); }),
+    );
+    const createCandidate2 = vi.fn().mockResolvedValue({ candidate: { ...CAND, id: 'c9', kind: 'append', original: '', proposed: '续写2', instruction: '续写' } });
+    const store2 = new CandidatesStore();
+    store2.init(clientOf({ continueText: continueText2, createCandidate: createCandidate2 }));
+    await store2.continueFromChapter();
+    expect(store2.items[0]?.voiceNote).toBeUndefined();
+  });
+
   it('无当前章或正文为空不发请求；error 只报错不建候选', async () => {
     const continueText = vi.fn();
     const createCandidate = vi.fn();

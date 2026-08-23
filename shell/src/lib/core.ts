@@ -116,16 +116,28 @@ export interface ChatStreamHandlers {
   onError?: (err: Error) => void;
 }
 
+/** done 事件附带的声口偏离提示（core voice_fingerprint 契约镜像，块2·④ 仪表非门禁）。 */
+export interface VoiceDeviation {
+  deltas: {
+    dialogueRatio: { base: number; out: number };
+    sentenceLenMean: { base: number; out: number };
+    shortSentenceRatio: { base: number; out: number };
+    longSentenceRatio: { base: number; out: number };
+    gramOverlap: { base: number; out: number };
+  };
+  flags: string[];
+}
+
 export interface RewriteStreamHandlers {
   /** 批次后的改写文本增量（≤40ms 一条）。 */
   onDelta: (text: string) => void;
-  onDone?: (done: { text: string }) => void;
+  onDone?: (done: { text: string; voice?: VoiceDeviation }) => void;
   onError?: (err: Error) => void;
 }
 
 export interface ContinueStreamHandlers {
   onText: (text: string) => void;
-  onDone?: (done: { text: string }) => void;
+  onDone?: (done: { text: string; voice?: VoiceDeviation }) => void;
   onError?: (err: Error) => void;
 }
 
@@ -446,7 +458,8 @@ export class CoreClient {
     await this.postSse(`${API_PREFIX}/rewrite`, body, handlers.onDelta, (event, data, flush) => {
       if (event === 'done') {
         flush();
-        handlers.onDone?.({ text: String((data as { text?: string }).text ?? '') });
+        const d = data as { text?: string; voice?: VoiceDeviation };
+        handlers.onDone?.({ text: String(d.text ?? ''), ...(d.voice ? { voice: d.voice } : {}) });
       } else if (event === 'error') {
         flush();
         const msg = (data as { message?: string }).message ?? '服务端错误';
@@ -464,7 +477,8 @@ export class CoreClient {
     await this.postSse(`${API_PREFIX}/continue`, body, handlers.onText, (event, data, flush) => {
       if (event === 'done') {
         flush();
-        handlers.onDone?.({ text: String((data as { text?: string }).text ?? '') });
+        const d = data as { text?: string; voice?: VoiceDeviation };
+        handlers.onDone?.({ text: String(d.text ?? ''), ...(d.voice ? { voice: d.voice } : {}) });
       } else if (event === 'error') {
         flush();
         const msg = (data as { message?: string }).message ?? '服务端错误';
