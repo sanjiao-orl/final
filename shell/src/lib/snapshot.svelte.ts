@@ -75,8 +75,8 @@ export class SnapshotStore {
   ledgerAt = $state<string | null>(null);
   ledgerLoading = $state(false);
   ledgerError = $state<string | null>(null);
-  /** 轻提示（采纳后诊断提醒等，无还原动作，复用 toast 展示机制）。 */
-  notice = $state<{ message: string } | null>(null);
+  /** 轻提示（采纳后诊断提醒等，无还原动作，复用 toast 展示机制）。action 存在时渲染为可点击引导按钮（T12）。 */
+  notice = $state<{ message: string; action?: { label: string; prefillChat: string } } | null>(null);
 
   private client!: CoreClient;
   private workDir = '';
@@ -228,13 +228,15 @@ export class SnapshotStore {
     }
   }
 
-  /** 轻提示（无还原动作）：采纳后诊断提醒等；复用 SnapshotToast 展示机制，自动消隐。 */
-  showNotice(message: string): void {
-    this.notice = { message };
+  /** 轻提示（无还原动作）：采纳后诊断提醒等；复用 SnapshotToast 展示机制，自动消隐。
+   *  action 可选（T12）：传入时 toast 渲染引导按钮，点击把 prefillChat 预填进聊天草稿（组件层组合，lib 不依赖 chat）；
+   *  带 action 的提示消隐放宽到 12s（按钮需要读完决策的时间），纯文本仍 6s。 */
+  showNotice(message: string, action?: { label: string; prefillChat: string }): void {
+    this.notice = action ? { message, action } : { message };
     clearTimeout(this.noticeTimer);
     this.noticeTimer = setTimeout(() => {
       this.notice = null;
-    }, 6000);
+    }, action ? 12_000 : 6_000);
   }
 
   dismissNotice(): void {

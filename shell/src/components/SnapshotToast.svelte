@@ -2,6 +2,18 @@
   // B4 快照 toast：采纳/危险操作后底部浮出，「一键还原」入口不随 toast 消失（顶栏快照常驻）。
   import { iconSvg } from '../lib/icons.js';
   import { snapshot } from '../lib/snapshot.svelte.js';
+  import { chat } from '../lib/chat.svelte.js';
+  import { ui } from '../lib/ui.svelte.js';
+
+  // T12：notice 引导按钮点击（组件层组合，避免 candidates → chat 循环依赖）：
+  // 结构化同步指令预填进聊天输入框草稿（不自动发送）→ AI 面板切到 chat 栏让作者看到草稿 → 关闭本条提示。
+  function noticeAction(): void {
+    const action = snapshot.notice?.action;
+    if (!action) return;
+    chat.setDraft(chat.currentDraftKey(), action.prefillChat);
+    ui.showCol('chat');
+    snapshot.dismissNotice();
+  }
 </script>
 
 {#if snapshot.toast}
@@ -21,6 +33,9 @@
 {#if snapshot.notice}
   <div class="toast notice" role="status" style:bottom={snapshot.toast ? '72px' : '26px'}>
     <span class="msg">{snapshot.notice.message}</span>
+    {#if snapshot.notice.action}
+      <button class="undo notice-action" onclick={noticeAction}>{snapshot.notice.action.label}</button>
+    {/if}
     <button class="dismiss" onclick={() => snapshot.dismissNotice()} aria-label="关闭">×</button>
   </div>
 {/if}
@@ -86,5 +101,9 @@
     white-space: normal;
     line-height: 1.5;
     align-items: flex-start;
+  }
+  /* T12 引导按钮：随 .undo 样式（accent 加粗），长文案换行时不被压缩 */
+  .notice-action {
+    flex-shrink: 0;
   }
 </style>

@@ -371,7 +371,7 @@ export class CandidatesStore {
         for (const relPath of affectedChapters) {
           void this.client.generateSummary(work.workDir, relPath).catch(() => {});
         }
-        void this.notifyDiagnosticsAfterAdopt();
+        void this.notifyDiagnosticsAfterAdopt(affectedChapters);
       }
     } catch (err) {
       work.error = `采纳失败：${err instanceof Error ? err.message : String(err)}`;
@@ -391,8 +391,9 @@ export class CandidatesStore {
    * 采纳落定后的自动账本体检（fire-and-forget，不阻塞采纳主链路）：ledger_diagnostics 机械诊断 +
    * ledger_reconcile 锚点对账并行跑，两者都完成后合并计数弹一次轻提示；任一失败不影响另一个，
    * 双双无异常 / 失败 → 不打扰（全静默）。对账计数口径用 chapterMissing+quoteMissing（lineDrift 提示级不计）。
+   * T12：有发现时附「让 AI 同步账本」引导按钮，prefillChat 预填含涉及章节清单的结构化同步指令（不自动发送）。
    */
-  private async notifyDiagnosticsAfterAdopt(): Promise<void> {
+  private async notifyDiagnosticsAfterAdopt(affectedChapters: Set<string>): Promise<void> {
     if (!this.client || !work.workDir) return;
     const diagP = this.client
       .callTool<LedgerDiagnosticsNotice>('ledger_diagnostics', {
@@ -410,7 +411,13 @@ export class CandidatesStore {
     const parts: string[] = [];
     if (findings.length > 0) parts.push(`诊断 ${findings.length} 条`);
     if (anchorIssues > 0) parts.push(`对账 ${anchorIssues} 处锚异常`);
-    snapshot.showNotice(`${parts.join(' · ')} · 审阅面板查看；若采纳改变了剧情事实，让 AI 同步账本`);
+    snapshot.showNotice(`${parts.join(' · ')} · 审阅面板查看`, {
+      label: '让 AI 同步账本',
+      prefillChat:
+        `我刚采纳了一批正文候选（章节：${[...affectedChapters].join('、')}）。` +
+        '请对照本次采纳内容检查剧情事实变动（新埋伏笔/道具易手/角色知情变化/时间推进）：' +
+        '先列出你打算用 ledger_upsert 写入或更新的条目清单给我确认，我确认后你再写账本；没有变动就回复「无需同步」。',
+    });
   }
 
   /** 批量整改：选中候选按整改要求重新改写，proposed 与指令留痕更新，状态保持 pending。 */

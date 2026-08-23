@@ -280,4 +280,43 @@ describe('SnapshotStore', () => {
     s.dismissNotice();
     expect(s.notice).toBeNull();
   });
+
+  it('showNotice：带 action 的轻提示保留 action；dismiss 一并清除（T12）', () => {
+    const s = new SnapshotStore();
+    s.init(mockClient(), 'd');
+    s.showNotice('诊断 1 条 · 审阅面板查看', { label: '让 AI 同步账本', prefillChat: '我刚采纳了正文候选…' });
+    expect(s.notice?.message).toContain('诊断 1 条');
+    expect(s.notice?.action?.label).toBe('让 AI 同步账本');
+    expect(s.notice?.action?.prefillChat).toBe('我刚采纳了正文候选…');
+    // 纯文本调用方不带 action：action 保持 undefined（向后兼容）
+    const s2 = new SnapshotStore();
+    s2.init(mockClient(), 'd');
+    s2.showNotice('纯文本提示');
+    expect(s2.notice?.action).toBeUndefined();
+    // 手动关闭：含 action 的整条清除
+    s.dismissNotice();
+    expect(s.notice).toBeNull();
+  });
+
+  it('showNotice：带 action 的轻提示 12s 超时消隐（留按钮决策时间），纯文本仍 6s', () => {
+    vi.useFakeTimers();
+    try {
+      const s = new SnapshotStore();
+      s.init(mockClient(), 'd');
+      s.showNotice('对账 1 处锚异常 · 审阅面板查看', { label: '让 AI 同步账本', prefillChat: 'x' });
+      expect(s.notice).not.toBeNull();
+      vi.advanceTimersByTime(6000);
+      expect(s.notice).not.toBeNull(); // 带 action 的提示 6s 不消隐
+      vi.advanceTimersByTime(5999);
+      expect(s.notice).not.toBeNull();
+      vi.advanceTimersByTime(1);
+      expect(s.notice).toBeNull(); // 12s 超时后 message 与 action 一并清除
+      // 纯文本提示维持 6s 口径
+      s.showNotice('纯文本提示');
+      vi.advanceTimersByTime(6000);
+      expect(s.notice).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

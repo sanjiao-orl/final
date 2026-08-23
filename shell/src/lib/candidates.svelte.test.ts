@@ -456,6 +456,22 @@ describe('CandidatesStore · 采纳后自动诊断 + 对账合并提示 + 章摘
     expect(snapshot.notice?.message).toContain('诊断 2 条');
     expect(snapshot.notice?.message).toContain('对账 3 处锚异常');
     expect(snapshot.notice?.message).not.toContain('9');
+    expect(snapshot.notice?.message).not.toContain('若采纳改变了剧情事实');
+  });
+
+  it('adoptSelected：有发现时轻提示带「让 AI 同步账本」引导按钮，prefillChat 含涉及章节清单（T12）', async () => {
+    const { store } = adoptContext();
+    await store.adoptSelected();
+    await flush();
+    expect(snapshot.notice?.action).toBeDefined();
+    expect(snapshot.notice?.action?.label).toBe('让 AI 同步账本');
+    expect(snapshot.notice?.action?.prefillChat).toContain('章节A.md');
+    // 结构化引导三要点：先列清单给我确认、确认后才写账本、无变动回无需同步
+    expect(snapshot.notice?.action?.prefillChat).toContain('先列出');
+    expect(snapshot.notice?.action?.prefillChat).toContain('我确认后你再写账本');
+    expect(snapshot.notice?.action?.prefillChat).toContain('无需同步');
+    // 尾部纯文本指引已从 message 移除，改为 action 按钮
+    expect(snapshot.notice?.message).not.toContain('让 AI 同步账本');
   });
 
   it('adoptSelected：诊断无 findings 且对账无锚异常 → 不弹提示（不打扰）', async () => {
