@@ -1593,8 +1593,9 @@ export interface WorkDiagnostics {
  * 对 workDir 跑全量确定性诊断：账本级（悬空/逾期/双位）+ 章级（章首跳变/季节冲突），
  * 并把问题日志（issues.md，CR 格式）的 BLOCKER 计数（severity 列 + 未处置 status 列判定）折叠进 hasBlockers——
  * 冷读产出的未处置 BLOCKER 条目由本函数统一汇总，接进「暂存区入口标红提示」出口。
+ * signal 可选（加法）：逐章读文件循环每轮检查，取消时抛 AbortError 提前退出全量扫描。
  */
-export function diagnosticsForWork(workDir: string, ledgerPath?: string, issueLogPath?: string): WorkDiagnostics {
+export function diagnosticsForWork(workDir: string, ledgerPath?: string, issueLogPath?: string, signal?: AbortSignal): WorkDiagnostics {
   const wd = assertWorkDir(workDir);
   const { ledger } = readLedger(wd, ledgerPath);
 
@@ -1607,6 +1608,7 @@ export function diagnosticsForWork(workDir: string, ledgerPath?: string, issueLo
   const chapterOrder: ChapterRef[] = [];
   const bodies: Array<{ relPath: string; title: string; body: string }> = [];
   for (const f of files) {
+    signal?.throwIfAborted(); // 全量扫描：逐章取消检查
     let content: string;
     try {
       content = fs.readFileSync(f.abs, 'utf8');

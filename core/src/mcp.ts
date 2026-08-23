@@ -1,5 +1,6 @@
 // 模块职责：连接 domain MCP 服务（stdio 子进程），取出工具集供聊天管道注入；连不上则降级为无工具并自动重连（不致命）。
-// 每个工具 execute 注入请求级超时（AbortSignal 合并，@ai-sdk/mcp 的 request 收到 abort 即拒绝该次 stdio 请求）；
+// 每个工具 execute 注入请求级超时（AbortSignal 合并，@ai-sdk/mcp 的 request 收到 abort 即拒绝该次 stdio 请求；
+// SDK 同时发送 notifications/cancelled，domain 侧长循环经 extra.signal 中断，不再空跑到底）；
 // 连接后定时活性探测（listTools 短超时探针），连续失败判定 domain 僵死并走同一套断开→退避重连，isConnected 因此反映真实活性而非仅管道存活。
 import path from 'node:path';
 import { createMCPClient, type MCPClient } from '@ai-sdk/mcp';

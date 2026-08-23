@@ -1,11 +1,13 @@
 /**
- * trash.test.ts —— list_trash：回收站列表收口进 domain（壳 localStorage 跟踪的替代）。
- * 覆盖：删章/删卷还原 originalPath+deletedAt、空 trash、垃圾文件名容错、隐藏文件跳过、新→旧排序。
+ * trash.test.ts —— list_trash / restore_trash：回收站收口进 domain（壳 localStorage 跟踪的替代）
+ * 与找回闭环（move-back，trash 副本不再残留）。
+ * 覆盖：删章/删卷还原 originalPath+deletedAt、空 trash、垃圾文件名容错、隐藏文件跳过、新→旧排序；
+ * restore_trash：章/卷 move-back、目标已存在拒绝不覆盖、无时间戳报错、非 manuscript/ 原路径拒绝。
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { deleteChapter, deleteVolume, listTrash } from '../src/tools.js';
+import { deleteChapter, deleteVolume, listTrash, readChapter, restoreTrash } from '../src/tools.js';
 import { makeWorkDir, writeTree } from './helpers.js';
 
 const CH1 = 'manuscript/第1章·少年.md';
@@ -70,5 +72,61 @@ describe('list_trash', () => {
     expect(entries).toHaveLength(2);
     expect(entries[0]!.originalPath).toBe('manuscript/第2章·乙.md'); // 新在前
     expect(entries[1]!.originalPath).toBe('manuscript/第1章·甲.md');
+  });
+});
+
+describe('restore_trash', () => {
+  it('章 move-back 成功：原路径内容一致，trash 副本不再被 list_trash 列出', () => {
+    const wd = makeWorkDir();
+    const content = '---\ntitle: 第1章·少年\n---\n\n正文。';
+    writeTree(wd, { [CH1]: content });
+    const { trashPath } = deleteChapter(wd, CH1);
+    const r = restoreTrash(wd, trashPath);
+    expect(r).toEqual({ ok: true, restoredPath: CH1, kind: 'chapter' });
+    expect(readChapter(wd, CH1).content).toBe(content); // 原路径内容一致
+    expect(fs.existsSync(path.join(wd, trashPath))).toBe(false); // move-back 非复制：副本消失
+    expect(listTrash(wd).entries).toHaveLength(0); // 回收站不再列出（不残留脏副本）
+  });
+
+  it('卷目录 move-back 成功：整卷移回，kind=volume', () => {
+    const wd = makeWorkDir();
+    writeTree(wd, { [`${VOL}/第1章·少年.md`]: '---\ntitle: 第1章·少年\n---\n\n正文。' });
+    const { trashPath } = deleteVolume(wd, VOL);
+    const r = restoreTrash(wd, trashPath);
+    expect(r).toEqual({ ok: true, restoredPath: VOL, kind: 'volume' });
+    expect(fs.existsSync(path.join(wd, VOL, '第1章·少年.md'))).toBe(true);
+    expect(fs.existsSync(path.join(wd, trashPath))).toBe(false);
+    expect(listTrash(wd).entries).toHaveLength(0);
+  });
+
+  it('目标已存在 → 拒绝且不覆盖', () => {
+    const wd = makeWorkDir();
+    writeTree(wd, { [CH1]: '旧版正文' });
+    const { trashPath } = deleteChapter(wd, CH1);
+    writeTree(wd, { [CH1]: '新版正文' }); // 目标已存在
+    expect(() => restoreTrash(wd, trashPath)).toThrow(/目标已存在/);
+    expect(fs.readFileSync(path.join(wd, CH1), 'utf8')).toBe('新版正文'); // 不覆盖
+    expect(fs.existsSync(path.join(wd, trashPath))).toBe(true); // trash 副本原地不动
+  });
+
+  it('无时间戳条目 → 报错提示手动处理', () => {
+    const wd = makeWorkDir();
+    plantTrashFile(wd, '随手丢进来的.md');
+    expect(() => restoreTrash(wd, '.novel/trash/随手丢进来的.md')).toThrow(/无法从文件名还原原路径/);
+  });
+
+  it('originalPath 越界（非 manuscript/ 开头）→ 拒绝移动', () => {
+    const wd = makeWorkDir();
+    plantTrashFile(wd, '.novel__ledger-20260101-000000000-ab12.md');
+    expect(() => restoreTrash(wd, '.novel/trash/.novel__ledger-20260101-000000000-ab12.md')).toThrow(
+      /不在 manuscript\/ 下/,
+    );
+  });
+
+  it('trashPath 不在 .novel/trash/ 正下（子目录）→ 拒绝', () => {
+    const wd = makeWorkDir();
+    expect(() => restoreTrash(wd, '.novel/trash/sub/manuscript__x-20260101-000000000-ab12.md')).toThrow(
+      /只允许 .novel\/trash\/ 正下的条目/,
+    );
   });
 });

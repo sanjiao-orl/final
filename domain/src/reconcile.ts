@@ -57,8 +57,9 @@ function truncQuote(q: string): string {
 /**
  * reconcileLedger：对账入口。账本不存在 = 空账本 → checked 0、空 findings，不抛错。
  * 只读正文（locateQuoteLine 内部逐行匹配），绝不把正文注入上下文。
+ * signal 可选（加法）：逐锚回验循环每轮检查，取消时抛 AbortError 提前退出（锚点可能远多于章数）。
  */
-export function reconcileLedger(workDir: string, ledgerPath?: string): ReconcileResult {
+export function reconcileLedger(workDir: string, ledgerPath?: string, signal?: AbortSignal): ReconcileResult {
   const wd = assertWorkDir(workDir);
   const { ledger } = readLedger(wd, ledgerPath); // 账本不存在时返回空账本，不抛错
   const order = chapterOrderForWork(wd);
@@ -96,6 +97,7 @@ export function reconcileLedger(workDir: string, ledgerPath?: string): Reconcile
   const skipped: SkippedEntry[] = [];
 
   for (const a of anchors) {
+    signal?.throwIfAborted(); // 逐锚回验：取消检查（每锚可能读一次正文，全量重循环）
     if (!orderIndex.has(a.chapter)) {
       summary.checked += 1;
       summary.chapterMissing += 1;

@@ -1,9 +1,10 @@
 /**
- * server.ts —— MCP stdio server 装配：注册三十一个工具并连接 stdio transport。
+ * server.ts —— MCP stdio server 装配：注册三十六个工具并连接 stdio transport。
  * 双侧合并口径：基础工具 8 个 + WS-9 scan_quality + A 组 8 工具 + WS-17 账本 4 工具 + 0008 skill_read 1 工具 + 0009 问题日志 2 工具（issue_append/issue_set_status）+ scheme_set_active 1 工具（激活/取消激活方案指针）。
  * 批三-3 新增 2 工具：ledger_chapter_slice（按章过滤的账本视图，只读）+ write_meta（书级元数据写入，不写账本/不写正文）。
  * 批一③ 碰撞模式 新增 3 工具：decision_append（裁决留痕追加）/ decision_tail（裁决留痕尾部只读）/ chapter_set_blueprint（章蓝图模式设置），并在 frontmatter 透出 blueprint、buildChapter 透传。
  * 块1 理解层供料 新增 4 工具：ledger_reconcile（证据锚对账）/ write_chapter_summary + read_chapter_summaries（章摘要导生缓存，机检字段首写冻结）/ list_trash（回收站收口）；ledger_diagnostics 输出并入节奏诊断（pacing-flat，加法）。
+ * 块1 遗留缺陷修复 新增 1 工具：restore_trash（找回回收站条目 = move-back 移回原路径，trash 副本不再存在），现共 36 个工具。
  * 被 core 包经 MCP stdio spawn 调用；工具实现见 tools.ts / ledger.ts / reconcile.ts / summaries.ts。
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -26,6 +27,7 @@ import {
   readSnapshot,
   renameChapter,
   renameVolume,
+  restoreTrash,
   scanQuality,
   searchContent,
   SEARCH_DEFAULT_LIMIT,
@@ -72,7 +74,7 @@ server.registerTool(
       '返回 workDir/manuscript 下的卷/章/场树：卷=子目录，章=.md 文件（frontmatter+正文），场=章内 ### 三级标题。结构永远从文件内容派生。',
     inputSchema: { workDir: z.string().describe('作品文件夹的绝对路径') },
   },
-  async ({ workDir }) => jsonResult(listStructure(workDir)),
+  async ({ workDir }, extra) => jsonResult(listStructure(workDir, extra.signal)),
 );
 
 server.registerTool(
@@ -116,8 +118,8 @@ server.registerTool(
       limit: z.number().int().positive().default(SEARCH_DEFAULT_LIMIT).describe(`最多返回条数，默认 ${SEARCH_DEFAULT_LIMIT}`),
     },
   },
-  async ({ workDir, query, limit }) => {
-    const result = searchContent(workDir, query, limit);
+  async ({ workDir, query, limit }, extra) => {
+    const result = searchContent(workDir, query, limit, extra.signal);
     const out = jsonResult([...result]);
     // 静默漏章改可见（0822排查）：skipped 是数组附加属性，JSON 序列化会丢，展开为独立文本块透出。
     if (result.skipped?.length) {
@@ -141,7 +143,7 @@ server.registerTool(
       relPath: z.string().optional().describe('可选：相对 workDir 的章文件路径'),
     },
   },
-  async ({ workDir, relPath }) => jsonResult(wordCount(workDir, relPath)),
+  async ({ workDir, relPath }, extra) => jsonResult(wordCount(workDir, relPath, extra.signal)),
 );
 
 server.registerTool(
@@ -180,7 +182,7 @@ server.registerTool(
       '安全阀：按结构树顺序（卷→章）合并全稿为一个可直接投出的 txt——去 frontmatter、场景标题去 ### 标记。固定写到 workDir 根目录 全稿-<时间戳>.txt，返回 { ok, path, chapters, bytes }。',
     inputSchema: { workDir: z.string().describe('作品文件夹的绝对路径') },
   },
-  async ({ workDir }) => jsonResult(exportTxt(workDir)),
+  async ({ workDir }, extra) => jsonResult(exportTxt(workDir, extra.signal)),
 );
 
 server.registerTool(
@@ -193,7 +195,7 @@ server.registerTool(
       relPath: z.string().describe('相对 workDir 的章文件路径，必须是 manuscript/ 内的 .md'),
     },
   },
-  async ({ workDir, relPath }) => jsonResult(exportChapterText(workDir, relPath)),
+  async ({ workDir, relPath }, extra) => jsonResult(exportChapterText(workDir, relPath, extra.signal)),
 );
 
 server.registerTool(
@@ -204,7 +206,7 @@ server.registerTool(
       '确定性扫描 manuscript 全部章（零 LLM 成本）：CJK 字数、破折号、"不是X是Y"句式、正文元话语、段落长度、AI 口水词、高频词候选、感叹号/粗口分布、场景；书级：场景轮换池、连续同场景、跨章模板段落。逐章读文件，不注入正文。',
     inputSchema: { workDir: z.string().describe('作品文件夹的绝对路径') },
   },
-  async ({ workDir }) => jsonResult(scanQuality(workDir)),
+  async ({ workDir }, extra) => jsonResult(scanQuality(workDir, extra.signal)),
 );
 
 server.registerTool(
@@ -366,8 +368,8 @@ server.registerTool(
       issueLogPath: z.string().optional().describe('可选：问题日志（issues.md，CR 格式）相对 workDir 路径，必须是 .novel/ 根下或 editorial_notes/ 下的 .md，用于统计 BLOCKER 条数'),
     },
   },
-  async ({ workDir, ledgerPath, issueLogPath }) => {
-    const base = diagnosticsForWork(workDir, ledgerPath, issueLogPath);
+  async ({ workDir, ledgerPath, issueLogPath }, extra) => {
+    const base = diagnosticsForWork(workDir, ledgerPath, issueLogPath, extra.signal);
     // 块1：节奏诊断（章摘要 tension 机检字段）并入诊断输出——纯加法，pacing 永不产 BLOCKER，
     // hasBlockers/blockerCount 口径不受影响。
     const pacing = pacingDiagnostics(workDir);
@@ -595,7 +597,7 @@ server.registerTool(
       ledgerPath: z.string().optional().describe('可选：账本文件相对 workDir 路径，必须是 .novel/ 根目录正下的 .md（不含子目录），默认 .novel/ledger.md'),
     },
   },
-  async ({ workDir, ledgerPath }) => jsonResult(reconcileLedger(workDir, ledgerPath)),
+  async ({ workDir, ledgerPath }, extra) => jsonResult(reconcileLedger(workDir, ledgerPath, extra.signal)),
 );
 
 // 块1 理解层供料：章摘要导生缓存写入（第 33 个工具；机检字段首写冻结）
@@ -648,10 +650,25 @@ server.registerTool(
   {
     title: '列出回收站',
     description:
-      '列 .novel/trash/ 直接子项（不递归；目录不存在→空数组；只读）：每项 { trashPath, kind: chapter|volume, originalPath?, deletedAt?, name }——originalPath 从拍平文件名 best-effort 还原（章条目补回 .md 后缀；原名本身含 __ 的极端情形会失真），deletedAt 从文件名时间戳解析；无时间戳的垃圾文件名仍列出但无 originalPath/deletedAt。排序 deletedAt 新→旧。找回 = read_chapter 读 trashPath + write_chapter 写回 originalPath。',
+      '列 .novel/trash/ 直接子项（不递归；目录不存在→空数组；只读）：每项 { trashPath, kind: chapter|volume, originalPath?, deletedAt?, name }——originalPath 从拍平文件名 best-effort 还原（章条目补回 .md 后缀；原名本身含 __ 的极端情形会失真），deletedAt 从文件名时间戳解析；无时间戳的垃圾文件名仍列出但无 originalPath/deletedAt。排序 deletedAt 新→旧。找回用 restore_trash（move-back 移回原路径，trash 副本不再存在）。',
     inputSchema: { workDir: z.string().describe('作品文件夹的绝对路径') },
   },
   async ({ workDir }) => jsonResult(listTrash(workDir)),
+);
+
+// 块1 遗留缺陷修复：找回闭环为 move-back（第 36 个工具；旧「读回写」会残留 trash 副本污染回收站）
+server.registerTool(
+  'restore_trash',
+  {
+    title: '找回回收站条目',
+    description:
+      '把 .novel/trash/ 正下的软删条目按文件名还原的原路径移回 manuscript/（同卷原子 rename，move-back）：移回后 trash 副本不再存在（回收站不残留）。文件名解析与 list_trash 同口径；无时间戳、无法还原原路径的垃圾条目抛错请手动处理；原路径必须 manuscript/ 开头；目标已存在拒绝（不覆盖，先处理冲突）。返回 { ok, restoredPath, kind }。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      trashPath: z.string().describe('相对 workDir 的回收站条目路径，必须是 .novel/trash/ 正下的直接子项（来自 list_trash 的 trashPath）'),
+    },
+  },
+  async ({ workDir, trashPath }) => jsonResult(restoreTrash(workDir, trashPath)),
 );
 
 // 挂起等待 stdio 上的 MCP 请求

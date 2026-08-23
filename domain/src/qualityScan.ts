@@ -615,8 +615,10 @@ function compareChapterFiles(a: string, b: string): number {
 /**
  * scanWork：扫描 workDir/manuscript 下全部章（逐章读文件，只读不写）。
  * 输出逐章指标 + 书级指标。manuscript 不存在或为空时返回空结果。
+ * signal 可选（加法）：请求取消（MCP notifications/cancelled → extra.signal）时在下一章迭代前抛 AbortError，
+ * 停止烧 CPU 让事件循环让位；已扫完的中间结果丢弃（client 侧早已 reject）。
  */
-export function scanWork(workDir: string): WorkScanResult {
+export function scanWork(workDir: string, signal?: AbortSignal): WorkScanResult {
   const wd = assertWorkDir(workDir);
   const skipped: SkippedEntry[] = [];
   const files = collectMdFiles(path.join(wd, 'manuscript'), (rel, err) => {
@@ -625,6 +627,7 @@ export function scanWork(workDir: string): WorkScanResult {
   // scan 前按编号感知阅读序重排章列表（字典序会在 >9 章/汉字编号时错序，见 compareChapterFiles）
   const raws: RawChapter[] = [];
   for (const f of [...files].sort((a, b) => compareChapterFiles(a.rel, b.rel))) {
+    signal?.throwIfAborted();
     let content: string;
     try {
       content = fs.readFileSync(f.abs, 'utf8');

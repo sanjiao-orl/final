@@ -94,7 +94,7 @@ function collectManuscriptFiles(
  * 卷 = manuscript 的直接子目录；散落在 manuscript 根下的章归入“未分卷”；
  * 更深层的 .md 归入其第一个路径段对应的卷。无 manuscript 目录返回空树。
  */
-export function listStructure(workDir: string): VolumeNode[] {
+export function listStructure(workDir: string, signal?: AbortSignal): VolumeNode[] {
   const { files } = collectManuscriptFiles(workDir);
 
   // 卷 -> 章文件；rel 首段即卷名（空段表示 manuscript 根下的散章）
@@ -117,7 +117,10 @@ export function listStructure(workDir: string): VolumeNode[] {
   // 纯字典序下汉字编号（三 U+4E09 < 二 U+4E8C）与超 9 卷的阿拉伯编号都会乱序。
   for (const title of [...byVolume.keys()].sort((a, b) => compareNames(a, b, VOLUME_NAME_RE))) {
     const chapters = (byVolume.get(title) ?? [])
-      .map(buildChapter)
+      .map((f) => {
+        signal?.throwIfAborted(); // buildChapter 逐章读盘：取消时抛 AbortError 停止全量扫描
+        return buildChapter(f);
+      })
       .sort(byFileName); // 卷内按文件名排序（同名的按完整路径兜底），与嵌套层级无关
     volumes.push({ type: 'volume', title, children: chapters });
   }
@@ -257,7 +260,12 @@ export type SearchContentResult = SearchHit[] & { skipped?: SkippedEntry[] };
  * 口径（0004 定稿）：只搜正文——frontmatter 是结构元数据不参与搜索；命中行号按文件实际行号（含 fm 行）。
  * 文件/目录不可读不再静默跳过：console.warn 带路径与错误，并把被跳过者记入返回值的 skipped 属性。
  */
-export function searchContent(workDir: string, query: string, limit = SEARCH_DEFAULT_LIMIT): SearchContentResult {
+export function searchContent(
+  workDir: string,
+  query: string,
+  limit = SEARCH_DEFAULT_LIMIT,
+  signal?: AbortSignal,
+): SearchContentResult {
   const q = query.toLowerCase();
   if (q === '') return [];
   const lim = Number.isFinite(limit) && limit >= 1 ? Math.floor(limit) : SEARCH_DEFAULT_LIMIT;
@@ -272,6 +280,7 @@ export function searchContent(workDir: string, query: string, limit = SEARCH_DEF
     return out;
   };
   for (const f of files) {
+    signal?.throwIfAborted(); // 逐文件读盘扫描：取消时抛 AbortError 停止（命中不足 limit 时会扫全稿）
     let content: string;
     try {
       content = fs.readFileSync(f.abs, 'utf8');
@@ -312,8 +321,9 @@ export interface WordCountResult {
   files?: WordCountFile[];
 }
 
-/** word_count：给 relPath 只算该章；否则全 manuscript 汇总（含每章明细）。 */
-export function wordCount(workDir: string, relPath?: string): WordCountResult {
+/** word_count：给 relPath 只算该章；否则全 manuscript 汇总（含每章明细）。
+ *  signal 可选（加法）：汇总路径逐章循环每轮检查，取消时抛 AbortError 提前退出。 */
+export function wordCount(workDir: string, relPath?: string, signal?: AbortSignal): WordCountResult {
   if (relPath !== undefined) {
     // 带 relPath 时只允许 manuscript/ 内的 .md（与读写章同口径：先归一化再判前缀，防 manuscript/../ 绕过）
     const { abs, posix } = resolveInsidePosix(workDir, relPath);
@@ -325,6 +335,7 @@ export function wordCount(workDir: string, relPath?: string): WordCountResult {
   }
   const { files } = collectManuscriptFiles(workDir);
   const items: WordCountFile[] = files.map((f) => {
+    signal?.throwIfAborted(); // 全量汇总：逐章取消检查（AbortError 由 MCP 转成 error response）
     const content = fs.readFileSync(f.abs, 'utf8');
     return {
       relPath: toPosix(path.join('manuscript', f.rel)),
@@ -444,13 +455,49 @@ export interface TrashEntry {
   name: string;
 }
 
+/** 回收站文件名尾部时间戳（deleteChapter/deleteVolume 的 stamp() 格式：YYYYMMDD-HHMMSSmmm-xxxx）。 */
+const TRASH_STAMP_TAIL_RE = /-(\d{8})-(\d{9})-([0-9a-f]{4})$/;
+
+/**
+ * 回收站文件名解析口径（list_trash 与 restore_trash 共用，单一事实源）：
+ * 去 .md 后缀判定 kind；尾部匹配 stamp() 格式 → deletedAt（本地时间转 ISO）；
+ * 剩余拍平名按 flattenRel 逆映射 `__`→`/` 还原 originalPath——只对带时间戳
+ * （=可解析为软删产物）的名字还原，best-effort：原名本身含 `__` 的极端情形还原会失真，可接受；
+ * 拍平名为空或无时间戳时 originalPath/deletedAt 缺省不出现。
+ */
+function parseTrashName(name: string): {
+  kind: 'chapter' | 'volume';
+  deletedAt?: string;
+  originalPath?: string;
+} {
+  const isChapter = /\.md$/i.test(name);
+  const base = isChapter ? name.replace(/\.md$/i, '') : name;
+  const m = TRASH_STAMP_TAIL_RE.exec(base);
+  if (!m) return { kind: isChapter ? 'chapter' : 'volume' };
+  const [, ymd, hmsms] = m;
+  const deletedAt = new Date(
+    Number(ymd!.slice(0, 4)),
+    Number(ymd!.slice(4, 6)) - 1,
+    Number(ymd!.slice(6, 8)),
+    Number(hmsms!.slice(0, 2)),
+    Number(hmsms!.slice(2, 4)),
+    Number(hmsms!.slice(4, 6)),
+    Number(hmsms!.slice(6, 9)),
+  ).toISOString();
+  // best-effort 还原原路径；拍平名非空才还原（flattenRel 拍平时剥掉了 .md 后缀，章条目还原时补回）
+  const flattened = base.slice(0, m.index); // 去掉尾部时间戳，剩拍平名
+  if (flattened === '') return { kind: isChapter ? 'chapter' : 'volume', deletedAt };
+  return {
+    kind: isChapter ? 'chapter' : 'volume',
+    deletedAt,
+    originalPath: flattened.split('__').join('/') + (isChapter ? '.md' : ''),
+  };
+}
+
 /**
  * list_trash：列 .novel/trash/ 直接子项（不递归；目录不存在→空数组），只读不建目录。
  * - 隐藏文件（. 开头）跳过；
- * - 解析：去 .md 后缀判定 kind；尾部匹配 `-(\d{8})-(\d{9})-([0-9a-f]{4})`（deleteChapter/deleteVolume 的
- *   stamp() 格式）→ deletedAt（本地时间转 ISO）；剩余拍平名按 deleteChapter 的 flattenRel 逆映射
- *   `__`→`/` 还原 originalPath——只对带时间戳（=可解析为软删产物）的名字还原，best-effort：
- *   原名本身含 `__` 的极端情形还原会失真，可接受；无时间戳的垃圾文件名不硬猜（originalPath 缺省不出现）；
+ * - 解析口径见 parseTrashName（与 restore_trash 共用）：无时间戳的垃圾文件名不硬猜（originalPath 缺省不出现）；
  * - 排序：deletedAt 新→旧；无 deletedAt 的排最后，按 name 字典序兜底；
  * - 不抛错优先：单项解析失败仍列出（只有 name+kind）。
  */
@@ -463,38 +510,16 @@ export function listTrash(workDir: string): { entries: TrashEntry[] } {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { entries: [] }; // 没删过任何东西：目录不存在
     throw err;
   }
-  // 尾部时间戳（stamp() 格式：YYYYMMDD-HHMMSSmmm-xxxx）
-  const STAMP_TAIL_RE = /-(\d{8})-(\d{9})-([0-9a-f]{4})$/;
+  // 尾部时间戳与拍平名还原口径统一走 parseTrashName（restore_trash 同源）
   const entries: TrashEntry[] = names.map((name): TrashEntry | null => {
     if (name.startsWith('.')) return null; // 隐藏文件跳过（map 内先占位，下面统一过滤）
     try {
-      const isChapter = /\.md$/i.test(name);
-      const base = isChapter ? name.replace(/\.md$/i, '') : name;
-      const m = STAMP_TAIL_RE.exec(base);
-      let deletedAt: string | undefined;
-      let originalPath: string | undefined;
-      if (m) {
-        const [, ymd, hmsms] = m;
-        deletedAt = new Date(
-          Number(ymd!.slice(0, 4)),
-          Number(ymd!.slice(4, 6)) - 1,
-          Number(ymd!.slice(6, 8)),
-          Number(hmsms!.slice(0, 2)),
-          Number(hmsms!.slice(2, 4)),
-          Number(hmsms!.slice(4, 6)),
-          Number(hmsms!.slice(6, 9)),
-        ).toISOString();
-        // best-effort 还原原路径：只对带时间戳（=可解析为 deleteChapter/deleteVolume 产物）的名字还原；
-        // 无时间戳的垃圾文件名不硬猜（originalPath 缺省不出现）。拍平名非空才还原。
-        // flattenRel 拍平时剥掉了 .md 后缀，章条目还原时补回（卷目录本无后缀）。
-        const flattened = base.slice(0, m.index); // 去掉尾部时间戳，剩拍平名
-        if (flattened !== '') originalPath = flattened.split('__').join('/') + (isChapter ? '.md' : '');
-      }
+      const parsed = parseTrashName(name);
       const entry: TrashEntry = {
         trashPath: toPosix(path.join('.novel', 'trash', name)),
-        kind: isChapter ? 'chapter' : 'volume',
-        ...(deletedAt !== undefined ? { deletedAt } : {}),
-        ...(originalPath !== undefined ? { originalPath } : {}),
+        kind: parsed.kind,
+        ...(parsed.deletedAt !== undefined ? { deletedAt: parsed.deletedAt } : {}),
+        ...(parsed.originalPath !== undefined ? { originalPath: parsed.originalPath } : {}),
         name,
       };
       return entry;
@@ -511,6 +536,47 @@ export function listTrash(workDir: string): { entries: TrashEntry[] } {
     return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
   });
   return { entries };
+}
+
+export interface RestoreTrashResult {
+  ok: true;
+  /** 移回后相对 workDir 的原路径（正斜杠）。 */
+  restoredPath: string;
+  /** chapter | volume（与 list_trash 的 kind 同口径）。 */
+  kind: 'chapter' | 'volume';
+}
+
+/**
+ * restore_trash：找回回收站条目——把 .novel/trash/ 正下的软删产物移回原路径
+ * （move-back，同卷原子 rename；区别于旧「读 trash + 写回」的读回写，trash 副本不再存在）。
+ * - trashPath 必须归一化后位于 .novel/trash/ 正下（直接子项，不递归）；
+ * - 文件名解析与 list_trash 同口径（parseTrashName 单一事实源）：无时间戳/无法还原 originalPath 抛错请手动处理；
+ * - originalPath 必须 manuscript/ 开头（防御非软删产物）；目标已存在拒绝（不覆盖，先处理冲突）。
+ */
+export function restoreTrash(workDir: string, trashPath: string): RestoreTrashResult {
+  const { abs, posix } = resolveInsidePosix(workDir, trashPath); // 越界与 symlink 逃逸在此抛错
+  if (!posix.startsWith('.novel/trash/') || posix.slice('.novel/trash/'.length).includes('/')) {
+    throw new Error(`restore_trash 只允许 .novel/trash/ 正下的条目: ${trashPath}`);
+  }
+  if (!fs.existsSync(abs)) {
+    throw new Error(`restore_trash 回收站条目不存在: ${posix}`);
+  }
+  const name = path.basename(abs);
+  const parsed = parseTrashName(name); // 与 list_trash 共用解析，杜绝两份规则漂移
+  const originalPath = parsed.originalPath;
+  if (originalPath === undefined) {
+    throw new Error(`restore_trash 无法从文件名还原原路径，请手动处理: ${name}`);
+  }
+  if (!originalPath.startsWith('manuscript/')) {
+    throw new Error(`restore_trash 原路径不在 manuscript/ 下（非软删产物，拒绝移动）: ${originalPath}`);
+  }
+  const { abs: targetAbs } = resolveInsidePosix(workDir, originalPath);
+  if (fs.existsSync(targetAbs)) {
+    throw new Error(`restore_trash 目标已存在（不覆盖，请先处理冲突）: ${originalPath}`);
+  }
+  fs.mkdirSync(path.dirname(targetAbs), { recursive: true });
+  fs.renameSync(abs, targetAbs); // 同卷 rename 原子移动；move-back 后 trash 副本不再存在
+  return { ok: true, restoredPath: toPosix(path.relative(assertWorkDir(workDir), targetAbs)), kind: parsed.kind };
 }
 
 export interface ExportTxtResult {
@@ -537,13 +603,14 @@ export interface ExportChapterTextResult {
   text: string;
 }
 
-/** export_chapter_text：返回单章可直接粘贴到发布平台的文本。 */
-export function exportChapterText(workDir: string, relPath: string): ExportChapterTextResult {
+/** export_chapter_text：返回单章可直接粘贴到发布平台的文本。
+ *  signal 可选（加法）：实现经 listStructure 全量读盘找章，取消时抛 AbortError 提前退出。 */
+export function exportChapterText(workDir: string, relPath: string, signal?: AbortSignal): ExportChapterTextResult {
   const { posix } = resolveInsidePosix(workDir, relPath);
   if (!posix.startsWith('manuscript/') || !posix.toLowerCase().endsWith('.md')) {
     throw new Error(`export_chapter_text 只允许 manuscript/ 内的 .md 文件: ${relPath}`);
   }
-  const chapter = listStructure(workDir)
+  const chapter = listStructure(workDir, signal)
     .flatMap((vol) => vol.children)
     .find((ch) => ch.relPath === posix);
   if (!chapter) throw new Error(`export_chapter_text 找不到对应章: ${relPath}`);
@@ -561,13 +628,14 @@ export function exportChapterText(workDir: string, relPath: string): ExportChapt
  * 去 frontmatter、场景标题去掉 ### 标记；章为最小结构（题名+正文），卷名独占一行。
  * 固定写到 workDir 根目录 全稿-<时间戳>.txt（原子写）。
  */
-export function exportTxt(workDir: string): ExportTxtResult {
+export function exportTxt(workDir: string, signal?: AbortSignal): ExportTxtResult {
   const volumes = listStructure(workDir);
   const blocks: string[] = [];
   let chapters = 0;
   for (const vol of volumes) {
     if (vol.title !== ROOT_VOLUME_TITLE) blocks.push(vol.title);
     for (const ch of vol.children) {
+      signal?.throwIfAborted(); // 全稿导出逐章读文件：取消时抛 AbortError 停止扫描（不落任何导出文件）
       const { body } = readChapter(workDir, ch.relPath);
       blocks.push(formatChapterTxt(ch.title, body));
       chapters += 1;
