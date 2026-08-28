@@ -1,7 +1,7 @@
 /**
  * core.ts —— core sidecar 的 HTTP 客户端：Bearer 鉴权、工具代理（壳的数据面）、
  * 会话读取、/v1/chat SSE 流（fetch + ReadableStream 手工解析，text-delta 经批次器进回调）。
- * 只消费版本化契约（/v1/ 前缀，docs/decisions/0007），不依赖引擎内部类型。
+ * 只消费版本化契约（/v1/ 前缀，docs/reference/03-协议契约.md），不依赖引擎内部类型。
  */
 import { DeltaBatcher, parseSseFrames } from './sse.js';
 import type { Candidate, QualityFinding, SessionRow, StoredMessage } from './types.js';

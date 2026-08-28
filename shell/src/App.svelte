@@ -30,7 +30,7 @@
   import ReviewPanel from './components/review/ReviewPanel.svelte';
   import DialogHost from './components/DialogHost.svelte';
 
-  /** 协议契约版本（与 shell/src-tauri/src/lib.rs 的 EXPECTED_PROTOCOL 对齐，docs/decisions/0007）。触发式续写升 v4。 */
+  /** 协议契约版本（与 shell/src-tauri/src/lib.rs 的 EXPECTED_PROTOCOL 对齐，docs/reference/03-协议契约.md）。触发式续写升 v4。 */
   const EXPECTED_PROTOCOL = 6;
 
   let booted = $state(false);
@@ -55,7 +55,7 @@
     const health = await client.health();
     if (typeof health.protocol === 'number' && health.protocol !== EXPECTED_PROTOCOL) {
       throw new Error(
-        `core 协议版本不兼容：实际 v${health.protocol}，壳期望 v${EXPECTED_PROTOCOL}（见 docs/decisions/0007-协议契约-v1.md）`,
+        `core 协议版本不兼容：实际 v${health.protocol}，壳期望 v${EXPECTED_PROTOCOL}（见 docs/reference/03-协议契约.md）`,
       );
     }
     if (health.protocol === undefined) {

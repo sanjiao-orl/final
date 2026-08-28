@@ -1,4 +1,4 @@
-// 壳进程职责（docs/decisions/0002）：拉起 core sidecar（node 直起，--parent-pid 交给 core 孤儿守护），
+// 壳进程职责（决策 0002）：拉起 core sidecar（node 直起，--parent-pid 交给 core 孤儿守护），
 // 从 stdout 解析 {event:"ready",port,token} 供前端 core_info 取用；Tauri updater 真实端点（GitHub Releases latest.json）。
 // 应用配置持久化（第二步）：config.json（app_config_dir）存作品目录 + LLM 双档模型，字段可空=回落环境变量/缺省；
 // 设置面板经 read_config/write_config/config_status 读写，restart_core 杀旧起新让配置立即生效。
@@ -11,7 +11,7 @@ use std::time::Duration;
 use tauri::Manager;
 use tauri_plugin_updater::UpdaterExt;
 
-/// 协议契约版本（core 侧自报，docs/decisions/0007）。壳只认这个版本，不匹配即拒接。批一③ 升 v3。
+/// 协议契约版本（core 侧自报，docs/reference/03-协议契约.md）。壳只认这个版本，不匹配即拒接。批一③ 升 v3。
 const EXPECTED_PROTOCOL: u64 = 6;
 
 /// core sidecar 固定监听端口（决策 0016，D10 CSP 收口）：Tauri 2 无运行时 CSP，随机端口迫 connect-src 通配
@@ -107,7 +107,7 @@ fn validate_protocol(protocol: Option<u64>) -> Result<(), String> {
   match protocol {
     Some(p) if p == EXPECTED_PROTOCOL => Ok(()),
     Some(p) => Err(format!(
-      "core 协议版本不兼容：实际 v{p}，壳期望 v{EXPECTED_PROTOCOL}（见 docs/decisions/0007-协议契约-v1.md）"
+      "core 协议版本不兼容：实际 v{p}，壳期望 v{EXPECTED_PROTOCOL}（见 docs/reference/03-协议契约.md）"
     )),
     None => Err("core ready 行缺少 protocol 字段（core 版本过旧？）".to_string()),
   }

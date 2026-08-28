@@ -1,4 +1,4 @@
-// 测试：core 提示词/skill 文件加载器（docs/decisions/0008）——
+// 测试：core 提示词/skill 文件加载器（docs/reference/04-prompt与skill机制.md）——
 // 正常加载、缺文件回退、坏 frontmatter 跳过、BOM 容忍、多行 frontmatter、首次释放
 // （缺则拷 / 未改动升级为新版 / 本地改过永不覆盖）、skill 清单同名遮蔽。
 import fs from 'node:fs';

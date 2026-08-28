@@ -4,7 +4,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-/** 协议契约版本（docs/decisions/0007-协议契约-v1.md）。URL 前缀 /v1/ 与此对应，同步递增。 */
+/** 协议契约版本（docs/reference/03-协议契约.md）。URL 前缀 /v1/ 与此对应，同步递增。 */
 export const PROTOCOL_VERSION = 6;
 
 /** 握手自报字段：壳与外部消费者据此校验，不依赖引擎内部类型。 */

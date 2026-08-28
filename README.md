@@ -7,18 +7,10 @@
 ```bash
 npm install
 
-# 配置模型(三要素缺一不可,已写入用户级环境变量,新开终端即生效)
-#   LLM_BASE_URL  https://opencode.ai/zen/go/v1(OpenCode Go 订阅,复用 OPENCODE_API_KEY;key 存放处见 AGENTS.md)
-#   LLM_API_KEY   OpenCode key
-#   LLM_MODEL     deepseek-v4-pro(写作档)
-#   LLM_MODEL_CHEAP  deepseek-v4-flash(后台档,缺省回退 LLM_MODEL)
-# 注:裸 /zen/v1 端点付费模型余额不足会 402;/zen/go/v1 为 Go 订阅模型池,可用模型以 GET /models 为准
-# 多模型池(可选,D4):LLM_PRESET_<名>_BASE_URL / LLM_PRESET_<名>_API_KEY / LLM_PRESET_<名>_MODEL 定义预设,可多家 provider;
-#   LLM_ASSIGN_WRITING / LLM_ASSIGN_BACKGROUND / LLM_ASSIGN_REVIEW 把三用途绑到预设 id;
-#   有任一预设即走预设表(未分配用途回退第一预设),无预设回退上面双档;壳设置面板同构(config.json 优先于环境变量)
+
 
 npm run dev:core        # 起 sidecar 核心(打印 port/token,写 core-runtime.local.json,含版本/commit/协议自报)
-# 浏览器打开 http://127.0.0.1:<port>/v1/dev → 裸联调页(对话/流式/工具/多会话,仅 dev 运行时开放,prod 安装包关闭);协议契约见 docs/decisions/0007
+# 浏览器打开 http://127.0.0.1:<port>/v1/dev → 裸联调页(对话/流式/工具/多会话,仅 dev 运行时开放,prod 安装包关闭);协议契约见 docs/reference/03-协议契约.md
 
 node core/scripts/e2e.mjs            # 真实 LLM e2e(key 在场才跑)
 node core/scripts/e2e-workflow.mjs   # 写作闭环剧本:碰撞→留痕闸门→起草→暂存→采纳→落章→快照→冷读(10 步,含触发式续写,真实 LLM)
@@ -30,12 +22,12 @@ node core/scripts/e2e-workflow.mjs   # 写作闭环剧本:碰撞→留痕闸门�
 - `domain/` — MCP 领域服务:结构树(卷/章/场,标题派生)、章节读写(原子写)、搜索、字数统计、章/卷生产与组织(新建/重命名/卷内重排)、历史快照读取
 - `shell/` — Tauri 2 + Svelte 5 + TipTap 壳(v5 布局:48px AI 窄条 + 会话/对话/工具/上下文/设置五栏,点击切换;左侧结构树 + 作者笔记(AI 物理不可见);多候选浮层 B1、工具卡 B3/B10、快照浏览器、目标字数 B5、ask/auto/yolo 审批 B6、会话多级挂载 B7、采纳留痕 B8、树搜索/场大纲/拖拽 B9、设置面板;方案 pill 与碰撞模式(四节对比色+blueprint 徽标)、触发式续写、AI 面板钉住与选区转对话;暂存区左栏 tab+正文区查看候选、选区引用附件化、模型生效态单源;码字日历热力图、章发布状态流转、平台格式一键复制;自动保存间隔可配)
 - `.demo-work/` — 演示作品(测试文本,随时可删)
-- `docs/` — 现状与待办(`current/现状.md`)、需求基线(`reference/01-产品定义.md`)、决策记录(`decisions/0001-0014`);历史文档(诊断 00/roadmap/壳重设计系列/审核手册/生态调研/路线偏移与最新进展等)在 `docs/archive/`(逐件索引见 archive/README.md)
+- `docs/` — 五层：`current/` 现状与待办（唯一日常加载）；`reference/` 现行规范四件（产品定义/字数口径/协议契约/prompt 机制，只写现状）；`work/` 调研与排查工作件（批次收口后封存）；`drafts/` 未定稿草案（仅作者点名）；`archive/` 历史（默认不加载，含 decisions/ 决策史，逐件索引见其 README）
 - `scripts/check-env.ps1` — 检查 LLM_* 环境变量是否配置
 
 ## 下一轮流程（动工前必读）
 
-- 当前待办与优先级见 `docs/current/现状.md` 待办节；设计类改动先入 `docs/decisions/` 按序号定稿，再动工实现。
+- 当前待办与优先级见 `docs/current/现状.md` 当前规划节；设计类改动先入 `docs/drafts/` 草案待作者审定，审定后改写入 `docs/reference/` 再动工实现。
 
 ## 更新通道
 

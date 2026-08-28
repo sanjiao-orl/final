@@ -12,7 +12,7 @@
     "dev:domain": "npm run dev -w domain",
     "dev:shell": "npm run dev -w shell",
     "test": "npm test --workspaces --if-present",
-    "check": "npm run check --workspaces --if-present && node scripts/check-versions.mjs",
+    "check": "npm run check --workspaces --if-present && node scripts/check-versions.mjs && node scripts/check-docs.mjs",
     "check:docs": "node scripts/check-docs.mjs",
     "promptfoo": "npx -y promptfoo@0.122.0 eval -c scripts/promptfoo/promptfooconfig.yaml",
     "build": "npm run build --workspaces --if-present",

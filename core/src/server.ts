@@ -1,4 +1,4 @@
-// 模块职责：本地 HTTP 服务——路由（协议版本化：全部业务路由在 /v1/ 前缀下，契约见 docs/decisions/0007）、
+// 模块职责：本地 HTTP 服务——路由（协议版本化：全部业务路由在 /v1/ 前缀下，契约见 docs/reference/03-协议契约.md）、
 // Bearer 鉴权（/v1/health 豁免；/v1/dev 免鉴权但受 devEnabled 门禁——prod bundle 下关闭回 404）、CORS；业务委托给 chat 管道与 session-store。
 import { timingSafeEqual } from 'node:crypto';
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
@@ -136,7 +136,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
   // 协议已版本化：无 /v1/ 前缀的路径一律 404（在鉴权之前判定，旧客户端不带 token 也能看到迁移提示）
   if (!pathname.startsWith('/v1/')) {
     writeJson(res, 404, {
-      error: `未找到: ${req.method} ${pathname}（协议已版本化：请使用 /v1/ 前缀，契约见 docs/decisions/0007）`,
+      error: `未找到: ${req.method} ${pathname}（协议已版本化：请使用 /v1/ 前缀，契约见 docs/reference/03-协议契约.md）`,
     }, req.headers.origin);
     return;
   }

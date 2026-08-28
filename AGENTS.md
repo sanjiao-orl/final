@@ -5,7 +5,9 @@
 
 ## 加载规则
 - 日常任务：先读 `docs/current/现状.md`（当前事实/规范/待办的唯一基准）
-- 改架构/规范/协议/数据模型时：加读 `docs/decisions/` 相关条与 `docs/reference/` 相关文件
+- 改架构/规范/协议/数据模型时：加读 `docs/reference/` 相关件
+- 调研/排查类工作件在 `docs/work/`：只读当前任务点名单件，不全目录加载
+- `docs/drafts/` 为未定稿草案，仅作者点名时加载
 - 禁止全量加载 `docs/archive/`（历史胶囊，按需单点读）
 - 版本号/更新日期不手写，归 git 管
 -排查和登记缺陷：docs/current/bugs.md——活跃缺陷台账

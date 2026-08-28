@@ -9,7 +9,7 @@ const CORS_ORIGIN_WHITELIST: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * 按请求 Origin 反射 CORS 头（白名单收窄，docs/decisions/0009 批三-1）：
+ * 按请求 Origin 反射 CORS 头（白名单收窄，决策 0009 批三-1）：
  * - Origin 为 http://localhost 或 http://127.0.0.1 任意端口（hostname 判定，防 http://localhost.evil.com 前缀欺骗），
  *   或精确等于 CORS_ORIGIN_WHITELIST 内 Tauri Origin → 反射该 Origin 并加 Vary: Origin；
  * - Origin 不在白名单 → 不给 Access-Control-Allow-Origin（浏览器同源策略拦截；curl 等无 Origin 客户端不受影响）；

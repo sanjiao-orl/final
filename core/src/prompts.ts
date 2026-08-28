@@ -1,4 +1,4 @@
-// 模块职责：提示词与 skill 的统一文件机制（docs/decisions/0008）——解析 prompt 根目录、
+// 模块职责：提示词与 skill 的统一文件机制（docs/reference/04-prompt与skill机制.md）——解析 prompt 根目录、
 // 首次运行把随包缺省文件释放进 app 数据目录（缺才拷；已有但作者未改过的按 hash 清单升级为新版，
 // 本地改过的永不覆盖）、按 kind 加载提示词正文、扫描 skill 清单。
 // 单一事实源是 md 文件；文件缺失/损坏回退一行兜底提示，不崩。prompt 按 mtime 热重载（改文件即生效），skill 每次现扫。
