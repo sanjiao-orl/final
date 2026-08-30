@@ -1,0 +1,14 @@
+{
+  "name": "yuedu-distill",
+  "private": true,
+  "type": "module",
+  "description": "《阅读》(Legado) 书源机制的本地蒸馏：规则引擎 + 三层净化 + 限速抓取管线（语料采集用，非产品代码）",
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "iconv-lite": "^0.6.3",
+    "jsonpath-plus": "^10.3.0"
+  }
+}

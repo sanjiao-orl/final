@@ -1,0 +1,18 @@
+{
+  "rules": [
+    {
+      "name": "示例-全角空格行首",
+      "pattern": "^[　\\s]+",
+      "replacement": "",
+      "flags": "gm",
+      "enabled": true
+    },
+    {
+      "name": "示例-站方水印",
+      "pattern": "\\(完\\)$",
+      "replacement": "",
+      "enabled": true
+    }
+  ],
+  "disabledBuiltin": []
+}

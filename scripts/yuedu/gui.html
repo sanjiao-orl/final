@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>语料蒸馏台 · yuedu-distill</title>
+<style>
+  :root {
+    --bg: #0f1216; --panel: #161b22; --panel2: #1c222b; --line: #2a323d;
+    --fg: #d7dde5; --dim: #8a94a0; --acc: #4da3ff; --ok: #3fb96f; --warn: #d9a039; --err: #e06565;
+    --mono: ui-monospace, Consolas, "Courier New", monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.6 system-ui, "Microsoft YaHei", sans-serif; }
+  header { display: flex; align-items: baseline; gap: 12px; padding: 14px 20px 10px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 17px; margin: 0; }
+  header .sub { color: var(--dim); font-size: 12px; }
+  nav { display: flex; gap: 4px; padding: 8px 20px 0; }
+  nav button { background: none; border: 1px solid transparent; border-bottom: none; color: var(--dim); padding: 7px 16px; cursor: pointer; font-size: 14px; border-radius: 8px 8px 0 0; }
+  nav button.on { color: var(--fg); background: var(--panel); border-color: var(--line); }
+  main { padding: 16px 20px 40px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 6px 0; }
+  .grow { flex: 1 1 220px; }
+  label.opt { color: var(--dim); font-size: 12px; display: flex; flex-direction: column; gap: 3px; }
+  input[type=text], input[type=number] { background: var(--panel2); border: 1px solid var(--line); color: var(--fg); border-radius: 6px; padding: 6px 9px; font-size: 13px; min-width: 90px; }
+  input[type=text]:focus, input[type=number]:focus { outline: 1px solid var(--acc); }
+  input[type=checkbox] { accent-color: var(--acc); width: 15px; height: 15px; }
+  button.act { background: var(--acc); color: #08131f; border: 0; border-radius: 7px; padding: 7px 18px; font-size: 14px; cursor: pointer; font-weight: 600; }
+  button.act:disabled { opacity: .45; cursor: default; }
+  button.ghost { background: var(--panel2); color: var(--fg); border: 1px solid var(--line); border-radius: 7px; padding: 6px 14px; cursor: pointer; }
+  button.danger { background: none; border: 1px solid var(--err); color: var(--err); border-radius: 7px; padding: 5px 12px; cursor: pointer; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--dim); font-weight: 500; white-space: nowrap; }
+  td.mono, .mono { font-family: var(--mono); font-size: 12px; color: var(--dim); word-break: break-all; }
+  .pill { display: inline-block; border-radius: 9px; padding: 0 8px; font-size: 11px; line-height: 18px; }
+  .pill.full { background: #123526; color: var(--ok); }
+  .pill.partial { background: #37301a; color: var(--warn); }
+  .pill.unusable { background: #3a1d1d; color: var(--err); }
+  .pill.run { background: #10283f; color: var(--acc); }
+  #log { background: #0b0e12; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font: 12px/1.7 var(--mono); height: 260px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+  .bar { height: 8px; background: var(--panel2); border-radius: 4px; overflow: hidden; margin: 6px 0; }
+  .bar>i { display: block; height: 100%; background: var(--acc); width: 0; transition: width .4s; }
+  .muted { color: var(--dim); font-size: 12px; }
+  .stats span { margin-right: 16px; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .err { color: var(--err); }
+  .hint { color: var(--dim); font-size: 12px; margin-top: 4px; }
+  #toast { position: fixed; right: 18px; bottom: 18px; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 9px 16px; display: none; max-width: 480px; }
+  details summary { cursor: pointer; color: var(--dim); font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>语料蒸馏台</h1>
+  <span class="sub">yuedu-distill · 《阅读》书源机制本地蒸馏 · 数据只落本机 <span class="mono">.bench/yuedu/</span></span>
+</header>
+<nav>
+  <button data-tab="fetch" class="on">抓书</button>
+  <button data-tab="sources">书源</button>
+  <button data-tab="clean">净化</button>
+  <button data-tab="help">说明</button>
+</nav>
+<main>
+
+<!-- ===== 抓书 ===== -->
+<section id="tab-fetch">
+  <div class="panel">
+    <div class="row">
+      <label class="opt">书源（名称/序号/域名，留空=自动挑可用源）
+        <input type="text" id="f-source" class="mono" style="min-width:260px" placeholder="如：猫眼看书 / 61 / m.suixkan.com">
+      </label>
+      <label class="opt grow">书名或 bookUrl 搜索
+        <input type="text" id="f-kw" class="grow" placeholder="输入书名，如：诡秘之主" style="width:100%">
+      </label>
+      <label class="opt">数量
+        <input type="number" id="f-limit" value="8" min="1" max="30" style="width:70px">
+      </label>
+      <button class="act" id="btn-search">搜索</button>
+    </div>
+    <div id="search-box" style="display:none; margin-top:10px; max-height:280px; overflow:auto">
+      <table><thead><tr><th>书名</th><th>作者</th><th>分类</th><th>操作</th></tr></thead><tbody id="search-rows"></tbody></table>
+    </div>
+    <div class="hint">搜索命中后点「选它」填入下方；也可直接粘贴 bookUrl。</div>
+  </div>
+
+  <div class="panel">
+    <div class="row"><b>抓取任务</b></div>
+    <div class="row">
+      <label class="opt grow">bookUrl（详情页地址）
+        <input type="text" id="f-bookurl" class="mono" style="width:100%" placeholder="/novel/xxxx?isSearch=1 或完整 URL">
+      </label>
+    </div>
+    <div class="row">
+      <label class="opt grow">输出目录（默认 .bench/yuedu/book）
+        <input type="text" id="f-out" class="mono grow" style="width:100%" placeholder="留空用默认">
+      </label>
+      <label class="opt">最多抓几章（0=不限）
+        <input type="number" id="f-max" value="0" min="0" style="width:90px">
+      </label>
+      <label class="opt">疑点阈值（字数下限，0=自动按中位数）
+        <input type="number" id="f-minchars" value="0" min="0" style="width:110px">
+      </label>
+    </div>
+    <div class="row">
+      <label class="opt">限速下限 ms
+        <input type="number" id="f-dmin" value="2500" min="0" step="100" style="width:90px">
+      </label>
+      <label class="opt">限速上限 ms
+        <input type="number" id="f-dmax" value="4500" min="0" step="100" style="width:90px">
+      </label>
+      <label class="opt grow">Cookie（登录态注入，可选）
+        <input type="text" id="f-cookie" class="mono" style="width:100%" placeholder="k=v; k2=v2（番茄/起点等需登录的源才需要）">
+      </label>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="f-resume"> 续抓（断点继续，按已抓章节跳过）</label>
+      <label><input type="checkbox" id="f-builtin" checked> 内置广告净化</label>
+      <span class="muted">用户净化规则：<span id="f-userrules" class="mono">检测中…</span>（clean-rules.user.json）</span>
+      <span style="flex:1"></span>
+      <button class="act" id="btn-fetch">开始抓取</button>
+      <button class="danger" id="btn-stop" disabled>停止</button>
+    </div>
+  </div>
+
+  <div class="panel" id="job-panel" style="display:none">
+    <div class="row" style="justify-content:space-between">
+      <b>任务 <span id="j-id" class="mono"></span> <span id="j-status" class="pill run"></span></b>
+      <span id="j-progress-text" class="muted mono"></span>
+    </div>
+    <div class="bar"><i id="j-bar"></i></div>
+    <div id="log"></div>
+    <div class="stats" id="j-stats" style="margin-top:8px"></div>
+    <details style="margin-top:6px"><summary>报告（report.md 内容）</summary><pre id="j-report" class="mono" style="white-space:pre-wrap"></pre></details>
+  </div>
+</section>
+
+<!-- ===== 书源 ===== -->
+<section id="tab-sources" style="display:none">
+  <div class="panel">
+    <div class="row">
+      <input type="text" id="s-kw" class="grow" placeholder="过滤：名称 / 分组 / 域名" style="width:100%">
+      <button class="ghost" id="btn-sfilter">过滤</button>
+      <span class="muted" id="s-summary"></span>
+    </div>
+    <div style="max-height:520px; overflow:auto">
+      <table><thead><tr><th>#</th><th>名称</th><th>分组</th><th>画像</th><th>域名</th><th>操作</th></tr></thead>
+      <tbody id="source-rows"></tbody></table>
+    </div>
+    <div class="hint">画像来自静态规则体检：full=引擎全支持；partial=有降级；unusable=缺关键规则。点击「搜索」直接跳到抓书页。</div>
+  </div>
+</section>
+
+<!-- ===== 净化 ===== -->
+<section id="tab-clean" style="display:none">
+  <div class="panel">
+    <div class="row"><b>单文件净化</b>（三层：书源 replaceRegex → 用户规则 → 内置广告库）</div>
+    <div class="row">
+      <label class="opt grow">文件路径（.md/.txt）
+        <input type="text" id="c-file" class="mono" style="width:100%" placeholder="如 C:\final\.bench\yuedu\book\manuscript\0001-xxx.md">
+      </label>
+    </div>
+    <div class="row">
+      <label class="opt grow">输出路径（默认原文件名 + .cleaned.txt）
+        <input type="text" id="c-out" class="mono" style="width:100%" placeholder="留空自动">
+      </label>
+      <label><input type="checkbox" id="c-builtin" checked> 内置广告净化</label>
+      <button class="act" id="btn-clean">净化</button>
+    </div>
+    <div id="c-result" class="mono" style="margin-top:8px"></div>
+  </div>
+  <div class="panel">
+    <div class="row"><b>净化规则表</b>（Legado 替换净化同款：勾选启用/停用；停用的规则保留在表中，改完点保存）</div>
+    <div class="row">
+      <table>
+        <thead><tr><th>启用</th><th>名称</th><th>正则</th><th>替换为</th><th>flags</th><th></th></tr></thead>
+        <tbody id="r-builtins"></tbody>
+        <tbody id="r-userrows"></tbody>
+      </table>
+    </div>
+    <div class="row">
+      <button class="ghost" id="btn-rule-add">＋ 新增用户规则</button>
+      <button class="act" id="btn-rules-save">保存规则表</button>
+      <span class="muted">内置规则 = 广告/站方注入库（按名停用）；用户规则可增删改。存 <span class="mono">clean-rules.user.json</span></span>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 说明 ===== -->
+<section id="tab-help" style="display:none">
+  <div class="panel">
+    <b>这是什么</b>
+    <p>《阅读》(Legado) 书源机制的本地蒸馏：书源规则引擎 + 三层净化 + 限速抓取 + 保真度门。语料带溯源 frontmatter 落在 <span class="mono">输出目录/manuscript/</span>，报告在 <span class="mono">report.md</span>。</p>
+    <b>推荐流程</b>
+    <p>「书源」页挑一个 <span class="pill full">full</span> 源 →「抓书」页搜索 → 选书 → 先用「最多抓几章=3」试跑 → 看报告疑点率 → 放开章节数正式抓。断网/被拦可勾「续抓」接着跑。</p>
+    <b>纪律（照搬试车台教训）</b>
+    <p>随机限速 2.5–4.5 秒/章；连续 3 次失败即阻塞停（防封禁）；疑点章 = 字数低于中位数 50%，语义完整性需另对账；语料只进 gitignored 的 .bench/，不分发。</p>
+    <b>登录墙源</b>
+    <p>番茄/起点等需登录态的源：先在浏览器登录后复制 Cookie 填入抓书页的 Cookie 框（仅注入本机请求）。</p>
+    <b>命令行等价</b>
+    <p class="mono">node scripts/yuedu/cli.mjs search|toc|fetch|clean …（GUI 做不到的批量脚本化用它）</p>
+  </div>
+</section>
+</main>
+<div id="toast"></div>
+
+<script>
+const $ = (q) => document.querySelector(q);
+const $$ = (q) => [...document.querySelectorAll(q)];
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function toast(msg, ms = 3800) {
+  const t = $('#toast'); t.textContent = msg; t.style.display = 'block';
+  clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', ms);
+}
+async function api(path, body) {
+  const r = await fetch(path, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : undefined);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+  return j;
+}
+
+// ---- tabs ----
+$$('nav button').forEach((b) => b.onclick = () => {
+  $$('nav button').forEach((x) => x.classList.toggle('on', x === b));
+  $$('main section').forEach((s) => s.style.display = s.id === 'tab-' + b.dataset.tab ? '' : 'none');
+});
+
+// ---- sources tab ----
+async function loadSources(kw = '') {
+  const d = await api('/api/sources?kw=' + encodeURIComponent(kw));
+  $('#s-summary').textContent = `命中 ${d.matched}/${d.total}，其中 full ${d.full} 个`;
+  $('#source-rows').innerHTML = d.list.map((s, i) => `
+    <tr>
+      <td class="mono">${i + 1}</td>
+      <td>${esc(s.name)}</td>
+      <td class="mono">${esc(s.group)}</td>
+      <td><span class="pill ${esc(s.verdict)}">${esc(s.verdict)}</span>${s.unsupported?.length ? `<div class="muted">${esc(s.unsupported.join('、'))}</div>` : ''}</td>
+      <td class="mono">${esc(s.url)}</td>
+      <td><button class="ghost" data-use="${esc(s.name)}">搜索</button></td>
+    </tr>`).join('');
+  $$('#source-rows [data-use]').forEach((b) => b.onclick = () => {
+    $('#f-source').value = b.dataset.use;
+    $$('nav button')[0].click();
+    $('#f-kw').focus();
+  });
+}
+$('#btn-sfilter').onclick = () => loadSources($('#s-kw').value.trim());
+$('#s-kw').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadSources($('#s-kw').value.trim()); });
+
+// ---- search ----
+let curSource = '';
+$('#btn-search').onclick = async () => {
+  const kw = $('#f-kw').value.trim();
+  if (!kw) return toast('输入书名再搜索');
+  curSource = $('#f-source').value.trim();
+  $('#btn-search').disabled = true; $('#btn-search').textContent = '搜索中…';
+  try {
+    const d = await api('/api/search', { sourceKey: curSource, keyword: kw, limit: Number($('#f-limit').value || 8) });
+    if (d.used && d.auto) {
+      curSource = d.used.name;
+      $('#f-source').value = d.used.name;
+      toast(`自动选中源：${d.used.name}（${d.used.verdict}）`);
+    }
+    $('#search-box').style.display = '';
+    $('#search-rows').innerHTML = (d.results ?? []).map((b, i) => `
+      <tr>
+        <td>${esc(b.name)}</td><td>${esc(b.author)}</td><td class="mono">${esc(b.kind)}</td>
+        <td><button class="ghost" data-pick="${i}">选它</button></td>
+      </tr>`).join('') || '<tr><td colspan="4" class="muted">无结果</td></tr>';
+    window._searchResults = d.results ?? [];
+    $$('#search-rows [data-pick]').forEach((b) => b.onclick = () => {
+      const r = window._searchResults[Number(b.dataset.pick)];
+      $('#f-bookurl').value = r.bookUrl;
+      if (!curSource) toast('提示：未指定书源时将自动挑选同名可用源');
+      toast(`已选《${r.name}》`);
+    });
+  } catch (e) { toast('搜索失败：' + e.message); }
+  $('#btn-search').disabled = false; $('#btn-search').textContent = '搜索';
+};
+$('#f-kw').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#btn-search').click(); });
+
+// ---- fetch job ----
+let curJob = null, pollTimer = null;
+$('#btn-fetch').onclick = async () => {
+  const bookUrl = $('#f-bookurl').value.trim();
+  if (!bookUrl) return toast('先搜索选书，或粘贴 bookUrl');
+  try {
+    const d = await api('/api/fetch', {
+      sourceKey: $('#f-source').value.trim() || curSource,
+      bookUrl,
+      outDir: $('#f-out').value.trim(),
+      max: Number($('#f-max').value || 0) || undefined,
+      minChars: Number($('#f-minchars').value || 0) || undefined,
+      delayMin: $('#f-dmin').value, delayMax: $('#f-dmax').value,
+      cookie: $('#f-cookie').value.trim(),
+      resume: $('#f-resume').checked,
+      builtinClean: $('#f-builtin').checked,
+    });
+    watchJob(d.jobId);
+  } catch (e) { toast('启动失败：' + e.message); }
+};
+$('#btn-stop').onclick = async () => { if (curJob) await api(`/api/job/${curJob}/stop`, {}); };
+
+function watchJob(id) {
+  curJob = id;
+  $('#job-panel').style.display = '';
+  $('#j-id').textContent = '#' + id;
+  $('#btn-stop').disabled = false;
+  clearInterval(pollTimer);
+  pollTimer = setInterval(poll, 1200);
+  poll();
+}
+let lastLogLen = 0;
+async function poll() {
+  if (!curJob) return;
+  let j;
+  try { j = await api('/api/job/' + curJob); } catch { return; }
+  const st = j.status;
+  const pill = $('#j-status');
+  pill.textContent = st === 'running' ? '进行中' : st === 'error' ? '失败' : st === 'done' ? '完成' : '完成（有警告）';
+  pill.className = 'pill ' + (st === 'running' ? 'run' : st === 'error' ? 'unusable' : 'full');
+  const pct = j.progress.total > 0 ? Math.min(100, Math.round(j.progress.done / j.progress.total * 100)) : 0;
+  $('#j-bar').style.width = pct + '%';
+  $('#j-progress-text').textContent = `${j.progress.done}/${j.progress.total || '?'} ${pct}%　${j.progress.title ?? ''}`;
+  const log = $('#log');
+  if (j.log.length !== lastLogLen) {
+    log.textContent = j.log.join('\n');
+    log.scrollTop = log.scrollHeight;
+    lastLogLen = j.log.length;
+  }
+  if (j.report) {
+    const r = j.report;
+    $('#j-stats').innerHTML = `
+      <span>成功 <b class="ok">${r.fetched}</b></span>
+      <span>失败 <b class="${r.errors.length ? 'err' : ''}">${r.errors.length}</b></span>
+      <span>疑点章 <b class="${r.suspects ? 'warn' : ''}">${r.suspects}</b></span>
+      <span>中位字数 <b>${r.fidelity?.medianChars ?? '?'}</b></span>
+      <span>净化 <span class="mono">${Object.entries(r.cleanupLayers ?? {}).map(([k, v]) => k + '×' + v).join(' ') || '无'}</span></span>
+      <span class="mono">${esc(r.outDir ?? '')}</span>`;
+    $('#j-report').textContent = [
+      `书：${r.book?.name ?? '?'}　源：${r.source?.name ?? '?'}（${r.source?.url ?? ''}）`,
+      `目录：${r.toc?.realChapters} 章（卷 ${r.toc?.volumes}，目录页 ${r.toc?.pages}）`,
+      `成功 ${r.fetched}；失败 ${r.errors.length}；${r.blocked ? '触发反爬阻塞（' + r.blocked.at + '）' : '无阻塞'}${r.stopped ? '；手动停止' : ''}`,
+      `保真度：中位 ${r.fidelity?.medianChars} 字，阈值 ${r.fidelity?.minChars}，疑点 ${r.suspects} 章`,
+      `警告：${(r.warnings ?? []).join('；') || '无'}`,
+      ...(r.errors ?? []).slice(0, 30).map((e) => `  失败[${e.index}] ${e.title}: ${e.error}`),
+    ].join('\n');
+  }
+  if (st !== 'running') {
+    clearInterval(pollTimer); pollTimer = null;
+    $('#btn-stop').disabled = true;
+    if (j.error) toast('任务失败：' + j.error, 8000);
+  }
+}
+
+// ---- clean tab ----
+$('#btn-clean').onclick = async () => {
+  const file = $('#c-file').value.trim();
+  if (!file) return toast('填入要净化的文件路径');
+  try {
+    const d = await api('/api/clean', { file, out: $('#c-out').value.trim(), builtinClean: $('#c-builtin').checked });
+    $('#c-result').innerHTML = `<span class="ok">已写出 ${esc(d.out)}</span><br>` +
+      (d.stats ?? []).map((s) => `[${esc(s.layer)}] ${esc(s.name)} ×${s.count}${s.flagged ? '（' + esc(s.flagged) + '）' : ''}`).join('<br>') || '（无命中）';
+  } catch (e) { toast('净化失败：' + e.message); }
+};
+
+// ---- 净化规则表（Legado 替换净化同款：勾选启用/停用，用户规则可增删改）----
+let _ruleTable = { rules: [], disabledBuiltin: [] };
+function renderRuleTable(builtins) {
+  $('#r-builtins').innerHTML = (builtins ?? []).map((b) => `
+    <tr>
+      <td><input type="checkbox" ${_ruleTable.disabledBuiltin.includes(b.name) ? '' : 'checked'} data-builtin="${esc(b.name)}"></td>
+      <td>${esc(b.name)} <span class="muted">（内置）</span></td>
+      <td class="mono">${esc(b.pattern)}</td><td class="mono">${esc(b.replacement ?? '')}</td><td></td><td></td>
+    </tr>`).join('');
+  $('#r-userrows').innerHTML = _ruleTable.rules.map((r, i) => `
+    <tr>
+      <td><input type="checkbox" ${r.enabled === false ? '' : 'checked'} data-ri="${i}"></td>
+      <td><input data-fi="${i}" data-fk="name" value="${esc(r.name ?? '')}" style="width:100%"></td>
+      <td><input class="mono" data-fi="${i}" data-fk="pattern" value="${esc(r.pattern ?? '')}" style="width:100%"></td>
+      <td><input class="mono" data-fi="${i}" data-fk="replacement" value="${esc(r.replacement ?? '')}" style="width:100%"></td>
+      <td><input class="mono" data-fi="${i}" data-fk="flags" value="${esc(r.flags ?? 'g')}" size="5"></td>
+      <td><button class="ghost" data-del="${i}">删</button></td>
+    </tr>`).join('');
+  $$('#r-userrows [data-ri]').forEach((cb) => cb.onchange = () => { _ruleTable.rules[Number(cb.dataset.ri)].enabled = cb.checked; });
+  $$('#r-userrows [data-fi]').forEach((inp) => inp.onchange = () => { _ruleTable.rules[Number(inp.dataset.fi)][inp.dataset.fk] = inp.value; });
+  $$('#r-userrows [data-del]').forEach((btn) => btn.onclick = () => { _ruleTable.rules.splice(Number(btn.dataset.del), 1); renderRuleTable(window._builtins ?? []); });
+  $$('#r-builtins [data-builtin]').forEach((cb) => cb.onchange = () => {
+    const set = new Set(_ruleTable.disabledBuiltin);
+    cb.checked ? set.delete(cb.dataset.builtin) : set.add(cb.dataset.builtin);
+    _ruleTable.disabledBuiltin = [...set];
+  });
+}
+async function loadRules() {
+  try {
+    const d = await api('/api/clean-rules');
+    _ruleTable = { rules: d.rules ?? [], disabledBuiltin: d.disabledBuiltin ?? [] };
+    window._builtins = d.builtins ?? [];
+    renderRuleTable(window._builtins);
+  } catch (e) { toast('规则表加载失败：' + e.message); }
+}
+$('#btn-rule-add').onclick = () => { _ruleTable.rules.push({ name: '新规则', pattern: '', replacement: '', flags: 'g', enabled: true }); renderRuleTable(window._builtins ?? []); };
+$('#btn-rules-save').onclick = async () => {
+  const bad = _ruleTable.rules.find((r) => !String(r.name ?? '').trim() || !String(r.pattern ?? '').trim());
+  if (bad) return toast('有规则的名称或正则为空，填好再保存');
+  try {
+    const d = await api('/api/clean-rules', { rules: _ruleTable.rules, disabledBuiltin: _ruleTable.disabledBuiltin });
+    toast(`规则表已保存：用户规则 ${d.rules} 条，停用内置 ${d.disabledBuiltin} 条`);
+  } catch (e) { toast('保存失败：' + e.message); }
+};
+
+// ---- init ----
+api('/api/out-default').then((d) => {
+  $('#f-userrules').textContent = d.userRules ? '已就绪' : '未找到（将只用内置）';
+  $('#f-out').placeholder = d.outDir;
+}).catch(() => {});
+loadSources();
+loadRules();
+</script>
+</body>
+</html>
