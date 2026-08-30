@@ -1,0 +1,15 @@
+{
+  "name": "hetushu",
+  "fullWidthNormalize": true,
+  "cleanRules": [
+    { "name": "水印-站名全形+脚手架", "pattern": "(?:www|m|wap)[•·.]{0,2}hetushu[•·.]{0,2}com(?:[•·.]{0,2}com)?|(?:www|m|wap)[•·.]{1,2}com(?:[•·.]{1,2}com)?|com(?:[•·.]{1,2}com)+|(?:www|m|wap)[•·.]{1,2}|[•·]{1,2}com|com[•·.]{1,2}", "replacement": "", "enabled": true },
+    { "name": "水印-站名链接", "pattern": "(https?://)?(m\\.)?hetushu\\.com[\\w./-]*", "replacement": "", "enabled": true },
+    { "name": "水印-站名裸串", "pattern": "hetushu[.•·]?", "replacement": "", "enabled": true },
+    { "name": "水印-通用链接", "pattern": "https?://", "replacement": "", "enabled": true },
+    { "name": "水印-中文名插字", "pattern": "和[_*·•＝=\\-–—]{1,3}图[_*·•＝=\\-–—]{1,3}书", "replacement": "", "enabled": true }
+  ],
+  "uiLines": [
+    "书签", "字号", "间距", "模式", "夜间", "护眼", "背景", "白天", "设置", "目录",
+    "上一章", "下一章", "加入书签", "投推荐票"
+  ]
+}

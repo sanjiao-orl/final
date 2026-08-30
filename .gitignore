@@ -11,6 +11,7 @@ shell/src-tauri/target/
 .novel/
 .playwright-mcp/
 .demo-work/
+.bench/
 .w3-accident-backup/
 prototype/.shot-*.png
 prototype/.wb-*.json
