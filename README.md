@@ -1,60 +1,68 @@
-# novel-ws(小说写作工作台)
+# novel-ws（小说写作工作台）
 
-网文连载单作者的本地 AI 写作工作台。架构与纪律见 `AGENTS.md`。
+网文连载单作者的本地 AI 写作工作台（Windows 桌面、纯本地、无账号、BYOK）。当前事实与规划的唯一基准是 `docs/current/现状.md`；协作纪律见 `AGENTS.md`。
 
 ## 快速开始
 
 ```bash
 npm install
 
+npm run dev:core        # 起 sidecar 核心（自动分配端口，打印 port/token，写 core-runtime.local.json，含版本/commit/协议自报）
+# 浏览器打开 http://127.0.0.1:<port>/v1/dev → 裸联调页（对话/流式/工具/多会话，仅 dev 运行时开放；协议契约见 docs/reference/03-协议契约.md）
 
+npm run dev:shell       # 起 Tauri 桌面壳（以固定端口 47832 拉起 core）
 
-npm run dev:core        # 起 sidecar 核心(打印 port/token,写 core-runtime.local.json,含版本/commit/协议自报)
-# 浏览器打开 http://127.0.0.1:<port>/v1/dev → 裸联调页(对话/流式/工具/多会话,仅 dev 运行时开放,prod 安装包关闭);协议契约见 docs/reference/03-协议契约.md
-
-node core/scripts/e2e.mjs            # 真实 LLM e2e(key 在场才跑)
-node core/scripts/e2e-workflow.mjs   # 写作闭环剧本:碰撞→留痕闸门→起草→暂存→采纳→落章→快照→冷读(10 步,含触发式续写,真实 LLM)
+node core/scripts/e2e.mjs            # 真实 LLM e2e（key 在场才跑）
+node core/scripts/e2e-workflow.mjs   # 写作闭环剧本：碰撞→留痕闸门→起草→暂存→采纳→落章→快照→冷读（12 步，真实 LLM）
 ```
+
+LLM_* 环境变量检查：`scripts/check-env.ps1`（PowerShell）。
 
 ## 包结构
 
-- `core/` — sidecar 核心:HTTP+SSE server、AI SDK v7、MCP client、node:sqlite 会话持久化
-- `domain/` — MCP 领域服务:结构树(卷/章/场,标题派生)、章节读写(原子写)、搜索、字数统计、章/卷生产与组织(新建/重命名/卷内重排)、历史快照读取
-- `shell/` — Tauri 2 + Svelte 5 + TipTap 壳(v5 布局:48px AI 窄条 + 会话/对话/工具/上下文/设置五栏,点击切换;左侧结构树 + 作者笔记(AI 物理不可见);多候选浮层 B1、工具卡 B3/B10、快照浏览器、目标字数 B5、ask/auto/yolo 审批 B6、会话多级挂载 B7、采纳留痕 B8、树搜索/场大纲/拖拽 B9、设置面板;方案 pill 与碰撞模式(四节对比色+blueprint 徽标)、触发式续写、AI 面板钉住与选区转对话;暂存区左栏 tab+正文区查看候选、选区引用附件化、模型生效态单源;码字日历热力图、章发布状态流转、平台格式一键复制;自动保存间隔可配)
-- `.demo-work/` — 演示作品(测试文本,随时可删)
-- `docs/` — 五层：`current/` 现状与待办（唯一日常加载）；`reference/` 现行规范四件（产品定义/字数口径/协议契约/prompt 机制，只写现状）；`work/` 调研与排查工作件（批次收口后封存）；`drafts/` 未定稿草案（仅作者点名）；`archive/` 历史（默认不加载，含 decisions/ 决策史，逐件索引见其 README）
-- `scripts/check-env.ps1` — 检查 LLM_* 环境变量是否配置
+- `core/` — sidecar 核心：HTTP+SSE server、AI SDK v7、MCP client、node:sqlite 会话持久化
+- `domain/` — MCP 领域服务（38 工具）：结构树（卷/章/场）、章节读写（原子写）、搜索、字数统计、生产与组织、历史快照、声口指纹等
+- `shell/` — Tauri 2 + Svelte 5 + TipTap 桌面壳：v5 五栏布局、结构树 + 作者笔记（AI 物理不可见）、多候选浮层、ask/auto/yolo 审批、快照浏览器、设置面板、碰撞模式与触发式续写（功能全景见 `docs/current/现状.md`，此处不展开）
+- `docs/` — 五层：`current/` 现状与待办（日常唯一加载）；`reference/` 现行规范四件（产品定义/字数口径/协议契约/prompt 机制）；`work/` 调研排查件；`drafts/` 未定稿草案；`archive/` 历史（默认不加载）
+- `scripts/` — 工程脚本（release / check-versions / check-docs / perf-benchmark / build-sidecar）与语料工具（`yuedu/`、`qidian-ssr/`、`fanqie-collect/`）
+- `.demo-work/` — 演示作品（测试文本，随时可删）
 
-## 下一轮流程（动工前必读）
+## 语料采集（`scripts/yuedu/`，非产品代码，不进 CI）
 
-- 当前待办与优先级见 `docs/current/现状.md` 当前规划节；设计类改动先入 `docs/drafts/` 草案待作者审定，审定后改写入 `docs/reference/` 再动工实现。
+《阅读》(Legado) 书源机制的本地蒸馏：书源规则 DSL 引擎（默认/jsoup、@css:、@json:、正则净化、URL 模板）+ 三层净化 + 限速抓取 + 保真度门，可直接导入其生态的书源 JSON（`sources/` 内置 150 个精选源）。语料带溯源 frontmatter 落 `.bench/yuedu/`（gitignored，不分发）。
 
-## 更新通道
-
-- 端点:`https://github.com/sanjiao-orl/final/releases/latest/download/latest.json`(Tauri updater 标准静态 latest.json,启动后台检查,发现新版本即下载校验并走 passive 安装)。
-- 发布命令(在仓库根,需 `gh` 已登录 github.com):
-  ```bash
-  npm run release -- 0.1.1          # 指定版本
-  npm run release -- patch          # 或 patch / minor / major 自增
-  npm run release -- patch --dry-run # 无副作用演练:只读预检+版本内容内存校验+打印动作计划
-  ```
-  脚本 `scripts/release.mjs` 先工作树预检(除版本文件外的未提交改动即拦截)→ 同步六处版本号(`shell/src-tauri/tauri.conf.json`、`shell/package.json`、`shell/src-tauri/Cargo.toml`、`core/package.json`、`domain/package.json`、`package-lock.json` 的 core/domain/shell 三段,顺带 `Cargo.lock` 的 app 段;事务化写入——七处新内容全部内存构造并逐项校验通过才落盘,写完由 `scripts/check-versions.mjs` 自检,不一致即中止)→ 带签名私钥跑 `npx tauri build --ci`(仅 NSIS;`core/prompts/` 中文目录名超出 WiX 1252 码页,MSI 已弃)→ 收集 NSIS 与 `.sig` → 生成 `latest.json` → 版本落账(自动 `chore(release): bump vX.Y.Z` + tag + push,幂等)→ 建草稿 release 逐文件 `gh release upload --clobber` 上传(gh 走 rustls,根治 curl/schannel 大文件上传卡死;失败重试,断网修复后重跑同一命令续传)→ 全部传完才发布。
-- 护栏(0014):自增算出的版本其本地 tag 已存在即拦截(半途续传请显式指定版本号,如 `npm run release -- 0.2.5`);发版前建议先 `--dry-run` 空跑一遍看动作计划;CI 门禁见 `.github/workflows/ci.yml`(check+test+cargo test,e2e 需真实 key 不进 CI)。
-- 签名密钥在仓外 `%USERPROFILE%\.tauri\novel-ws.key`(本仓为空密码;pubkey 已写入 tauri.conf.json,私钥绝不入库)。可用 `TAURI_SIGNING_PRIVATE_KEY_PATH` 覆盖路径,或 `TAURI_SIGNING_PRIVATE_KEY` 直接给密钥内容;密码用 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。
-- 版本号改动由脚本自动落账(commit/tag/push),无需手动提交;工作树不干净时脚本会直接拦截。
-- 发布记录:v0.1.0 首发(真实更新通道基线);v0.1.1 升级通道闭环验证;v0.1.x 壳 v4 与真实使用反馈修复;v0.2.0 壳 v5;v0.2.1 批一安全修复 + prompt/skill 文件机制;v0.2.2 审计收口 + 批三-1/-2/-3 + 更新体验修复(实机 0.2.1→0.2.2 自动升级验证通过);v0.2.3 铁律回归批(chat 正文一律经 stage_chapter_proposal 进暂存区、设定路由防 manuscript 污染,决策 0012);v0.2.4 碰撞模式/触发式续写/编辑器联动(批一③④⑤,protocol 4);v0.2.5 作者反馈批 R1/R3/R4 + 批一⑥日更手感小包(protocol 6、31 工具)+ 工程护栏批(CI 门禁/release dry-run+事务化/esbuild 落账);v0.2.6 块0 修复批(0822排查 30 条全结:全链超时取消/数据正确性/prompt·skill 口径,bugs.md 台账立账);v0.2.7 块1 理解层供料(对账器/章摘要/发布前质检/list_trash 收口,35 工具,CI windows-latest 首绿);v0.2.8 评审修复 R1 + T9 正文跳转闭环(restore_trash 收口 36 工具、scan_quality 内存修复、四类面板定位钮);v0.2.9 评审 R2 余量批 T10-T14 + 作者实测两条(工具结果信封解包/输出触顶可见);v0.2.10 块 2 前置两小批(DOMPurify 输出净化三入口+promptfoo 行为回归基建,bugs.md 随版归档纪律生效,当前最新)。
-
-## production 打包（sidecar 随安装包分发）
-
-- `npm run build:sidecar`：用 esbuild 把 `core/src/main.ts`、`domain/src/server.ts` 打成单文件 ESM bundle（`core/dist/main.mjs`、`domain/dist/server.mjs`），并把本机 Node 24 运行时复制到 `shell/src-tauri/resources/sidecar/node.exe`（该目录不入库）。
-- `cd shell && npx tauri build`：`beforeBuildCommand` 会先构建前端与 sidecar；`bundle.resources` 把 `sidecar/node.exe`、`sidecar/core/main.mjs`、`sidecar/domain/server.mjs` 收进安装包资源目录。
-- 发布形态：release 壳从 Tauri resource_dir 拉起 node.exe + core bundle，并通过 `MCP_DOMAIN_CMD` 指向资源目录里的 domain bundle；dev 模式仍走仓库源码 + `tsx`，行为不变。作品目录：dev 为 `<repo>/.demo-work`，prod 为系统应用数据目录下 `.demo-work`。
+- **图形界面（推荐）**：双击 `scripts/yuedu/启动蒸馏台.bat` —— 自动装依赖（仅首次）→ 起本地服务（只绑 127.0.0.1）→ 自动开浏览器。四页签：抓书 / 书源（150 源静态画像过滤） / 净化 / 说明。书源可留空由工具自动挑可用源。
+- **命令行**：`node scripts/yuedu/cli.mjs search|info|toc|fetch|clean|sources …`（全参数见 `scripts/yuedu/README.md`）。
+- 测试：`cd scripts/yuedu && npm test`（23 用例，含本地 mock 书站端到端）；GUI 链路：先起服务再 `node test/gui-smoke.mjs`。
 
 ## 验收口径
 
-- `npm run check` / `npm test`(993 用例:core 242 + domain 361 + shell 390;另 cargo test 17;写作闭环 e2e-workflow 12 步含碰撞闸门与触发式续写,真实 LLM key 在场才跑;行为回归 `npm run promptfoo` 四用例——起草路由/skill 铁律/非正文负向/声口建档全流程,同样真实 LLM 手动跑;GitHub Actions CI 门禁同口径)
-- 每周出口 = 作者用本仓真实写作;不以测试绿为验收
+- `npm run check`（含 check-versions 六处版本一致 + check:docs 文档防腐）/ `npm test`（1011 用例：core 249 + domain 364 + shell 398；另 cargo test 19）
+- 写作闭环 `node core/scripts/e2e-workflow.mjs`（12 步）与行为回归 `npm run promptfoo`（四用例）均真实 LLM、key 在场手动跑、不进 CI；GitHub Actions CI 门禁同口径（check+test+cargo test）
+- 出口度量：真实长篇试车台（番茄/公版书灌真书）为日常尺子，作者真实写作为期末考；不以测试绿为验收
+
+## production 打包（sidecar 随安装包分发）
+
+`npm run build:sidecar` 用 esbuild 把 core/domain 打成单文件 ESM bundle 并把本机 Node 运行时复制进壳资源目录 → `cd shell && npx tauri build` 收进安装包。release 壳从 Tauri resource_dir 拉起 node.exe + bundle；dev 模式仍走仓库源码 + `tsx`，行为不变。作品目录：dev 为 `<repo>/.demo-work`，prod 为系统应用数据目录下 `.demo-work`。
+
+## 更新通道
+
+- Tauri updater 标准静态 `latest.json`：`https://github.com/sanjiao-orl/final/releases/latest/download/latest.json`。启动后台检查，发现新版本即下载校验并 passive 安装。
+- 发布（仓库根，需 `gh` 已登录）：
+
+  ```bash
+  npm run release -- 0.2.12             # 指定版本；或 patch / minor / major 自增
+  npm run release -- patch --dry-run    # 无副作用演练：只读预检 + 版本内存校验 + 打印动作计划
+  ```
+
+  脚本流程：工作树预检（有未提交改动即拦截）→ 六处版本号事务化同步（写完由 check-versions 自检）→ 带签名私钥跑 `npx tauri build --ci`（仅 NSIS，MSI 已弃）→ 生成 `latest.json` → 版本落账（commit/tag/push，幂等）→ 建草稿 release 逐文件上传（失败重跑同一命令续传）→ 全部传完才发布。
+- 签名私钥在仓外 `%USERPROFILE%\.tauri\novel-ws.key`（本仓为空密码，私钥绝不入库；可用 `TAURI_SIGNING_PRIVATE_KEY_PATH` / `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 覆盖）。
+- 护栏：自增算出的版本其本地 tag 已存在即拦截；CI 门禁见 `.github/workflows/ci.yml`。
+
+## 发布记录
+
+逐版记录归 git 管，此处不手写台账：当前最新 **v0.2.11**（块 2 声口批 + 修复批 R4 六件 + 随版归档纪律生效），历史见 git tag 与提交史。
 
 ## 已知现象
 
-- **AI 对话"不流式"**:壳全链路是流式的(core 逐帧 SSE → 壳 40ms 批次渲染)。若观感是整段一次性蹦出,多半是 provider/代理端不流式或粗粒度吐——可用 `/v1/dev` 联调页直接观察 SSE 帧间隔验证(免鉴权,浏览器开 `http://127.0.0.1:<port>/v1/dev`)。属供应商行为,壳不兜底。
+- **AI 对话"不流式"**：壳全链路是流式的（core 逐帧 SSE → 壳 40ms 批次渲染）。若观感是整段一次性蹦出，多半是 provider/代理端不流式或粗粒度吐——可用 `/v1/dev` 联调页直接观察 SSE 帧间隔验证（免鉴权）。属供应商行为，壳不兜底。
