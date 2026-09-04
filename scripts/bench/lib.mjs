@@ -43,6 +43,34 @@ export function printUsage(label) {
   console.error(`[用量] ${label}: calls=${usage.calls} input=${usage.input} output=${usage.output} tokens`);
 }
 
+/** JSON 字符串值内未转义引号修复：串内 " 后随（跳空白）非结构符即视为内容字符。 */
+export function repairInnerQuotes(s) {
+  let out = '';
+  let inStr = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === '"') {
+      if (!inStr) {
+        out += c;
+        inStr = true;
+        continue;
+      }
+      let j = i + 1;
+      while (j < s.length && /\s/.test(s[j])) j++;
+      const nxt = s[j];
+      if (nxt === ',' || nxt === '}' || nxt === ']' || nxt === ':' || nxt === undefined) {
+        out += c;
+        inStr = false;
+      } else {
+        out += '”';
+      }
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
 /** 结构化生成：提示词声明 JSON 结构 + 容错解析（首个 { 到末个 }）+ validate 校验/归一 + 指数退避重试。 */
 export async function genJSON({ model, shape, validate, system, prompt, maxRetries = 3, temperature = 0.2 }) {
   let lastErr;
@@ -62,7 +90,18 @@ export async function genJSON({ model, shape, validate, system, prompt, maxRetri
       const s = text.indexOf('{');
       const e = text.lastIndexOf('}');
       if (s < 0 || e <= s) throw new Error(`响应无 JSON：${text.slice(0, 120)}`);
-      const obj = JSON.parse(text.slice(s, e + 1));
+      let obj;
+      try {
+        obj = JSON.parse(text.slice(s, e + 1));
+      } catch (jsonErr) {
+        // 免费档常见病：字符串值内未转义 ASCII 引号（如 晋升"无面人"、""世界"登场"）。
+        // 修复=逐字符状态机：串内 " 仅当后随（跳空白）为结构符 , } ] : 才视为闭合，否则替换为全角”。
+        try {
+          obj = JSON.parse(repairInnerQuotes(text.slice(s, e + 1)));
+        } catch {
+          throw jsonErr;
+        }
+      }
       return validate ? validate(obj) : obj;
     } catch (err) {
       lastErr = err;
