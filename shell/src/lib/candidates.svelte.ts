@@ -6,6 +6,7 @@ import type { CoreClient } from './core.js';
 import type { Candidate } from './types.js';
 import { snapshot } from './snapshot.svelte.js';
 import { scheme } from './scheme.svelte.js';
+import { inbox } from './inbox.svelte.js';
 import { work } from './work.svelte.js';
 import { ISSUE_LOG_DEFAULT } from './paths.js';
 
@@ -80,6 +81,7 @@ export class CandidatesStore {
   openStaging(): void {
     this.overviewOpen = false; // 左栏暂存与全览互斥
     this.stagingTab = true;
+    inbox.tabOpen = false; // 左栏暂存与收件箱互斥（单一出口，勿在调用点手工配对）
     const first = this.items[0];
     this.viewingId = first?.id ?? null;
     void this.load();
@@ -197,6 +199,7 @@ export class CandidatesStore {
     const voice: { note: string[] | null } = { note: null };
     this.generating = { chapter, original, instruction: instruction.trim(), text: '' };
     this.stagingTab = true; // 左栏实时展示生成状态
+    inbox.tabOpen = false; // 收起收件箱 tab，AI 实时流可见（互斥单一出口）
     const ac = new AbortController();
     this.generateAbort = ac;
     try {

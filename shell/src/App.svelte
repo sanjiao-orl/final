@@ -67,6 +67,7 @@
     await work.loadStructure();
     await chat.setScope(''); // 默认无归属讨论
     await candidates.load();
+    void inbox.load(); // 收件箱徽章冷启动即有数；失败不挡 boot（load 内部已接错误红条）
     await scheme.load(); // 角色与方案（决策 0010）；失败静默降级为空态，不挡 boot/换书
   }
 

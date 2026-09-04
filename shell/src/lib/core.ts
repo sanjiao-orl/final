@@ -341,13 +341,17 @@ export class CoreClient {
     return this.request(`${API_PREFIX}/posture${q}`);
   }
 
-  /** 补账扫描（4.2 承诺·伏笔窄域）：预筛→便宜档判定→提案入收件箱；非写作热路径，同步返回覆盖读数。 */
-  scanPromise(workDir: string, maxChapters?: number): Promise<{ scannedChapters: number; suspectChapters: number; llmCalls: number; inbox: { added: string[]; skipped: string[] } }> {
-    return this.request(`${API_PREFIX}/scan/promise`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workDir, ...(maxChapters ? { maxChapters } : {}) }),
-    });
+  /** 补账扫描（4.2 承诺·伏笔窄域）：预筛→便宜档判定→提案入收件箱；非写作热路径，同步返回覆盖读数。长任务：判定逐章串行远超缺省 30s，调用方必须经 opts 传长超时（对齐 review 口径）。 */
+  scanPromise(workDir: string, maxChapters?: number, opts?: RequestOptions): Promise<{ scannedChapters: number; suspectChapters: number; llmCalls: number; inbox: { added: string[]; skipped: string[] } }> {
+    return this.request(
+      `${API_PREFIX}/scan/promise`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workDir, ...(maxChapters ? { maxChapters } : {}) }),
+      },
+      opts,
+    );
   }
 
   /** 会话列表；scope 传入时按归属过滤（''=无归属讨论，章 relPath=章节内讨论）。 */

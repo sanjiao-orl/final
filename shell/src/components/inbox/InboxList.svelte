@@ -39,7 +39,7 @@
   {#each inbox.entries as e (e.id)}
     <div class="row" class:pending={e.status === 'pending'} class:adopted={e.status === 'adopted'} class:discarded={e.status === 'discarded'}>
       <label class="pick">
-        <input type="checkbox" disabled={e.status !== 'pending'} checked={inbox.selected.has(e.id)} onchange={() => inbox.toggle(e.id)} />
+        <input type="checkbox" disabled={e.status !== 'pending' || inbox.busy} checked={inbox.selected.has(e.id)} onchange={() => inbox.toggle(e.id)} />
       </label>
       <div class="body">
         <div class="meta">

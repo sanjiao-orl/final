@@ -26,6 +26,7 @@ function clientOf(overrides: Record<string, unknown> = {}): CoreClient {
 
 beforeEach(() => {
   work.workDir = 'C:/works/demo';
+  work.error = '';
 });
 
 describe('InboxStore', () => {
@@ -66,12 +67,57 @@ describe('InboxStore', () => {
     expect(decideCall[1]).toMatchObject({ decision: 'discard', dismissReason: '有意延后', reanchorVolume: '卷三' });
   });
 
+  it('批量部分失败：单条失败不中断批次，失败条保留勾选、成功条清出、错误可见', async () => {
+    const store = new InboxStore();
+    const callTool = vi.fn(async (name: string, args: Record<string, unknown>) => {
+      if (name === 'inbox_list') return { count: 1, entries: [entryOf('b')] }; // b 裁决失败 → 服务端仍 pending
+      if (args.proposalId === 'b') throw new Error('core 断连');
+      return {};
+    });
+    store.init(clientOf({ callTool }));
+    store.selected = new Set(['a', 'b']);
+    await store.decide('adopt');
+    const decideCalls = callTool.mock.calls.filter((c) => c[0] === 'inbox_decide');
+    expect(decideCalls.length).toBe(2); // b 失败不中断，a 后续条目照常裁决
+    expect([...store.selected]).toEqual(['b']);
+    expect(work.error).toContain('批量裁决失败');
+  });
+
+  it('load 失败写 work.error，不再伪装成空收件箱', async () => {
+    const store = new InboxStore();
+    store.init(clientOf({ callTool: vi.fn(async () => { throw new Error('503 重连中'); }) }));
+    await store.load();
+    expect(work.error).toContain('收件箱加载失败');
+    expect(store.entries).toEqual([]);
+  });
+
+  it('scan 失败写 work.error 并复位 scanning；传长超时口径', async () => {
+    const store = new InboxStore();
+    const scanPromise = vi.fn(async () => { throw new Error('请求超时'); });
+    store.init(clientOf({ scanPromise, callTool: vi.fn(async () => ({ count: 0, entries: [] })) }));
+    await store.scan();
+    expect(scanPromise).toHaveBeenCalledWith('C:/works/demo', undefined, { timeoutMs: 600_000 });
+    expect(work.error).toContain('补账扫描失败');
+    expect(store.scanning).toBe(false);
+  });
+
+  it('busy 期间 toggle 冻结（批量裁决进行中勾选不脱节）', async () => {
+    const store = new InboxStore();
+    store.init(clientOf());
+    store.busy = true;
+    store.toggle('a');
+    expect(store.selected.size).toBe(0);
+    store.busy = false;
+    store.toggle('a');
+    expect(store.selected.size).toBe(1);
+  });
+
   it('scan 调 scanPromise 并回填 lastScan 读数、重拉列表', async () => {
     const store = new InboxStore();
     const scanPromise = vi.fn().mockResolvedValue({ scannedChapters: 10, suspectChapters: 2, llmCalls: 2, inbox: { added: ['PR-1', 'PR-2'], skipped: ['PR-0'] } });
     store.init(clientOf({ scanPromise, callTool: vi.fn().mockResolvedValue({ count: 0, entries: [] }) }));
     await store.scan();
-    expect(scanPromise).toHaveBeenCalledWith('C:/works/demo', undefined);
+    expect(scanPromise).toHaveBeenCalledWith('C:/works/demo', undefined, { timeoutMs: 600_000 });
     expect(store.lastScan).toMatchObject({ suspectChapters: 2, added: 2, skipped: 1 });
   });
 
