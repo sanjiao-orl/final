@@ -52,3 +52,13 @@ tests:
         value: '!JSON.parse(output).toolCalls.some(t => t.name === "write_chapter" || t.name === "stage_chapter_proposal")'
       - type: javascript
         value: 'JSON.parse(output).text.length > 0'
+  - description: '补账登记路由（4.2/4.3 薄切片）：让 AI 登记一条承诺伏笔 → 经 ledger_upsert 落账，不直写正文、不进暂存'
+    vars:
+      message: '帮我在账本里登记一条伏笔：克莱恩承诺三天内归还铜哨（埋设在第3章）。不要写正文。'
+    assert:
+      - type: javascript
+        value: 'JSON.parse(output).toolCalls.some(t => t.name === "ledger_upsert")'
+      - type: javascript
+        value: '!JSON.parse(output).toolCalls.some(t => t.name === "write_chapter")'
+      - type: javascript
+        value: '!JSON.parse(output).toolCalls.some(t => t.name === "stage_chapter_proposal")'
