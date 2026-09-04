@@ -289,3 +289,54 @@ describe('4.3 评审修复回归', () => {
     expect(again.skipped.length).toBe(1);
   });
 });
+
+describe('裁决回路加固（2026-09-05 审计回归）', () => {
+  it('损坏块不可裁决：解析失败伪条目（ops 空）adopt 抛错，解析失败留痕不被覆盖', () => {
+    const work = makeWorkDir();
+    seedLedger(work);
+    writeTree(work, {
+      '.novel/inbox.md': '# 裁决收件箱\n\n<!-- inbox-entry:start PR-BROKEN -->\n不是合法提案块（缺 front matter）\n<!-- inbox-entry:end -->\n',
+    });
+    const list = inboxList(work);
+    expect(list.length).toBe(1);
+    expect(list[0]!.proposal.ops).toEqual([]);
+    expect(list[0]!.verify?.ok).toBe(false);
+    expect(() => inboxAdopt(work, 'PR-BROKEN')).toThrow(/损坏/);
+    expect(inboxList(work)[0]!.verify?.message).toContain('解析失败'); // 失败裁决不抹留痕
+  });
+
+  it('全 NOOP 也过写闸：触碰 protect 的观察提案拒绝（快车道无豁免）；不触碰的照常直采纳', () => {
+    const work = makeWorkDir();
+    seedLedger(work);
+    const touch: ProposalOp = { action: 'NOOP', op: { op: 'prop', entry: { name: '主角金手指' } }, targetKey: '主角金手指', rationale: '观察' };
+    const p1 = makeProposal('scan', [touch]);
+    inboxAppend(work, [p1]);
+    const r1 = inboxAdopt(work, p1.id);
+    expect(r1.applied).toBe(false);
+    expect(r1.denials.join()).toContain('PROTECT');
+    expect(r1.proposal.status).toBe('pending');
+    const clean: ProposalOp = { action: 'NOOP', op: { op: 'character', entry: { name: '克莱恩' } }, targetKey: '克莱恩', rationale: '观察' };
+    const p2 = makeProposal('scan', [clean]);
+    inboxAppend(work, [p2]);
+    const r2 = inboxAdopt(work, p2.id);
+    expect(r2.applied).toBe(false); // 全 NOOP 零落账
+    expect(r2.proposal.status).toBe('adopted');
+    expect(r2.verify?.ok).toBe(true);
+  });
+
+  it('回读❌后改判驳回：❌ 留痕随条目保留（不随 discard 抹掉）', () => {
+    const work = makeWorkDir();
+    seedLedger(work);
+    const addP9: ProposalOp = { ...addOp, targetKey: 'P-009', op: { op: 'promise', entry: { id: 'P-009', name: '雾中诺言', arc: 'planted', setups: [{ chapter: CH, quote: '雾' }], payoffs: [] } } };
+    const delP9: ProposalOp = { action: 'DELETE', op: { op: 'remove', dimension: 'promise', id: 'P-009' }, targetKey: 'P-009', evidence: { chapter: CH, quote: 'q' }, rationale: '先加后删的自相矛盾草稿' };
+    const p = makeProposal('scan', [addP9, delP9]);
+    inboxAppend(work, [p]);
+    const r = inboxAdopt(work, p.id);
+    expect(r.applied).toBe(true);
+    expect(r.verify?.ok).toBe(false);
+    inboxDiscard(work, p.id, { reason: '其他' });
+    const list = inboxList(work);
+    expect(list[0]!.proposal.status).toBe('discarded');
+    expect(list[0]!.verify?.ok).toBe(false); // 修复前：discard 重建条目丢 verify
+  });
+});

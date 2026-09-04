@@ -96,7 +96,17 @@ export function inboxList(workDir: string, inboxPath: string = DEFAULT_INBOX_PAT
   const out: InboxEntry[] = [];
   const re = /<!-- inbox-entry:start (.*?) -->\r?\n([\s\S]*?)<!-- inbox-entry:end -->/g;
   for (const m of content.matchAll(re)) {
-    const header = parseYaml(unescapeMarkers(m[1]!)) as { id?: string } | null;
+    // 头部标记即提案 id（renderEntry 写入裸 id 串）；过 parseYaml 只为容忍 id 含特殊字符的映射形态。
+    const headerText = unescapeMarkers(m[1]!).trim();
+    let headerId = headerText;
+    try {
+      const parsed: unknown = parseYaml(headerText);
+      if (parsed && typeof parsed === 'object' && typeof (parsed as { id?: unknown }).id === 'string') {
+        headerId = (parsed as { id: string }).id;
+      }
+    } catch {
+      /* id 行本身损坏 → 保留原文 */
+    }
     const block = unescapeMarkers(m[2]!);
     const verifyMatch = block.match(/^> 回读验证：(✅|❌) (.+)$/m);
     try {
@@ -108,7 +118,7 @@ export function inboxList(workDir: string, inboxPath: string = DEFAULT_INBOX_PAT
       out.push(entry);
     } catch (err) {
       out.push({
-        proposal: { id: header?.id ?? 'UNKNOWN', origin: 'scan', createdAt: '', ops: [], status: 'pending' },
+        proposal: { id: headerId || 'UNKNOWN', origin: 'scan', createdAt: '', ops: [], status: 'pending' },
         verify: { ok: false, message: `提案块解析失败: ${(err as Error).message}` },
       });
     }
@@ -275,6 +285,13 @@ export function inboxAdopt(workDir: string, proposalId: string, inboxPath: strin
   if (idx < 0) throw new Error(`收件箱无此提案: ${proposalId}`);
   const current = entries[idx]!.proposal;
   if (current.status !== 'pending') throw new Error(`提案已裁决（${current.status}），不可重复裁决: ${proposalId}`);
+  // 损坏块守卫：解析失败伪条目 ops 为空，不可裁决（防快车道无声采纳并覆盖「解析失败」留痕），只能修复收件箱文件。
+  if (current.ops.length === 0) throw new Error(`提案块损坏（解析失败留痕），不可裁决——请修复或清理收件箱文件: ${proposalId}`);
+
+  // 权限面复核：提案入箱后账本可能已变（protect 新增等）；全 NOOP 同样过闸（触碰即拦契约不设快车道豁免）。
+  const { ledger } = readLedger(workDir);
+  const v = validateProposal(current, ledger);
+  if (!v.ok) return { proposal: current, applied: false, denials: v.denials };
 
   const ops: LedgerOp[] = current.ops.filter((o) => o.action !== 'NOOP').map((o) => o.op);
   if (ops.length === 0) {
@@ -284,10 +301,6 @@ export function inboxAdopt(workDir: string, proposalId: string, inboxPath: strin
     saveInbox(abs, rewriteInbox(state.content, entries), state);
     return { proposal: decided, applied: false, denials: [], verify };
   }
-  // 权限面复核：提案入箱后账本可能已变（protect 新增等）
-  const { ledger } = readLedger(workDir);
-  const v = validateProposal(current, ledger);
-  if (!v.ok) return { proposal: current, applied: false, denials: v.denials };
   const conflicts = targetConflicts(ledger, current);
   if (conflicts.length > 0) return { proposal: current, applied: false, denials: conflicts };
 
@@ -317,7 +330,8 @@ export function inboxDiscard(workDir: string, proposalId: string, dismiss: Propo
     throw new Error(`提案已裁决（${entries[idx]!.proposal.status}），不可重复裁决: ${proposalId}`);
   }
   const decided = discardProposal(entries[idx]!.proposal, dismiss);
-  entries[idx] = { proposal: decided };
+  // 携带既有 verify：回读❌后改判驳回时，「曾尝试落账失败」的留痕不随驳回抹掉。
+  entries[idx] = { proposal: decided, ...(entries[idx]!.verify ? { verify: entries[idx]!.verify } : {}) };
   saveInbox(abs, rewriteInbox(state.content, entries), state);
   return { proposal: decided, applied: false, denials: [] };
 }
