@@ -91,3 +91,27 @@ describe('双读归一化（ledger ⇄ envelopes）', () => {
     expect(back.doNotReexplain).toEqual(ledger.doNotReexplain);
   });
 });
+
+describe('角色卡（4.3 信封原生首型）', () => {
+  it('characters 进出信封零 diff；区间 from=最早状态 since', () => {
+    const withChar: Ledger = {
+      ...emptyLedger(),
+      characters: [{ name: '克莱恩', aliases: ['世界'], role: '值夜者', states: [{ field: '位置', value: '贝克兰德', since: ORDER[9]!.relPath }] }],
+    };
+    const facts = ledgerToFacts(withChar, ORDER);
+    const cards = facts.filter((f) => f.type === 'character');
+    expect(cards.length).toBe(1);
+    expect(cards[0]!.key).toBe('克莱恩');
+    expect(cards[0]!.interval.from).toBe(10);
+    expect(cards[0]!.interval.to).toBeNull();
+    expect(cards[0]!.evidence[0]!.chapter).toBe(ORDER[9]!.relPath);
+    expect(dualReadRoundTrip(withChar, ORDER)).toBe(true);
+  });
+
+  it('旧账本（无 characters 键）双读零 diff 不被破坏', () => {
+    const legacy: Ledger = { clock: [], props: [], promises: [], knowledge: [], doNotReexplain: [], protect: [], tripwires: [] };
+    expect(dualReadRoundTrip(legacy, ORDER)).toBe(true);
+    const back = factsToLedger(ledgerToFacts(legacy, ORDER), legacy);
+    expect(back).not.toHaveProperty('characters');
+  });
+});

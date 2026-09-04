@@ -1457,3 +1457,44 @@ describe('章序修复（编号感知，批三-3 顺带修复）', () => {
     expect(res.findings.some((f) => f.code === 'dangling-promise')).toBe(true);
   });
 });
+
+describe('角色卡（4.3 角色维）', () => {
+  it('character op 按 name upsert；states 保真；remove character', () => {
+    const entry = { name: '克莱恩', aliases: ['世界'], role: '值夜者', states: [{ field: '位置', value: '廷根', since: 'manuscript/第1章.md' }] };
+    const up = applyOps(emptyLedger(), [{ op: 'character', entry }]);
+    expect(up.characters?.length).toBe(1);
+    expect(up.characters?.[0]!.states?.[0]!.value).toBe('廷根');
+    const moved = applyOps(up, [{ op: 'character', entry: { ...entry, states: [{ field: '位置', value: '贝克兰德', since: 'manuscript/第10章.md' }] } }]);
+    expect(moved.characters?.length).toBe(1);
+    expect(moved.characters?.[0]!.states?.[0]!.value).toBe('贝克兰德');
+    const removed = applyOps(moved, [{ op: 'remove', dimension: 'character', name: '克莱恩' }]);
+    expect(removed.characters?.length).toBe(0);
+  });
+
+  it('serialize 空表省略（旧账本文件级零 diff）；非空表写入回读保真', () => {
+    const old = emptyLedger();
+    const text = serializeLedger(old);
+    expect(text).not.toContain('characters');
+    expect(parseLedger(text)).toEqual(old);
+    const withChar = applyOps(old, [{ op: 'character', entry: { name: '克莱恩', kind: 'character', description: '主角' } }]);
+    const back = parseLedger(serializeLedger(withChar));
+    expect(back.characters?.length).toBe(1);
+    expect(back.characters?.[0]!.name).toBe('克莱恩');
+    expect(back.characters?.[0]!.description).toBe('主角');
+  });
+
+  it('确定性诊断：别名冲突/状态同章/引用未解析（角色维未启用=静默）', () => {
+    const empty = ledgerDiagnostics(emptyLedger());
+    expect(empty.some((f) => f.code.startsWith('character-'))).toBe(false);
+    const bad = applyOps(emptyLedger(), [
+      { op: 'character', entry: { name: '克莱恩', aliases: ['世界'] } },
+      { op: 'character', entry: { name: '克莱恩·莫雷蒂', aliases: ['世界'] } },
+      { op: 'character', entry: { name: '老尼尔', states: [{ field: '位置', value: 'A', since: 'manuscript/第3章.md' }, { field: '位置', value: 'B', since: 'manuscript/第3章.md' }] } },
+      { op: 'promise', entry: { id: 'P-1', name: '诺言', arc: 'planted', setups: [], payoffs: [], links: { characters: ['陌生人'] } } },
+    ]);
+    const d = ledgerDiagnostics(bad);
+    expect(d.some((f) => f.code === 'character-alias-conflict')).toBe(true);
+    expect(d.some((f) => f.code === 'character-state-order')).toBe(true);
+    expect(d.some((f) => f.code === 'character-ref-unresolved')).toBe(true);
+  });
+});

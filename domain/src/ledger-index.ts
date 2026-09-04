@@ -11,7 +11,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import type { ChapterRef, KnowledgeEntry, Ledger, PropEntry, PromiseEntry } from './ledger.js'; // 仅类型——防运行时环（ledger.ts 预算闸反向引用本模块）
+import type { ChapterRef, CharacterEntry, KnowledgeEntry, Ledger, PropEntry, PromiseEntry } from './ledger.js'; // 仅类型——防运行时环（ledger.ts 预算闸反向引用本模块）
 import { assertWorkDir, toPosix } from './fsutil.js';
 import { intervalActiveAt, ledgerToFacts, type FactEnvelope, type FactInterval } from './envelope.js';
 
@@ -37,8 +37,9 @@ export interface LedgerIndex {
 /** 承重优先级（预算裁剪序；promise=伏笔线承重最高；character=4.3 信封原生首型，索引期不产出）。 */
 const PRIORITY: Record<FactEnvelope['type'], number> = { promise: 0, prop: 1, knowledge: 2, clock: 3, character: 4 };
 
-/** 类型预算配额（防单一类型独占——真账本实测第1137章 promise 1739 条会挤光其他维度；余量回收给缺型）。 */
-const QUOTA: Record<FactEnvelope['type'], number> = { promise: 0.4, prop: 0.25, knowledge: 0.25, clock: 0.1, character: 0 };
+/** 类型预算配额（防单一类型独占——真账本实测第1137章 promise 1739 条会挤光其他维度；余量回收给缺型）。
+ * 4.3 角色维入场：character 0.15（静态卡体积小、连续性承重高）；promise 0.4→0.35、prop/knowledge 0.25→0.2 让位。 */
+const QUOTA: Record<FactEnvelope['type'], number> = { promise: 0.35, prop: 0.2, knowledge: 0.2, clock: 0.1, character: 0.15 };
 
 /** 字符数预算（0905 裁决口径：切片 ≤3 万字符；JSON.stringify 计）。 */
 export const DEFAULT_SLICE_BUDGET = 30_000;
@@ -57,6 +58,11 @@ function namesOf(f: FactEnvelope): string[] {
   } else if (f.type === 'knowledge') {
     const k = f.payload as KnowledgeEntry;
     if (k.character) out.push(k.character);
+  } else if (f.type === 'character') {
+    // 4.3 角色维：主名+别名全入倒排（queryByName/预筛共用）
+    const c = f.payload as CharacterEntry;
+    if (c.name) out.push(c.name);
+    for (const a of c.aliases ?? []) if (a) out.push(a);
   }
   return out.map(norm).filter(Boolean);
 }
@@ -91,6 +97,12 @@ function renderFact(f: FactEnvelope): string {
     const k = f.payload as KnowledgeEntry;
     const recent = k.knows.slice(-3);
     return `[知情] ${k.character}｜知:${recent.map((x) => x.fact.slice(0, 30)).join('；')}`;
+  }
+  if (f.type === 'character') {
+    // 4.3 角色卡：静态档+最近动态状态（区间生效过滤后随卡注入）
+    const c = f.payload as CharacterEntry;
+    const states = (c.states ?? []).slice(-3).map((s) => `${s.field}=${s.value}`).join('；');
+    return `[角色] ${c.name}${c.kind && c.kind !== 'character' ? `(${c.kind})` : ''}${c.role ? `｜${c.role}` : ''}${c.faction ? `｜营:${c.faction}` : ''}${c.aliases?.length ? `｜别名:${c.aliases.join('/')}` : ''}${states ? `｜态:${states}` : ''}`;
   }
   // clock
   const c = f.payload as { chapters: string[]; storyDay?: string; thread?: string; notes?: string };

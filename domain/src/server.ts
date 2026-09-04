@@ -1,5 +1,5 @@
 /**
- * server.ts —— MCP stdio server 装配：注册 42 个工具（38 基线+4.2 加法 4）并连接 stdio transport。
+ * server.ts —— MCP stdio server 装配：注册 46 个工具（38 基线+4.2 加法 4+4.3 加法 4）并连接 stdio transport。
  * 双侧合并口径：基础工具 8 个 + WS-9 scan_quality + A 组 8 工具 + WS-17 账本 4 工具 + 0008 skill_read 1 工具 + 0009 问题日志 2 工具（issue_append/issue_set_status）+ scheme_set_active 1 工具（激活/取消激活方案指针）。
  * 批三-3 新增 2 工具：ledger_chapter_slice（按章过滤的账本视图，只读）+ write_meta（书级元数据写入，不写账本/不写正文）。
  * 批一③ 碰撞模式 新增 3 工具：decision_append（裁决留痕追加）/ decision_tail（裁决留痕尾部只读）/ chapter_set_blueprint（章蓝图模式设置），并在 frontmatter 透出 blueprint、buildChapter 透传。
@@ -7,6 +7,7 @@
  * 块1 遗留缺陷修复 新增 1 工具：restore_trash（找回回收站条目 = move-back 移回原路径，trash 副本不再存在）。
  * 块2 声口批 新增 2 工具：read_style（声口档案全文读回，摘要只是投影）+ voice_fingerprint（声口指纹确定性度量与偏离对照），现共 38 个工具。
  * 块4.1/4.2 新增 4 工具：promise_prefilter（承诺伏笔确定性预筛）+ inbox_list / inbox_append / inbox_decide（统一裁决收件箱三件套），现共 42 个；ledger_slice 增可选 budget 入参（4.1 预算闸，缺省行为零变）。
+ * 块4.3 新增 4 工具：character_upsert（角色卡静态层直写，拒收 states）/ character_list / character_prefilter（角色维确定性预筛）/ character_refs（人名字段可解析引用报告），现共 46 个。
  * 被 core 包经 MCP stdio spawn 调用；工具实现见 tools.ts / ledger.ts / reconcile.ts / summaries.ts / voice.ts。
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -52,10 +53,13 @@ import {
   upsertLedger,
   writeMeta,
   chapterOrderForWork,
+  type CharacterEntry,
   type IssueFinding,
   type LedgerOp,
 } from './ledger.js';
 import { promisePrefilter } from './promise-prefilter.js';
+import { characterPrefilter } from './character-prefilter.js';
+import { resolveNameRefs } from './character-norm.js';
 import { inboxAdopt, inboxAppend, inboxDiscard, inboxList } from './inbox.js';
 import { makeProposal } from './proposal.js';
 import { readSkillBody, schemeSetActive } from './prompts.js';
@@ -439,6 +443,111 @@ server.registerTool(
   },
 );
 
+// 4.3 角色卡批：角色维（信封原生首型）。静态层=登记型直写（character_upsert 拒收 states）；
+// 动态层 states 走裁决回路（提案经 inbox_decide 采纳才落账）；预筛/引用报告=确定性零 LLM。
+server.registerTool(
+  'character_upsert',
+  {
+    title: '登记/更新角色卡（静态层直写）',
+    description:
+      '把角色卡静态层直写进账本 characters 表（name 键 upsert，走 upsert_ledger 的 CAS/快照管线）：name/aliases/kind（character|faction|location|lore，缺省 character）/role/faction/description/relations。设定登记（境界名/功法名/势力/地名）复用同模式。边界：拒收 states——位置/生死/境界修为等动态状态是区间原生事实，永远走裁决回路（提案经收件箱作者裁决），不做「当前值」直写。返回 {ledger, path, bytes}。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      entry: z
+        .object({
+          name: z.string().min(1),
+          aliases: z.array(z.string().min(1)).optional(),
+          kind: z.enum(['character', 'faction', 'location', 'lore']).optional(),
+          role: z.string().optional(),
+          faction: z.string().optional(),
+          description: z.string().optional(),
+          relations: z.string().optional(),
+        })
+        .describe('角色卡静态层条目'),
+      ledgerPath: z.string().optional().describe('可选：账本文件相对 workDir 路径，必须是 .novel/ 根目录正下的 .md'),
+    },
+  },
+  async ({ workDir, entry, ledgerPath }) => {
+    const { ledger: before } = readLedger(workDir, ledgerPath);
+    const prev = (before.characters ?? []).find((c) => c.name === entry.name);
+    // 静态直写不改动态 states（它们不归直写管）；逐字段稀疏合并（exactOptionalPropertyTypes 下 undefined 不落键）
+    const merged: CharacterEntry = {
+      name: entry.name,
+      ...(entry.aliases !== undefined ? { aliases: entry.aliases } : prev?.aliases !== undefined ? { aliases: prev.aliases } : {}),
+      ...(entry.kind !== undefined ? { kind: entry.kind } : prev?.kind !== undefined ? { kind: prev.kind } : {}),
+      ...(entry.role !== undefined ? { role: entry.role } : prev?.role !== undefined ? { role: prev.role } : {}),
+      ...(entry.faction !== undefined ? { faction: entry.faction } : prev?.faction !== undefined ? { faction: prev.faction } : {}),
+      ...(entry.description !== undefined ? { description: entry.description } : prev?.description !== undefined ? { description: prev.description } : {}),
+      ...(entry.relations !== undefined ? { relations: entry.relations } : prev?.relations !== undefined ? { relations: prev.relations } : {}),
+      ...(prev?.states !== undefined ? { states: prev.states } : {}),
+    };
+    return jsonResult(upsertLedger(workDir, [{ op: 'character', entry: merged }], ledgerPath));
+  },
+);
+
+server.registerTool(
+  'character_list',
+  {
+    title: '角色卡清单',
+    description:
+      '列出账本 characters 表（4.3 角色维静态层+动态 states）：全量或 kind 过滤；query 传名字/别名时走归一化精确匹配（含称谓形态）返回命中卡。返回 {count, characters}。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      kind: z.enum(['character', 'faction', 'location', 'lore']).optional().describe('可选：按登记种类过滤'),
+      query: z.string().optional().describe('可选：名字/别名归一化查询（命中即只返回该卡）'),
+      ledgerPath: z.string().optional().describe('可选：账本文件相对 workDir 路径，必须是 .novel/ 根目录正下的 .md'),
+    },
+  },
+  async ({ workDir, kind, query, ledgerPath }) => {
+    const { ledger } = readLedger(workDir, ledgerPath);
+    let characters = ledger.characters ?? [];
+    if (kind) characters = characters.filter((c) => (c.kind ?? 'character') === kind);
+    if (query) {
+      const { matchName } = await import('./character-norm.js');
+      const hit = matchName(query, characters);
+      characters = hit ? [hit.entry] : [];
+    }
+    return jsonResult({ count: characters.length, characters });
+  },
+);
+
+server.registerTool(
+  'character_prefilter',
+  {
+    title: '角色维确定性预筛',
+    description:
+      '零 LLM：正文扫描已知名/别名提及（词典+称谓形态归一）+ 超域疑似（高频未命中候选，count≥minCount 缺省 3——超域处置规约「不得静默丢弃」，由裁决回路定去留）+ 同一人多写法嫌疑（编辑距离 1）。返回 {scanned, mentions, unknownCandidates, variantSuspects}。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      chapterRelPaths: z.array(z.string()).optional().describe('可选：限定预筛章（manuscript/ 内 .md）；缺省=全部章序'),
+      minCount: z.number().int().min(1).optional().describe('可选：超域疑似的高频门槛（缺省 3）'),
+      ledgerPath: z.string().optional().describe('可选：账本文件相对 workDir 路径，必须是 .novel/ 根目录正下的 .md'),
+    },
+  },
+  async ({ workDir, chapterRelPaths, minCount, ledgerPath }) => {
+    const { ledger } = readLedger(workDir, ledgerPath);
+    const chapterOrder = chapterOrderForWork(workDir);
+    return jsonResult(characterPrefilter(workDir, { chapterRelPaths, ledger, chapterOrder, minCount }));
+  },
+);
+
+server.registerTool(
+  'character_refs',
+  {
+    title: '人名字段可解析引用报告',
+    description:
+      '把既有类型人名字段（promise.links.characters / knowledge.character / prop 持有人与托管链）对角色词典可选解析：未解析不报错只入清单（reference/05 §角色维）。characters 表为空=角色维未启用，返回 enabled:false 不产噪音。返回 {enabled, resolved, unresolved}。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      ledgerPath: z.string().optional().describe('可选：账本文件相对 workDir 路径，必须是 .novel/ 根目录正下的 .md'),
+    },
+  },
+  async ({ workDir, ledgerPath }) => {
+    const { ledger } = readLedger(workDir, ledgerPath);
+    return jsonResult(resolveNameRefs(ledger));
+  },
+);
+
 server.registerTool(
   'inbox_list',
   {
@@ -473,14 +582,22 @@ server.registerTool(
   {
     title: '提案入收件箱',
     description:
-      '把扫描/预警产出的提案草稿写入统一裁决收件箱（作者裁决前不落账）。草稿={origin, ops[]}（ops 为 ProposalOp 形状：action/targetKey/op/evidence/rationale）；id 与 createdAt 由 domain 侧生成。幂等：pending 中同 (action,targetKey) 去重；「误报」裁决的键永久抑制再入。返回 {added, skipped, outcomes}（outcomes 与草稿同序，逐份标记是否入箱）。',
+      '把扫描/预警产出的提案草稿写入统一裁决收件箱（作者裁决前不落账）。草稿={origin, ops[]}（ops 为 ProposalOp 形状：action/targetKey/op/evidence/rationale，入口做最小形状校验）；id 与 createdAt 由 domain 侧生成。幂等：pending 中同 (action,targetKey) 去重；「误报」裁决的键永久抑制再入；重叠键 op 级剔除（新候选不整提案静默丢）。返回 {added, skipped, outcomes}（outcomes 与草稿同序，逐份标记是否入箱，部分入箱带 skippedKeys 重叠明细）。',
     inputSchema: {
       workDir: z.string().describe('作品文件夹的绝对路径'),
       drafts: z
         .array(
           z.object({
             origin: z.enum(['scan', 'chat', 'radar', 'import']),
-            ops: z.array(z.record(z.string(), z.unknown())),
+            ops: z.array(
+              z.object({
+                action: z.enum(['ADD', 'UPDATE', 'DELETE', 'NOOP']),
+                targetKey: z.string().min(1),
+                op: z.object({ op: z.string() }).passthrough(),
+                evidence: z.object({ chapter: z.string().min(1) }).passthrough().optional(),
+                rationale: z.string().min(1),
+              }),
+            ),
           }),
         )
         .min(1)

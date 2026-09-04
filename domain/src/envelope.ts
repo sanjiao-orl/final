@@ -11,7 +11,7 @@
  * 断言见 tests/envelope.test.ts）；写入触及处按信封范式落笔以快照测试为闸门——本模块先落读路径
  * 归一化，写路径仍走既有 ledger 管线（模型层即日统一、文件层渐进收口）。
  */
-import type { ClockRow, KnowledgeEntry, Ledger, LedgerOp, PropEntry, PromiseEntry } from './ledger.js';
+import type { CharacterEntry, ClockRow, KnowledgeEntry, Ledger, LedgerOp, PropEntry, PromiseEntry } from './ledger.js';
 
 /** 事实类型（有任务名的可增集合；「账本」正名后维度改称事实类型）。 */
 export type FactType = 'clock' | 'prop' | 'promise' | 'knowledge' | 'character';
@@ -151,6 +151,21 @@ export function ledgerToFacts(ledger: Ledger, chapterOrder: { relPath: string; t
     }
     facts.push(envelope('knowledge', k.character, k, sinces.length ? Math.min(...sinces) : 1, null, evidences(knowsEvi), 'appendable'));
   }
+  // character（4.3 角色维，信封原生首型）：静态卡+动态 states 整卡一信封——from=最早状态 since（无状态=1 保守），to=null（卡持续生效）
+  for (const c of ledger.characters ?? []) {
+    const orders = (c.states ?? [])
+      .map((s) => orderOf(chapterOrder, s.since))
+      .filter((n): n is number => n !== null);
+    const stateEvi: Array<{ chapter: string; line?: number; quote?: string }> = (c.states ?? [])
+      .filter((s) => typeof s.since === 'string' && s.since !== '')
+      .map((s) => {
+        const ev: { chapter: string; line?: number; quote?: string } = { chapter: s.since };
+        if (s.line !== undefined) ev.line = s.line;
+        if (s.quote !== undefined) ev.quote = s.quote;
+        return ev;
+      });
+    facts.push(envelope('character', c.name, c, orders.length ? Math.min(...orders) : 1, null, evidences(stateEvi), 'appendable'));
+  }
   return facts;
 }
 
@@ -161,13 +176,20 @@ export function ledgerToFacts(ledger: Ledger, chapterOrder: { relPath: string; t
  */
 export function factsToLedger(facts: FactEnvelope[], base: Ledger): Ledger {
   const out: Ledger = { ...base, clock: [], props: [], promises: [], knowledge: [] };
+  const characters: CharacterEntry[] = [];
+  let hasCharacters = false;
   for (const f of facts) {
     if (f.type === 'clock') out.clock.push(f.payload as ClockRow);
     else if (f.type === 'prop') out.props.push(f.payload as PropEntry);
     else if (f.type === 'promise') out.promises.push(f.payload as PromiseEntry);
     else if (f.type === 'knowledge') out.knowledge.push(f.payload as KnowledgeEntry);
-    // character 等新类型：4.3 落地，投影期跳过（信封原生首型）
+    else if (f.type === 'character') {
+      // character（4.3 信封原生首型）：仅当 facts 里真有角色卡才挂 characters 键——旧账本零 diff 的关键
+      characters.push(f.payload as CharacterEntry);
+      hasCharacters = true;
+    }
   }
+  if (hasCharacters || base.characters !== undefined) out.characters = characters;
   return out;
 }
 

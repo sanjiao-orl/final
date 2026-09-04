@@ -93,3 +93,15 @@ describe('名字倒排', () => {
     expect(intervalActiveAt(p2.interval, 13)).toBe(false);
   });
 });
+
+describe('角色卡索引（4.3）', () => {
+  it('主名+别名入倒排；配额内随切片注入并计入 composition', () => {
+    const ledger: Ledger = { ...emptyLedger(), characters: [{ name: '克莱恩', aliases: ['世界'], role: '值夜者', states: [{ field: '位置', value: '贝克兰德', since: ch(3) }] }] };
+    const idx = buildLedgerIndex(ledger, ORDER);
+    expect(queryByName(idx, '克莱恩').length).toBe(1);
+    expect(queryByName(idx, '世界').length).toBe(1);
+    const cut = indexedSliceFromIndex(idx, 5, DEFAULT_SLICE_BUDGET);
+    expect(cut.composition.character).toBe(1);
+    expect(cut.lines.some((l) => l.startsWith('[角色] 克莱恩'))).toBe(true);
+  });
+});

@@ -144,7 +144,7 @@ export function inboxAppend(
   workDir: string,
   proposals: Proposal[],
   inboxPath: string = DEFAULT_INBOX_PATH,
-): { added: string[]; skipped: string[]; outcomes: Array<{ id: string; added: boolean }> } {
+): { added: string[]; skipped: string[]; outcomes: Array<{ id: string; added: boolean; skippedKeys?: string[] }> } {
   const abs = assertInboxPath(workDir, inboxPath);
   const state = readInboxState(abs); // 不存在=首次建箱
   const entries = inboxList(workDir, inboxPath);
@@ -157,17 +157,21 @@ export function inboxAppend(
   );
   const added: string[] = [];
   const skipped: string[] = [];
-  const outcomes: Array<{ id: string; added: boolean }> = [];
+  const outcomes: Array<{ id: string; added: boolean; skippedKeys?: string[] }> = [];
   for (const p of proposals) {
-    if (p.ops.some((o) => pendingKeys.has(keyOf(o)) || suppressedKeys.has(keyOf(o)))) {
+    // op 级去重（4.2.1 挂账承接）：重叠键剔除、新候选不整提案静默丢；全重叠才整条 skip
+    const fresh = p.ops.filter((o) => !pendingKeys.has(keyOf(o)) && !suppressedKeys.has(keyOf(o)));
+    const dupKeys = p.ops.filter((o) => pendingKeys.has(keyOf(o)) || suppressedKeys.has(keyOf(o))).map(keyOf);
+    if (fresh.length === 0) {
       skipped.push(p.id);
-      outcomes.push({ id: p.id, added: false });
+      outcomes.push({ id: p.id, added: false, ...(dupKeys.length > 0 ? { skippedKeys: dupKeys } : {}) });
       continue;
     }
-    entries.push({ proposal: p });
-    for (const o of p.ops) pendingKeys.add(keyOf(o));
-    added.push(p.id);
-    outcomes.push({ id: p.id, added: true });
+    const kept = fresh.length === p.ops.length ? p : { ...p, ops: fresh };
+    entries.push({ proposal: kept });
+    for (const o of fresh) pendingKeys.add(keyOf(o));
+    added.push(kept.id);
+    outcomes.push({ id: kept.id, added: true, ...(dupKeys.length > 0 ? { skippedKeys: dupKeys } : {}) });
   }
   if (added.length > 0) saveInbox(abs, rewriteInbox(state.content, entries), state);
   return { added, skipped, outcomes };
@@ -206,6 +210,8 @@ export function verifyTargets(ledger: Ledger, proposal: Proposal): { ok: boolean
           return ledger.props.some((p) => p.name === op.name);
         case 'knowledge':
           return ledger.knowledge.some((k) => k.character === op.character);
+        case 'character':
+          return (ledger.characters ?? []).some((c) => c.name === op.name);
         case 'clock':
           return ledger.clock.some((r) => clockKey(r.chapters) === clockKey(op.chapters));
         default:
@@ -226,6 +232,29 @@ export function verifyTargets(ledger: Ledger, proposal: Proposal): { ok: boolean
     messages.push(`${o.action}:${o.targetKey} → ${isPresent ? '在位' : '不在'}（期望${expectPresent ? '在位' : '消失'}）`);
   }
   return { ok, message: messages.join('；') || '无实体操作' };
+}
+
+/**
+ * 语义预检（4.2.1 挂账承接）：UPDATE 目标必须在位、ADD 键必须空闲——不符转人工（提案留 pending 可改判）。
+ * 此前 UPDATE 指向不存在键会静默新建、ADD 覆盖已存条目（陈旧提案无提示覆盖作者手改）。
+ * clock/登记表无 ADD/UPDATE 冲突面（幂等集合语义），不检。
+ */
+function targetConflicts(ledger: Ledger, proposal: Proposal): string[] {
+  const denials: string[] = [];
+  const exists = (o: ProposalOp): boolean => {
+    const op = o.op;
+    if (op.op === 'promise') return ledger.promises.some((p) => p.id === (op.entry.id ?? op.entry.name));
+    if (op.op === 'prop') return ledger.props.some((p) => p.name === op.entry.name);
+    if (op.op === 'knowledge') return ledger.knowledge.some((k) => k.character === op.entry.character);
+    if (op.op === 'character') return (ledger.characters ?? []).some((c) => c.name === op.entry.name);
+    return true; // clock/登记表：不检
+  };
+  for (const o of proposal.ops) {
+    if (o.action === 'NOOP' || (o.op.op !== 'promise' && o.op.op !== 'prop' && o.op.op !== 'knowledge' && o.op.op !== 'character')) continue;
+    if (o.action === 'UPDATE' && !exists(o)) denials.push(`语义预检：UPDATE 目标不在位（${o.targetKey}）——确认后请改用 ADD`);
+    if (o.action === 'ADD' && exists(o)) denials.push(`语义预检：ADD 键已占用（${o.targetKey}）——确认覆盖请改用 UPDATE`);
+  }
+  return denials;
 }
 
 /** 裁决：采纳（权限面复核→落账→回读验证），块置 adopted 并持久化验证结论；回读不过=保持 pending 可重试（upsert 幂等）。 */
@@ -250,6 +279,8 @@ export function inboxAdopt(workDir: string, proposalId: string, inboxPath: strin
   const { ledger } = readLedger(workDir);
   const v = validateProposal(current, ledger);
   if (!v.ok) return { proposal: current, applied: false, denials: v.denials };
+  const conflicts = targetConflicts(ledger, current);
+  if (conflicts.length > 0) return { proposal: current, applied: false, denials: conflicts };
 
   upsertLedger(workDir, ops);
   const { ledger: after } = readLedger(workDir);

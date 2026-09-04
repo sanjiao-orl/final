@@ -23,6 +23,7 @@ import { frontmatterEnd, parseFrontmatter } from './frontmatter.js';
 import { loadPrompt } from './prompts.js';
 import { SNAPSHOT_KEEP } from './tools.js';
 import { indexedSliceForWork } from './ledger-index.js';
+import { matchName, normalizeName, resolveNameRefs } from './character-norm.js';
 
 // ---------- 类型 ----------
 
@@ -137,12 +138,46 @@ export interface ProtectEntry {
   reason?: string;
 }
 
-/** 四维账本 + 三张登记表。 */
+/** 角色动态状态（4.3 角色维动态层：区间原生事实——不做「当前值」字段，to 由同字段后继状态推导；永远走裁决回路）。 */
+export interface CharacterState {
+  /** 状态字段（位置/生死/境界修为等；字段集以真人小段真账本校准——先收自由字段）。 */
+  field: string;
+  value: string;
+  /** 生效起点章（manuscript relPath；区间 from）。 */
+  since: string;
+  line?: number;
+  quote?: string;
+}
+
+/**
+ * 角色卡（4.3 角色维静态层：登记型，低频人审直写）。
+ * 设定登记（境界名/功法名/势力/地名）复用同模式：kind 换 faction/location/lore（缺省 character）。
+ * states=动态层，直写工具拒收，仅裁决回路（提案经收件箱作者裁决）可写。
+ */
+export interface CharacterEntry {
+  name: string;
+  /** 别名表（词典精确匹配键；归一化后比对）。 */
+  aliases?: string[];
+  kind?: 'character' | 'faction' | 'location' | 'lore';
+  /** 角色定位。 */
+  role?: string;
+  /** 阵营。 */
+  faction?: string;
+  /** 自由描述。 */
+  description?: string;
+  /** 关系骨架（自由文本，不做结构化关系边）。 */
+  relations?: string;
+  states?: CharacterState[];
+}
+
+/** 账本（四维+角色）+ 三张登记表。 */
 export interface Ledger {
   clock: ClockRow[];
   props: PropEntry[];
   promises: PromiseEntry[];
   knowledge: KnowledgeEntry[];
+  /** 角色卡（4.3 角色维，信封原生首型）：可选字段——旧账本零迁移，缺省按空表处理；序列化空表省略（文件级零 diff）。 */
+  characters?: CharacterEntry[];
   doNotReexplain: string[];
   protect: ProtectEntry[];
   tripwires: string[];
@@ -166,6 +201,7 @@ export type LedgerOp =
   | { op: 'prop'; entry: PropEntry }
   | { op: 'promise'; entry: PromiseEntry }
   | { op: 'knowledge'; entry: KnowledgeEntry }
+  | { op: 'character'; entry: CharacterEntry }
   | { op: 'doNotReexplain'; fact: string }
   | { op: 'protect'; item: string; reason?: string }
   | { op: 'tripwire'; item: string }
@@ -174,6 +210,7 @@ export type LedgerOp =
   | { op: 'remove'; dimension: 'prop'; name: string }
   | { op: 'remove'; dimension: 'promise'; id: string }
   | { op: 'remove'; dimension: 'knowledge'; character: string }
+  | { op: 'remove'; dimension: 'character'; name: string }
   | { op: 'remove'; dimension: 'doNotReexplain' | 'protect' | 'tripwire'; item: string };
 
 /** 数组判等（顺序无关的字符串集合相等）。 */
@@ -182,6 +219,19 @@ function sameStringArray(a: string[], b: string[]): boolean {
   const sa = [...a].sort();
   const sb = [...b].sort();
   return sa.every((x, i) => x === sb[i]);
+}
+
+/** 角色卡行校验（4.3）：name 非空；states 每条 field/value/since 非空。可选字段宽松（静态层人审低频直写）。 */
+function assertCharacterRow(entry: CharacterEntry): void {
+  if (typeof entry.name !== 'string' || entry.name.trim() === '') throw new Error('character 需要非空 name');
+  if (entry.kind !== undefined && !['character', 'faction', 'location', 'lore'].includes(entry.kind)) {
+    throw new Error(`character kind 不合法（character|faction|location|lore）: ${String(entry.kind)}`);
+  }
+  for (const s of entry.states ?? []) {
+    if (typeof s.field !== 'string' || s.field.trim() === '' || typeof s.value !== 'string' || s.value.trim() === '' || typeof s.since !== 'string' || s.since.trim() === '') {
+      throw new Error(`character「${entry.name}」的 states 每条需要非空 field/value/since`);
+    }
+  }
 }
 
 /**
@@ -200,6 +250,8 @@ export function applyOps(ledger: Ledger, ops: LedgerOp[]): Ledger {
     props: [...ledger.props],
     promises: [...ledger.promises],
     knowledge: [...ledger.knowledge],
+    // 角色卡可选维度：源有键才复制（键不凭空出现）；character op 触及时再物化
+    ...(ledger.characters !== undefined ? { characters: [...ledger.characters] } : {}),
     doNotReexplain: [...ledger.doNotReexplain],
     protect: [...ledger.protect],
     tripwires: [...ledger.tripwires],
@@ -241,6 +293,16 @@ export function applyOps(ledger: Ledger, ops: LedgerOp[]): Ledger {
           const i = out.knowledge.findIndex((k) => k.character === entry.character);
           if (i >= 0) out.knowledge[i] = entry;
           else out.knowledge.push(entry);
+          break;
+        }
+        case 'character': {
+          const entry = (raw as { entry: CharacterEntry }).entry;
+          assertCharacterRow(entry);
+          const list = out.characters ?? [];
+          const i = list.findIndex((c) => c.name === entry.name);
+          if (i >= 0) list[i] = entry;
+          else list.push(entry);
+          out.characters = list;
           break;
         }
         case 'doNotReexplain': {
@@ -293,6 +355,12 @@ export function applyOps(ledger: Ledger, ops: LedgerOp[]): Ledger {
               const character = (raw as { character?: unknown }).character;
               if (typeof character !== 'string' || character.trim() === '') throw new Error('remove knowledge 需要非空 character');
               out.knowledge = out.knowledge.filter((k) => k.character !== character);
+              break;
+            }
+            case 'character': {
+              const name = (raw as { name?: unknown }).name;
+              if (typeof name !== 'string' || name.trim() === '') throw new Error('remove character 需要非空 name');
+              if (out.characters !== undefined) out.characters = out.characters.filter((c) => c.name !== name);
               break;
             }
             case 'doNotReexplain': {
@@ -689,11 +757,21 @@ export function renderLedgerMarkdown(ledger: Ledger, opts?: { chapterOrder?: Cha
     '',
     ledger.tripwires.length > 0 ? ledger.tripwires.map((x) => `- ${x}`).join('\n') : '_（空）_',
     '',
+    ...(ledger.characters !== undefined && ledger.characters.length > 0
+      ? [
+          '## Character cards（角色卡·静态层）',
+          '',
+          ...ledger.characters.map((c) =>
+            `- ${c.name}${c.kind && c.kind !== 'character' ? `（${c.kind}）` : ''}${c.role ? `｜${c.role}` : ''}${c.faction ? `｜营:${c.faction}` : ''}${c.aliases?.length ? `｜别名:${c.aliases.join('/')}` : ''}${c.description ? `——${c.description}` : ''}${c.relations ? `｜关系:${c.relations}` : ''}${c.states?.length ? `｜态:${c.states.map((s) => `${s.field}=${s.value}@${s.since}`).join('；')}` : ''}`,
+          ),
+          '',
+        ]
+      : []),
   ].join('\n') + '\n';
 }
 
 /** 账本 frontmatter 的已知键；其余键视为未知字段（人工增补/未来新字段）透传保留。 */
-const LEDGER_KNOWN_KEYS = ['clock', 'props', 'promises', 'knowledge', 'doNotReexplain', 'protect', 'tripwires'];
+const LEDGER_KNOWN_KEYS = ['clock', 'props', 'promises', 'knowledge', 'characters', 'doNotReexplain', 'protect', 'tripwires'];
 
 /**
  * 解析 knowledge 的 knows/doesNotKnow 数组（批三-2 向后兼容）：
@@ -850,6 +928,36 @@ function normalizeLedger(raw: unknown): Ledger {
     return entry;
   });
   base.doNotReexplain = strArr(r.doNotReexplain);
+  // 角色卡（4.3 可选维度）：raw 带键才归一化（键不凭空出现——旧账本零 diff；空数组显式保留，回读 round-trip 一致）
+  if (Array.isArray(r.characters)) {
+    base.characters = r.characters.map((c): CharacterEntry => {
+    const o = (c ?? {}) as Record<string, unknown>;
+    const entry: CharacterEntry = { name: str(o.name) ?? '' };
+    const aliases = strArr(o.aliases);
+    if (aliases.length > 0) entry.aliases = aliases;
+    const kind = str(o.kind);
+    if (kind === 'character' || kind === 'faction' || kind === 'location' || kind === 'lore') entry.kind = kind;
+    const role = str(o.role);
+    if (role !== undefined) entry.role = role;
+    const faction = str(o.faction);
+    if (faction !== undefined) entry.faction = faction;
+    const description = str(o.description);
+    if (description !== undefined) entry.description = description;
+    const relations = str(o.relations);
+    if (relations !== undefined) entry.relations = relations;
+    const states = arr(o.states).map((s): CharacterState => {
+      const so = (s ?? {}) as Record<string, unknown>;
+      const st: CharacterState = { field: str(so.field) ?? '', value: str(so.value) ?? '', since: str(so.since) ?? '' };
+      const line = num(so.line);
+      if (line !== undefined) st.line = line;
+      const quote = str(so.quote);
+      if (quote !== undefined) st.quote = quote;
+      return st;
+    });
+    if (states.length > 0) entry.states = states;
+    return entry;
+    });
+  }
   base.protect = arr(r.protect).map((p): ProtectEntry => {
     if (typeof p === 'string') return { item: p };
     const o = (p ?? {}) as Record<string, unknown>;
@@ -878,6 +986,30 @@ function knowledgeForYaml(list: KnowledgeFact[]): Array<string | Record<string, 
   });
 }
 
+/** 角色卡 YAML 投影（4.3）：稀疏对象（undefined 字段不落 YAML）。 */
+function characterForYaml(c: CharacterEntry): Record<string, unknown> {
+  return {
+    name: c.name,
+    ...(c.aliases !== undefined && c.aliases.length > 0 ? { aliases: c.aliases } : {}),
+    ...(c.kind !== undefined ? { kind: c.kind } : {}),
+    ...(c.role !== undefined ? { role: c.role } : {}),
+    ...(c.faction !== undefined ? { faction: c.faction } : {}),
+    ...(c.description !== undefined ? { description: c.description } : {}),
+    ...(c.relations !== undefined ? { relations: c.relations } : {}),
+    ...(c.states !== undefined && c.states.length > 0
+      ? {
+          states: c.states.map((s) => ({
+            field: s.field,
+            value: s.value,
+            since: s.since,
+            ...(s.line !== undefined ? { line: s.line } : {}),
+            ...(s.quote !== undefined ? { quote: s.quote } : {}),
+          })),
+        }
+      : {}),
+  };
+}
+
 /** 账本序列化为完整文件内容（YAML frontmatter + 渲染正文）；未知字段（extra）原样写回，与已知字段冲突时已知字段优先。 */
 export function serializeLedger(ledger: Ledger, opts?: { chapterOrder?: ChapterRef[] }): string {
   const yaml = stringifyYaml(
@@ -896,6 +1028,8 @@ export function serializeLedger(ledger: Ledger, opts?: { chapterOrder?: ChapterR
       doNotReexplain: ledger.doNotReexplain,
       protect: ledger.protect,
       tripwires: ledger.tripwires,
+      // 角色卡（4.3）：空表省略——旧账本不写新键，文件级零 diff
+      ...(ledger.characters !== undefined && ledger.characters.length > 0 ? { characters: ledger.characters.map(characterForYaml) } : {}),
     },
     { lineWidth: 0 },
   );
@@ -1363,6 +1497,66 @@ export function ledgerDiagnostics(ledger: Ledger, chapterOrder: ChapterRef[] = [
       });
     }
   }
+  // character-alias-conflict（4.3 角色维归一化诊断）：归一化后同键指向不同条目——主名/别名冲突
+  {
+    const seen = new Map<string, string>();
+    for (const c of ledger.characters ?? []) {
+      for (const n of [c.name, ...(c.aliases ?? [])]) {
+        const norm = normalizeName(n);
+        if (!norm) continue;
+        const prev = seen.get(norm);
+        if (prev !== undefined && prev !== c.name) {
+          findings.push({
+            code: 'character-alias-conflict',
+            severity: 'MODERATE',
+            category: 'CANON',
+            message: `角色别名冲突：「${n}」同时指向「${prev}」与「${c.name}」（归一化同键）`,
+          });
+        } else if (prev === undefined) seen.set(norm, c.name);
+      }
+    }
+  }
+
+  // character-state-order（4.3 角色维单调性诊断）：同角色同字段状态 since 重复=生效序不定
+  {
+    for (const c of ledger.characters ?? []) {
+      const groups = new Map<string, CharacterState[]>();
+      for (const s of c.states ?? []) {
+        const list = groups.get(s.field) ?? [];
+        list.push(s);
+        groups.set(s.field, list);
+      }
+      for (const [field, list] of groups) {
+        for (let i = 1; i < list.length; i++) {
+          if (list[i]!.since === list[i - 1]!.since) {
+            findings.push({
+              code: 'character-state-order',
+              severity: 'MINOR',
+              category: 'CANON',
+              message: `角色「${c.name}」状态「${field}」同章多条（since=${list[i]!.since}）：生效序不定，请合并或区分章`,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // character-ref-unresolved（4.3 可解析引用）：未解析不报错只入清单（MINOR，账本级）；角色维未启用=静默跳过
+  {
+    const refs = resolveNameRefs(ledger);
+    if (refs.enabled && refs.unresolved.length > 0) {
+      findings.push({
+        code: 'character-ref-unresolved',
+        severity: 'MINOR',
+        category: 'CANON',
+        message: `人名字段未命中角色词典 ${refs.unresolved.length} 处（可选解析不强制）：${refs.unresolved
+          .slice(0, 5)
+          .map((u) => `${u.where}→「${u.name}」`)
+          .join('；')}${refs.unresolved.length > 5 ? '…' : ''}`,
+      });
+    }
+  }
+
   return findings;
 }
 

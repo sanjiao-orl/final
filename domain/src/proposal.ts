@@ -82,6 +82,7 @@ function protectHit(protectItems: string[], op: LedgerOp): string | null {
     if (typeof e.name === 'string') hay.push(e.name);
     if (typeof e.character === 'string') hay.push(e.character);
     if (typeof e.id === 'string') hay.push(e.id);
+    if (Array.isArray(e.aliases)) for (const a of e.aliases) if (typeof a === 'string') hay.push(a); // 角色卡别名（4.3）：protect 命中别名同样拦
   }
   if ('item' in op && typeof op.item === 'string') hay.push(op.item);
   if ('name' in op && typeof (op as { name?: unknown }).name === 'string') hay.push((op as { name: string }).name);

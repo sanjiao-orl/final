@@ -217,3 +217,36 @@ describe('verifyTargets（纯函数，逐维对账真实落点）', () => {
     expect(verifyTargets(L(), makeProposal('scan', [upClock])).ok).toBe(true);
   });
 });
+
+describe('语义预检与 op 级去重（4.2.1 挂账在 4.3 承接）', () => {
+  it('UPDATE 目标不在位 → deny 不落账；ADD 键已占用 → deny', () => {
+    const work = makeWorkDir();
+    seedLedger(work);
+    const updGhost: ProposalOp = { action: 'UPDATE', op: { op: 'promise', entry: { id: 'P-404', name: '不存在', arc: 'planted', setups: [], payoffs: [] } }, targetKey: 'P-404', evidence: { chapter: CH, quote: 'q' }, rationale: 'r' };
+    const p1 = makeProposal('scan', [updGhost]);
+    inboxAppend(work, [p1]);
+    const r1 = inboxAdopt(work, p1.id);
+    expect(r1.applied).toBe(false);
+    expect(r1.denials.join()).toContain('UPDATE 目标不在位');
+    const addDup: ProposalOp = { action: 'ADD', op: { op: 'promise', entry: { id: 'P-001', name: '铜哨隐患', arc: 'planted', setups: [], payoffs: [] } }, targetKey: 'P-001', evidence: { chapter: CH, quote: 'q' }, rationale: 'r' };
+    const p2 = makeProposal('scan', [addDup]);
+    inboxAppend(work, [p2]);
+    const r2 = inboxAdopt(work, p2.id);
+    expect(r2.applied).toBe(false);
+    expect(r2.denials.join()).toContain('ADD 键已占用');
+  });
+
+  it('op 级部分入箱：重叠键剔除带明细、新候选照常入箱（不再整提案静默丢）', () => {
+    const work = makeWorkDir();
+    seedLedger(work);
+    const opB: ProposalOp = { ...addOp, targetKey: 'P-003', op: { op: 'promise', entry: { id: 'P-003', name: '新候选', arc: 'planted', setups: [{ chapter: CH, quote: 'q' }], payoffs: [] } } };
+    const p1 = makeProposal('scan', [addOp]);
+    inboxAppend(work, [p1]); // ADD:P-002 占用 pending 键
+    const p2 = makeProposal('scan', [addOp, opB]);
+    const r = inboxAppend(work, [p2]);
+    expect(r.added).toEqual([p2.id]);
+    expect(r.outcomes[0]!.skippedKeys).toEqual(['ADD:P-002']);
+    const kept = inboxList(work).find((e) => e.proposal.id === p2.id)!.proposal;
+    expect(kept.ops.map((o) => o.targetKey)).toEqual(['P-003']);
+  });
+});
