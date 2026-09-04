@@ -6,7 +6,7 @@
 // 本管线不落账。触发=批量（连载间隙），不在写作热路径；模型用便宜档（提案必经裁决，成本优先）。
 // 质量纪律：噪音预期 F1≈0.68（外-b2）——裁决层收窄是设计内一环，管线宁多勿漏；
 // 已登记承诺的普通呼应（link 类）不产提案（账本已有，静默合规）；未登记候选照常送判（超域规约）。
-import { generateText, Output, type LanguageModel, type ToolSet } from 'ai';
+import { generateText, JSONParseError, NoObjectGeneratedError, NoOutputGeneratedError, Output, TypeValidationError, type LanguageModel, type ToolSet } from 'ai';
 import { z } from 'zod';
 import { getLlmTimeoutSeconds, type Tier } from './config.js';
 import { HttpError, writeJson } from './http.js';
@@ -27,7 +27,8 @@ export interface ScanDeps {
 }
 
 const scanFindingSchema = z.object({
-  kind: z.enum(['new', 'retire']),
+  // link=已登记承诺的普通呼应：schema 收下后在映射层静默过滤（schema 硬拒会把整章判定炸掉）
+  kind: z.enum(['new', 'retire', 'link']),
   /** retire 必填：判撤的已登记承诺 id。 */
   promiseId: z.string().optional(),
   /** new 必填：承诺/伏笔一句话（跨章需要记住的事实）。 */
@@ -80,14 +81,26 @@ const SYSTEM =
   '- 已登记承诺的普通呼应（link 类）不输出。\n' +
   'quote 必须逐字摘抄嫌疑句正文；rationale 一句话说明跨章意义。宁缺毋滥：拿不准不输出。';
 
+/** 章键：取 relPath 末段数字（章号）补零 4 位——卷号等前段数字不并入（修复跨章碰撞）；无数字=0000。 */
+export function chapterKeyOf(relPath: string): string {
+  const groups = relPath.match(/\d+/g);
+  return (groups?.[groups.length - 1] ?? '').padStart(4, '0').slice(-4) || '0000';
+}
+
+/** 承诺名稳定散列（djb2 base36 取 6 位）：id 不随 LLM 输出顺序漂移，跨次扫描同键可去重/抑制。 */
+export function nameHash(name: string): string {
+  let h = 5381;
+  for (let i = 0; i < name.length; i++) h = ((h << 5) + h + name.charCodeAt(i)) >>> 0;
+  return h.toString(36).padStart(6, '0').slice(-6);
+}
+
 /** LLM 判定 → 提案操作的确定性映射（id 生成/证据锚截断在本层定死）。 */
 export function makeScanOps(chapter: string, chapterKey: string, findings: ScanFinding[]): OpDraft[] {
   const ops: OpDraft[] = [];
-  let seq = 0;
   for (const f of findings) {
     const quote = f.quote.slice(0, 80);
     if (f.kind === 'new' && f.name?.trim()) {
-      const id = `P-S-${chapterKey}-${String(++seq).padStart(2, '0')}`;
+      const id = `P-S-${chapterKey}-${nameHash(f.name.trim())}`;
       ops.push({
         action: 'ADD',
         op: { op: 'promise', entry: { id, name: f.name.trim(), arc: 'planted', setups: [{ chapter, quote }], payoffs: [] } },
@@ -109,6 +122,14 @@ export function makeScanOps(chapter: string, chapterKey: string, findings: ScanF
   return ops;
 }
 
+/** LLM 判定失败归类（对齐 review.ts 口径）：结构化输出失败给稳定中文消息，其余透传原始消息。 */
+function classifyLlmError(err: unknown): string {
+  if (NoObjectGeneratedError.isInstance(err) || NoOutputGeneratedError.isInstance(err) || JSONParseError.isInstance(err) || TypeValidationError.isInstance(err)) {
+    return '模型输出不是合法 findings JSON（结构化校验失败）';
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
 /** 处理一次 /v1/scan/promise 请求。body 校验失败 400；工具不可用 503；模型/工具失败 502。 */
 export async function handleScanRequest(body: unknown, deps: ScanDeps, req: IncomingMessage, res: ServerResponse): Promise<void> {
   const parsed = scanBodySchema.safeParse(body);
@@ -121,7 +142,6 @@ export async function handleScanRequest(body: unknown, deps: ScanDeps, req: Inco
   const abort = new AbortController();
   const onClose = () => abort.abort();
   res.on('close', onClose);
-  const timeoutSignal = AbortSignal.timeout(getLlmTimeoutSeconds() * 1000);
 
   try {
     // 第一步：确定性预筛（零 LLM）
@@ -134,35 +154,46 @@ export async function handleScanRequest(body: unknown, deps: ScanDeps, req: Inco
     const suspectChapters = allSuspects.slice(0, maxChapters ?? 20);
     const knownIds = [...new Set(allSuspects.flatMap((c) => c.hits.flatMap((h) => h.matchedPromiseIds)))];
 
-    // 第二步：逐嫌疑章 LLM 判定（便宜档；零嫌疑不取模型）
+    // 第二步：逐嫌疑章 LLM 判定（便宜档；零嫌疑不取模型）。单章失败记入 errors 继续批（修复前全批原子）；
+    // 每章独立超时死线（修复前全批共享一条）；客户端断连即停烧 LLM（已产草稿仍入箱）。
     const detail: Array<{ chapter: string; proposalId: string; findings: ScanFinding[] }> = [];
+    const errors: Array<{ chapter: string; error: string }> = [];
     let llmCalls = 0;
     const drafts: Array<{ origin: 'scan'; ops: OpDraft[] }> = [];
     if (suspectChapters.length > 0) {
       // 便宜档=background（与章摘要同档）：提案必经作者裁决，发现层成本优先
       const model = deps.modelForTier('background');
       for (const ch of suspectChapters) {
-      const chapterKey = ch.chapterRelPath.replace(/\D+/g, '').slice(-4) || '0000';
-      const digest = ch.hits
-        .map((h) => `- 第${h.line}行「${h.quote}」（触发：${h.predicate}${h.matchedPromiseIds.length ? `；关联：${h.matchedPromiseIds.join(',')}` : '；无登记关联'}）`)
-        .join('\n');
-      const knownList = knownIds.length ? knownIds.map((id) => `- ${id}`).join('\n') : '（本章预筛未关联到已登记承诺）';
-      const result = await generateText({
-        model,
-        system: SYSTEM,
-        prompt: `章节：${ch.chapterRelPath}\n\n【已登记承诺 id 清单】\n${knownList}\n\n【本章嫌疑句（确定性预筛产出）】\n${digest}\n\n逐条判定，输出 findings。`,
-        output: Output.object({ schema: scanFindingsSchema }),
-        abortSignal: timeoutSignal,
-      });
-      llmCalls++;
-      const findings = result.output?.findings ?? [];
-      const ops = makeScanOps(ch.chapterRelPath, chapterKey, findings);
-      if (ops.length === 0) continue;
-      // 章内去重（同一 promiseId 多次 retire / 重复 new 名）：targetKey 唯一
-      const seen = new Set<string>();
-      const uniqueOps = ops.filter((o) => (seen.has(`${o.action}:${o.targetKey}`) ? false : (seen.add(`${o.action}:${o.targetKey}`), true)));
-      drafts.push({ origin: 'scan', ops: uniqueOps });
-      detail.push({ chapter: ch.chapterRelPath, proposalId: `draft#${drafts.length}`, findings });
+        if (abort.signal.aborted) break;
+        const digest = ch.hits
+          .map((h) => `- 第${h.line}行「${h.quote}」（触发：${h.predicate}${h.matchedPromiseIds.length ? `；关联：${h.matchedPromiseIds.join(',')}` : '；无登记关联'}）`)
+          .join('\n');
+        const knownList = knownIds.length ? knownIds.map((id) => `- ${id}`).join('\n') : '（本章预筛未关联到已登记承诺）';
+        const chapterTimeout = AbortSignal.timeout(getLlmTimeoutSeconds() * 1000);
+        try {
+          const result = await generateText({
+            model,
+            system: SYSTEM,
+            prompt: `章节：${ch.chapterRelPath}\n\n【已登记承诺 id 清单】\n${knownList}\n\n【本章嫌疑句（确定性预筛产出）】\n${digest}\n\n逐条判定，输出 findings。`,
+            output: Output.object({ schema: scanFindingsSchema }),
+            abortSignal: AbortSignal.any([abort.signal, chapterTimeout]),
+          });
+          llmCalls++;
+          const findings = result.output?.findings ?? [];
+          const ops = makeScanOps(ch.chapterRelPath, chapterKeyOf(ch.chapterRelPath), findings);
+          if (ops.length === 0) continue;
+          // 章内去重（同一 promiseId 多次 retire / 重复 new 名）：targetKey 唯一
+          const seen = new Set<string>();
+          const uniqueOps = ops.filter((o) => (seen.has(`${o.action}:${o.targetKey}`) ? false : (seen.add(`${o.action}:${o.targetKey}`), true)));
+          drafts.push({ origin: 'scan', ops: uniqueOps });
+          detail.push({ chapter: ch.chapterRelPath, proposalId: `draft#${drafts.length}`, findings });
+        } catch (err) {
+          if (abort.signal.aborted) break; // 取消不算章失败
+          errors.push({
+            chapter: ch.chapterRelPath,
+            error: chapterTimeout.aborted ? `本章判定超时（超过 ${getLlmTimeoutSeconds()} 秒）` : classifyLlmError(err),
+          });
+        }
       }
     }
 
@@ -170,13 +201,17 @@ export async function handleScanRequest(body: unknown, deps: ScanDeps, req: Inco
     let added: string[] = [];
     let skipped: string[] = [];
     if (drafts.length > 0) {
-      const r = (await callTool(deps, 'inbox_append', { workDir, drafts }, abort.signal)) as { added?: string[]; skipped?: string[] };
+      const r = (await callTool(deps, 'inbox_append', { workDir, drafts }, abort.signal)) as {
+        added?: string[];
+        skipped?: string[];
+        outcomes?: Array<{ id: string; added: boolean }>;
+      };
       added = r.added ?? [];
       skipped = r.skipped ?? [];
-      // 回填真实提案 id 到 detail（按序对应）
-      detail.forEach((d, i) => {
-        if (added[i]) d.proposalId = added[i]!;
-        else if (skipped.includes(added[i] ?? '')) d.proposalId = `skipped:${d.proposalId}`;
+      // outcomes 与草稿同序（domain 4.2.1+），detail 与草稿 1:1 → 按下标对齐（修复 skip 错位/死分支）
+      r.outcomes?.forEach((o, i) => {
+        const d = detail[i];
+        if (d) d.proposalId = o.added ? o.id : `skipped:${d.proposalId}`;
       });
     }
 
@@ -187,6 +222,7 @@ export async function handleScanRequest(body: unknown, deps: ScanDeps, req: Inco
         scannedChapters: pre.scanned ?? 0,
         suspectChapters: suspectChapters.length,
         llmCalls,
+        errors,
         inbox: { added, skipped },
         detail,
         coverage: { scanned: pre.scanned ?? 0, suspect: suspectChapters.length, window: chapterRelPaths ?? 'all' },
