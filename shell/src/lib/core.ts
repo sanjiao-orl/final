@@ -341,6 +341,15 @@ export class CoreClient {
     return this.request(`${API_PREFIX}/posture${q}`);
   }
 
+  /** 补账扫描（4.2 承诺·伏笔窄域）：预筛→便宜档判定→提案入收件箱；非写作热路径，同步返回覆盖读数。 */
+  scanPromise(workDir: string, maxChapters?: number): Promise<{ scannedChapters: number; suspectChapters: number; llmCalls: number; inbox: { added: string[]; skipped: string[] } }> {
+    return this.request(`${API_PREFIX}/scan/promise`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workDir, ...(maxChapters ? { maxChapters } : {}) }),
+    });
+  }
+
   /** 会话列表；scope 传入时按归属过滤（''=无归属讨论，章 relPath=章节内讨论）。 */
   listSessions(scope?: string): Promise<{ sessions: SessionRow[] }> {
     const q = scope === undefined ? '' : `?scope=${encodeURIComponent(scope)}`;

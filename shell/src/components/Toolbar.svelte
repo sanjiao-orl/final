@@ -5,6 +5,7 @@
   import { iconSvg } from '../lib/icons.js';
   import { TRASH_DIR } from '../lib/paths.js';
   import { candidates } from '../lib/candidates.svelte.js';
+  import { inbox } from '../lib/inbox.svelte.js';
   import { settings, APPROVAL_MODES, APPROVAL_MODE_LABELS, APPROVAL_MODE_DESCS, type ApprovalMode } from '../lib/settings.svelte.js';
   import { dialog } from '../lib/dialog.svelte.js';
   import { review } from '../lib/review.svelte.js';
@@ -346,6 +347,10 @@
   <button class="tb-btn" class:on={candidates.stagingTab} onclick={() => candidates.openStaging()} title="暂存区：AI 产出候选，批量采纳/整改/丢弃">
     {@html iconSvg('drawer', 15)}
     暂存{#if candidates.pendingCount > 0}<i class="tb-badge">{candidates.pendingCount}</i>{/if}
+  </button>
+  <button class="tb-btn" class:on={inbox.tabOpen} onclick={() => { candidates.stagingTab = false; inbox.openTab(); }} title="裁决收件箱：补账扫描的承诺伏笔提案待裁决（作者裁决后才落账）">
+    {@html iconSvg('drawer', 15)}
+    收件箱{#if inbox.pendingCount > 0}<i class="tb-badge">{inbox.pendingCount}</i>{/if}
   </button>
   <button class="tb-btn" class:on={settings.typewriter} onclick={() => settings.setTypewriter(!settings.typewriter)} title="光标锁：光标行锁定屏幕 42% 处，长文输入不追底">
     {@html iconSvg('typewriter', 15)}

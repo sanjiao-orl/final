@@ -7,6 +7,7 @@
   import { work } from './lib/work.svelte.js';
   import { chat } from './lib/chat.svelte.js';
   import { candidates } from './lib/candidates.svelte.js';
+  import { inbox } from './lib/inbox.svelte.js';
   import { quality } from './lib/quality.svelte.js';
   import { settings } from './lib/settings.svelte.js';
   import { snapshot } from './lib/snapshot.svelte.js';
@@ -23,6 +24,7 @@
   import StagingList from './components/staging/StagingList.svelte';
   import CandidateView from './components/staging/CandidateView.svelte';
   import StagingOverview from './components/staging/StagingOverview.svelte';
+  import InboxList from './components/inbox/InboxList.svelte';
   import AiRail from './components/ai/AiRail.svelte';
   import AiPanel from './components/ai/AiPanel.svelte';
   import ApprovalCard from './components/approval/ApprovalCard.svelte';
@@ -44,6 +46,7 @@
     work.init(client, workDir);
     chat.init(client);
     candidates.init(client);
+    inbox.init(client);
     quality.init(client);
     snapshot.init(client, workDir);
     review.init(client, workDir);
@@ -173,8 +176,14 @@
 
     <div class="main">
       <aside class="left" data-ai-zone>
-        <div class="staging-tabs"><button class:active={!candidates.stagingTab} onclick={() => (candidates.stagingTab = false)}>目录</button><button class:active={candidates.stagingTab} onclick={() => candidates.openStaging()}>暂存 {candidates.pendingCount}</button></div>
-        <div class="left-tree">{#if candidates.stagingTab}<StagingList />{:else}<TreeView />{/if}</div>
+        <div class="staging-tabs">
+          <button class:active={!candidates.stagingTab && !inbox.tabOpen} onclick={() => { candidates.stagingTab = false; inbox.tabOpen = false; }}>目录</button>
+          <button class:active={candidates.stagingTab} onclick={() => { candidates.openStaging(); inbox.tabOpen = false; }}>暂存 {candidates.pendingCount}</button>
+          <button class:active={inbox.tabOpen} onclick={() => { candidates.stagingTab = false; inbox.openTab(); }}>收件箱 {inbox.pendingCount}</button>
+        </div>
+        <div class="left-tree">
+          {#if inbox.tabOpen}<InboxList />{:else if candidates.stagingTab}<StagingList />{:else}<TreeView />{/if}
+        </div>
         <NotesArea />
       </aside>
 
