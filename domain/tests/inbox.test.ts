@@ -1,8 +1,8 @@
 /** inbox.test.ts —— 裁决收件箱：append 幂等 / adopt 落账+回读验证 / discard 理由枚举 / md round-trip。 */
 import { describe, expect, it } from 'vitest';
 import { makeProposal, type ProposalOp } from '../src/proposal.js';
-import { inboxAdopt, inboxAppend, inboxDiscard, inboxList } from '../src/inbox.js';
-import { emptyLedger, readLedger, writeLedger } from '../src/ledger.js';
+import { inboxAdopt, inboxAppend, inboxDiscard, inboxList, verifyTargets } from '../src/inbox.js';
+import { emptyLedger, readLedger, writeLedger, type Ledger } from '../src/ledger.js';
 import { makeWorkDir, writeTree } from './helpers.js';
 
 const CH = 'manuscript/第3章.md';
@@ -36,8 +36,8 @@ describe('收件箱存储与幂等', () => {
     const r2 = inboxAppend(work, [p2]);
     expect(r2.added).toEqual([]);
     expect(r2.skipped).toEqual([p2.id]);
-    // 裁决后不再占 pending 键 → 可再入
-    inboxDiscard(work, p1.id, { reason: '误报' });
+    // 裁决后不再占 pending 键 → 可再入（「其他」理由不抑制；「误报」的抑制见下方专测）
+    inboxDiscard(work, p1.id, { reason: '其他' });
     const r3 = inboxAppend(work, [p2]);
     expect(r3.added).toEqual([p2.id]);
     const list = inboxList(work);
@@ -123,5 +123,97 @@ describe('裁决：adopt 落账+回读验证', () => {
     const work = makeWorkDir();
     seedLedger(work);
     expect(() => inboxAdopt(work, 'PR-NOPE')).toThrow(/无此提案/);
+  });
+});
+
+describe('裁决语义修复（4.2.1）', () => {
+  it('「误报」驳回 → 同键永久抑制再入；「有意延后」→ 重报可再入', () => {
+    const work = makeWorkDir();
+    seedLedger(work);
+    const p1 = makeProposal('scan', [addOp]);
+    inboxAppend(work, [p1]);
+    inboxDiscard(work, p1.id, { reason: '误报' });
+    const r1 = inboxAppend(work, [makeProposal('scan', [addOp])]);
+    expect(r1.added).toEqual([]);
+    expect(r1.skipped.length).toBe(1);
+    expect(r1.outcomes.every((o) => !o.added)).toBe(true);
+    const delayed = makeProposal('radar', [{ ...addOp, targetKey: 'P-003' }]);
+    inboxAppend(work, [delayed]);
+    inboxDiscard(work, delayed.id, { reason: '有意延后', reanchorVolume: '卷三' });
+    const r2 = inboxAppend(work, [makeProposal('radar', [{ ...addOp, targetKey: 'P-003' }])]);
+    expect(r2.added.length).toBe(1);
+  });
+
+  it('终态守卫：adopted/discarded 均不可再裁决', () => {
+    const work = makeWorkDir();
+    seedLedger(work);
+    const p = makeProposal('scan', [addOp]);
+    inboxAppend(work, [p]);
+    inboxAdopt(work, p.id);
+    expect(() => inboxAdopt(work, p.id)).toThrow(/已裁决/);
+    expect(() => inboxDiscard(work, p.id, { reason: '误报' })).toThrow(/已裁决/);
+  });
+
+  it('保留文件守卫：收件箱不得指向 ledger.md / style.md', () => {
+    const work = makeWorkDir();
+    seedLedger(work); // 产生 .novel/ledger.md
+    expect(() => inboxAppend(work, [makeProposal('scan', [addOp])], '.novel/ledger.md')).toThrow(/保留/);
+    expect(() => inboxList(work, '.novel/style.md')).toThrow(/保留/);
+  });
+
+  it('回读验证 ❌ → 保持 pending 可改判（自相矛盾提案：同提案 ADD 后 DELETE 同键）', () => {
+    const work = makeWorkDir();
+    seedLedger(work);
+    const addP9: ProposalOp = { ...addOp, targetKey: 'P-009', op: { op: 'promise', entry: { id: 'P-009', name: '雾中诺言', arc: 'planted', setups: [{ chapter: CH, quote: '雾' }], payoffs: [] } } };
+    const delP9: ProposalOp = { action: 'DELETE', op: { op: 'remove', dimension: 'promise', id: 'P-009' }, targetKey: 'P-009', evidence: { chapter: CH, quote: 'q' }, rationale: '先加后删的自相矛盾草稿' };
+    const p = makeProposal('scan', [addP9, delP9]);
+    inboxAppend(work, [p]);
+    const r = inboxAdopt(work, p.id);
+    expect(r.applied).toBe(true);
+    expect(r.verify?.ok).toBe(false);
+    expect(r.proposal.status).toBe('pending');
+    const list = inboxList(work);
+    expect(list[0]!.proposal.status).toBe('pending');
+    expect(list[0]!.verify?.ok).toBe(false);
+    const d = inboxDiscard(work, p.id, { reason: '其他' });
+    expect(d.proposal.status).toBe('discarded');
+  });
+
+  it('摘句含定界串/围栏 → 收件箱 round-trip 无损（标记转义+贪婪围栏）', () => {
+    const work = makeWorkDir();
+    seedLedger(work);
+    const tricky: ProposalOp = {
+      ...addOp,
+      evidence: { chapter: CH, quote: '他念道：<!-- inbox-entry:end --> 然后展示 ```yaml 代码' },
+      rationale: '含定界串与围栏的摘句 <!-- inbox-entry:start x -->',
+    };
+    const p = makeProposal('scan', [tricky]);
+    const r = inboxAppend(work, [p]);
+    expect(r.added).toEqual([p.id]);
+    const list = inboxList(work);
+    expect(list.length).toBe(1);
+    expect(list[0]!.proposal).toEqual(p);
+  });
+});
+
+describe('verifyTargets（纯函数，逐维对账真实落点）', () => {
+  const L = (): Ledger => ({
+    ...emptyLedger(),
+    doNotReexplain: ['旧设定'],
+    clock: [{ chapters: ['manuscript/第1章.md'] }],
+  });
+  const delDnr = (fact: string): ProposalOp => ({ action: 'DELETE', op: { op: 'remove', dimension: 'doNotReexplain', item: fact }, targetKey: fact, evidence: { chapter: CH, quote: 'q' }, rationale: 'r' });
+
+  it('登记表 DELETE 对账：在册未删成 → ❌；已消失 → ✅（修复前恒反判）', () => {
+    expect(verifyTargets(L(), makeProposal('scan', [delDnr('旧设定')])).ok).toBe(false);
+    expect(verifyTargets(emptyLedger(), makeProposal('scan', [delDnr('旧设定')])).ok).toBe(true);
+  });
+
+  it('clock 维真实回读：DELETE 后仍在 → ❌；已删 → ✅；upsert 在位 → ✅（修复前恒 ✅ 空转/恒 ❌）', () => {
+    const delClock: ProposalOp = { action: 'DELETE', op: { op: 'remove', dimension: 'clock', chapters: ['manuscript/第1章.md'] }, targetKey: 'manuscript/第1章.md', evidence: { chapter: CH, quote: 'q' }, rationale: 'r' };
+    expect(verifyTargets(L(), makeProposal('scan', [delClock])).ok).toBe(false);
+    expect(verifyTargets(emptyLedger(), makeProposal('scan', [delClock])).ok).toBe(true);
+    const upClock: ProposalOp = { action: 'ADD', op: { op: 'clock', entry: { chapters: ['manuscript/第1章.md'] } }, targetKey: 'manuscript/第1章.md', evidence: { chapter: CH, quote: 'q' }, rationale: 'r' };
+    expect(verifyTargets(L(), makeProposal('scan', [upClock])).ok).toBe(true);
   });
 });

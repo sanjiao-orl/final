@@ -9,7 +9,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { frontmatterEnd } from './frontmatter.js';
-import { assertWorkDir, resolveInside, toPosix } from './fsutil.js';
+import { assertWorkDir, errText, resolveInsidePosix } from './fsutil.js';
 import type { ChapterRef, Ledger, PromiseEntry } from './ledger.js';
 
 /** 承诺/伏笔嫌疑谓词（宽口径，裁决层收窄；「宁缺毋滥」管诊断不管预筛——预筛宁多勿漏）。 */
@@ -82,15 +82,23 @@ export function promisePrefilter(workDir: string, opts?: { chapterRelPaths?: str
   const targets = opts?.chapterRelPaths ?? order.map((c) => c.relPath);
   const chapters: ChapterPrefilter[] = [];
   for (const rel of targets) {
-    const posix = toPosix(rel);
+    // 先归一化+符号链接落点校验，再对归一化 posix 做白名单判断（fsutil 安全契约；防 manuscript/../ 未归一化绕过）
+    let abs: string;
+    let posix: string;
+    try {
+      ({ abs, posix } = resolveInsidePosix(wd, rel));
+    } catch (err) {
+      throw new Error(`预筛章路径不合法: ${rel}（${errText(err)}）`);
+    }
     if (!posix.startsWith('manuscript/') || !posix.toLowerCase().endsWith('.md')) {
       throw new Error(`promisePrefilter 只允许 manuscript/ 内的 .md: ${rel}`);
     }
     let content: string;
     try {
-      content = fs.readFileSync(resolveInside(wd, posix), 'utf8');
-    } catch {
-      throw new Error(`预筛章不存在: ${rel}`);
+      content = fs.readFileSync(abs, 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw new Error(`预筛章不存在: ${rel}`);
+      throw err; // 权限/占用等读错误不再伪装成「章不存在」
     }
     const body = content.slice(frontmatterEnd(content));
     const hits = prefilterChapter(body, ledger);

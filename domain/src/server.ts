@@ -448,7 +448,8 @@ server.registerTool(
       workDir: z.string().describe('作品文件夹的绝对路径'),
       inboxPath: z.string().optional().describe('可选：收件箱路径，必须是 .novel/ 根目录正下的 .md，默认 .novel/inbox.md'),
     },
-  },  async ({ workDir, inboxPath }) => {
+  },
+  async ({ workDir, inboxPath }) => {
     const entries = inboxList(workDir, inboxPath ?? undefined);
     return jsonResult({
       count: entries.length,
@@ -471,7 +472,7 @@ server.registerTool(
   {
     title: '提案入收件箱',
     description:
-      '把扫描/预警产出的提案草稿写入统一裁决收件箱（作者裁决前不落账）。草稿={origin, ops[]}（ops 为 ProposalOp 形状：action/targetKey/op/evidence/rationale）；id 与 createdAt 由 domain 侧生成。幂等：pending 中同 (action,targetKey) 去重，重跑扫描不产生重复项。返回 {added, skipped}（id 列表）。',
+      '把扫描/预警产出的提案草稿写入统一裁决收件箱（作者裁决前不落账）。草稿={origin, ops[]}（ops 为 ProposalOp 形状：action/targetKey/op/evidence/rationale）；id 与 createdAt 由 domain 侧生成。幂等：pending 中同 (action,targetKey) 去重；「误报」裁决的键永久抑制再入。返回 {added, skipped, outcomes}（outcomes 与草稿同序，逐份标记是否入箱）。',
     inputSchema: {
       workDir: z.string().describe('作品文件夹的绝对路径'),
       drafts: z

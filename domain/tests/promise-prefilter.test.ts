@@ -54,4 +54,10 @@ describe('promisePrefilter（workDir）', () => {
     expect(r.chapters[0]!.hits.length).toBeGreaterThan(0);
     expect(() => promisePrefilter(work, { chapterRelPaths: ['.novel/ledger.md'], ledger, chapterOrder: [] })).toThrow(/manuscript/);
   });
+
+  it('未归一化绕过拒绝：manuscript/../ 归一化后落白名单外（先 resolveInsidePosix 再判前缀）', () => {
+    const work = makeWorkDir();
+    writeTree(work, { 'manuscript/第1章.md': '---\ntitle: 1\n---\n正文。' });
+    expect(() => promisePrefilter(work, { chapterRelPaths: ['manuscript/../.novel/ledger.md'], ledger, chapterOrder: [] })).toThrow(/manuscript/);
+  });
 });

@@ -85,6 +85,10 @@ function protectHit(protectItems: string[], op: LedgerOp): string | null {
   }
   if ('item' in op && typeof op.item === 'string') hay.push(op.item);
   if ('name' in op && typeof (op as { name?: unknown }).name === 'string') hay.push((op as { name: string }).name);
+  // remove 变体与 doNotReexplain 的目标标识在顶层字段（id/character/name/fact）——漏收即写闸对该类操作全盲
+  if ('id' in op && typeof (op as { id?: unknown }).id === 'string') hay.push((op as { id: string }).id);
+  if ('character' in op && typeof (op as { character?: unknown }).character === 'string') hay.push((op as { character: string }).character);
+  if ('fact' in op && typeof (op as { fact?: unknown }).fact === 'string') hay.push((op as { fact: string }).fact);
   for (const h of hay) {
     for (const p of protectItems) {
       if (p && (h.includes(p) || p.includes(h))) return p;
@@ -163,7 +167,8 @@ export function parseProposal(content: string): Proposal {
   const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!m) throw new Error('提案缺 front matter');
   const fm = parseYaml(m[1]!) as Record<string, unknown>;
-  const code = content.match(/```yaml\r?\n([\s\S]*?)```/);
+  // 贪婪到最后一个围栏：摘句正文可能原样含 ```，非贪婪会在其处截断（收件箱块内无第二个合法围栏）
+  const code = content.match(/```yaml\r?\n([\s\S]*)```/);
   if (!code) throw new Error('提案缺操作序列代码块');
   const ops = parseYaml(code[1]!) as ProposalOp[];
   if (!Array.isArray(ops) || ops.length === 0) throw new Error('提案操作序列为空');

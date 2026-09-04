@@ -48,6 +48,26 @@ describe('权限面校验（写闸）', () => {
   it('空操作序列 → deny', () => {
     expect(validateProposal(makeProposal('scan', []), baseLedger()).ok).toBe(false);
   });
+  it('remove 变体也受写闸：顶层 id/character/name 字段比对 protect（修复前 DELETE 全盲）', () => {
+    const delProp: ProposalOp = {
+      action: 'DELETE',
+      op: { op: 'remove', dimension: 'prop', name: '铜哨' },
+      targetKey: '铜哨',
+      evidence: { chapter: CH, quote: '撤线' },
+      rationale: '删除受保护道具',
+    };
+    const v = validateProposal(makeProposal('scan', [delProp]), baseLedger());
+    expect(v.ok).toBe(false);
+    expect(v.denials[0]).toContain('PROTECT');
+    const delKnowledge: ProposalOp = {
+      action: 'DELETE',
+      op: { op: 'remove', dimension: 'knowledge', character: '铜哨' },
+      targetKey: '铜哨',
+      evidence: { chapter: CH, quote: '撤线' },
+      rationale: 'r',
+    };
+    expect(validateProposal(makeProposal('scan', [delKnowledge]), baseLedger()).ok).toBe(false);
+  });
 });
 
 describe('应用管线', () => {
@@ -91,6 +111,15 @@ describe('md 序列化 round-trip', () => {
   });
   it('pending 态 round-trip', () => {
     const p = makeProposal('import', [addPromise, touchProtect]);
+    expect(parseProposal(serializeProposal(p))).toEqual(p);
+  });
+  it('摘句含 ``` 与收件箱定界串时 round-trip 仍无损（贪婪围栏）', () => {
+    const tricky: ProposalOp = {
+      ...addPromise,
+      evidence: { chapter: CH, quote: '他说```代码```之外<!-- inbox-entry:end -->的话' },
+      rationale: '含围栏与标记串的摘句',
+    };
+    const p = makeProposal('scan', [tricky]);
     expect(parseProposal(serializeProposal(p))).toEqual(p);
   });
 });
