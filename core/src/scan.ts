@@ -48,8 +48,8 @@ interface OpDraft {
   rationale: string;
 }
 
-/** MCP 工具调用通用（review.ts 同模式；重连/缺工具 503，执行失败 502）。 */
-async function callTool(deps: ScanDeps, name: string, args: Record<string, unknown>, abort: AbortSignal): Promise<unknown> {
+/** MCP 工具调用通用（review.ts 同模式；重连/缺工具 503，执行失败 502；4.3 起导出供 scan-character 复用）。 */
+export async function callTool(deps: { tools?: ToolSet | undefined; toolsAvailable?: () => boolean | undefined }, name: string, args: Record<string, unknown>, abort: AbortSignal): Promise<unknown> {
   if (deps.toolsAvailable && !deps.toolsAvailable()) {
     throw new HttpError(503, `${name} 工具暂不可用（domain MCP 重连中，请稍后重试）`);
   }

@@ -59,6 +59,9 @@ export const reviewFindingSchema = z.object({
 });
 export type ReviewFinding = z.infer<typeof reviewFindingSchema>;
 
+/** 冷读注入预算（4.3 接线：对齐 domain DEFAULT_SLICE_BUDGET；此前 core 侧零调用方=预算闸在真实冷读路径不生效）。 */
+const LEDGER_SLICE_BUDGET = 30_000;
+
 /**
  * 处理一次 /v1/review 请求。body 校验失败 400；ledger_slice 不可用 503；模型输出解析/校验失败 502；
  * 其余内部错误由路由层统一脱敏为 500。
@@ -86,8 +89,9 @@ export async function handleReviewRequest(
   const timeoutSignal = AbortSignal.timeout(timeoutSeconds * 1000);
 
   try {
-    // 第一步：调 domain 工具组装冷读提示词（只含单章正文 + 账本切片）。
-    const slice = await callLedgerSlice(deps, workDir, chapterRelPath, abort.signal);
+    // 第一步：调 domain 工具组装冷读提示词（只含单章正文 + 账本切片，30k 预算闸裁剪 + 注入构成回传）。
+    const sliceInfo = await callLedgerSlice(deps, workDir, chapterRelPath, abort.signal);
+    const slice = sliceInfo.slice;
 
     // 第二步：main 档模型一次性结构化输出。generateText + Output.array 由 SDK 按 responseFormat
     // 约束模型输出 { elements: [...] } 并解析 + zod 校验，result.output 即 ReviewFinding[]（无围栏容错）。
@@ -112,7 +116,11 @@ export async function handleReviewRequest(
     const findings = await result.output;
 
     // 闭环：findings 非空时确定性经 domain issue_append 追加进 issues.md；失败降级，不影响 findings 返回。
-    const payload: { findings: ReviewFinding[]; persisted?: { appended: number; ids: string[] }; persistedError?: string } = { findings };
+    const payload: { findings: ReviewFinding[]; persisted?: { appended: number; ids: string[] }; persistedError?: string; ledgerSlice?: { chars?: number | undefined; budget: number; dropped?: number | undefined; composition?: Record<string, number> | undefined } } = {
+      findings,
+      // 注入可见性（reference/05 §前端触点）：本次冷读实际注入了什么（构成/预算/裁掉多少）
+      ...(sliceInfo.composition ? { ledgerSlice: { chars: sliceInfo.chars, budget: LEDGER_SLICE_BUDGET, dropped: sliceInfo.dropped, composition: sliceInfo.composition } } : {}),
+    };
     if (findings.length > 0) {
       const persisted = await persistFindings(deps, workDir, chapterRelPath, findings, abort.signal);
       if (persisted.ok) payload.persisted = persisted.value;
@@ -147,7 +155,7 @@ async function callLedgerSlice(
   workDir: string,
   chapterRelPath: string,
   abortSignal: AbortSignal,
-): Promise<string> {
+): Promise<SliceInfo> {
   if (deps.toolsAvailable && !deps.toolsAvailable()) {
     throw new HttpError(503, 'ledger_slice 工具暂不可用（domain MCP 重连中，请稍后重试）');
   }
@@ -155,17 +163,25 @@ async function callLedgerSlice(
   if (!tool?.execute) {
     throw new HttpError(503, 'ledger_slice 工具不可用（domain MCP 未连接或工具不存在）');
   }
-  const result: unknown = await tool.execute({ workDir, chapterRelPath } as never, {
+  const result: unknown = await tool.execute({ workDir, chapterRelPath, budget: LEDGER_SLICE_BUDGET } as never, {
     toolCallId: 'review-ledger-slice',
     messages: [],
     context: undefined,
     abortSignal,
   });
-  return extractSlice(result);
+  return extractSliceResult(result);
 }
 
-/** 从 MCP 工具结果中提取 slice 文本：兼容 structuredContent / 直接返回对象 / content text JSON。 */
-function extractSlice(result: unknown): string {
+/** 切片信息（文本 + 注入构成——domain 侧 budget 闸传入时随返回）。 */
+interface SliceInfo {
+  slice: string;
+  chars?: number;
+  dropped?: number;
+  composition?: Record<string, number>;
+}
+
+/** 从 MCP 工具结果中提取切片文本与注入构成：兼容 structuredContent / 直接返回对象 / content text JSON。 */
+function extractSliceResult(result: unknown): SliceInfo {
   if (!result || typeof result !== 'object') {
     throw new HttpError(502, 'ledger_slice 未返回有效切片');
   }
@@ -173,6 +189,9 @@ function extractSlice(result: unknown): string {
     isError?: unknown;
     structuredContent?: unknown;
     slice?: unknown;
+    ledgerSliceChars?: unknown;
+    ledgerSliceDropped?: unknown;
+    ledgerSliceComposition?: unknown;
     content?: Array<{ type?: string; text?: string }>;
   };
   const text = r.content?.find((c) => c && c.type === 'text' && typeof c.text === 'string')?.text;
@@ -182,7 +201,7 @@ function extractSlice(result: unknown): string {
 
   const candidates: unknown[] = [];
   if (r.structuredContent !== undefined) candidates.push(r.structuredContent);
-  if (typeof r.slice === 'string') candidates.push(r.slice);
+  if (typeof r.slice === 'string') candidates.push(r);
   if (text !== undefined) {
     try {
       candidates.push(JSON.parse(text));
@@ -192,9 +211,15 @@ function extractSlice(result: unknown): string {
   }
   for (const candidate of candidates) {
     if (candidate && typeof candidate === 'object' && typeof (candidate as { slice?: unknown }).slice === 'string') {
-      return (candidate as { slice: string }).slice;
+      const c = candidate as { slice: string; ledgerSliceChars?: unknown; ledgerSliceDropped?: unknown; ledgerSliceComposition?: unknown };
+      return {
+        slice: c.slice,
+        ...(typeof c.ledgerSliceChars === 'number' ? { chars: c.ledgerSliceChars } : {}),
+        ...(typeof c.ledgerSliceDropped === 'number' ? { dropped: c.ledgerSliceDropped } : {}),
+        ...(c.ledgerSliceComposition && typeof c.ledgerSliceComposition === 'object' ? { composition: c.ledgerSliceComposition as Record<string, number> } : {}),
+      };
     }
-    if (typeof candidate === 'string' && candidate.trim()) return candidate;
+    if (typeof candidate === 'string' && candidate.trim()) return { slice: candidate };
   }
   throw new HttpError(502, 'ledger_slice 未返回有效切片');
 }

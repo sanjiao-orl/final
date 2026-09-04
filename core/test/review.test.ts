@@ -62,7 +62,8 @@ describe('POST /v1/review 贵档审阅', () => {
       expect(await res.json()).toEqual({ findings: GOOD_FINDINGS });
 
       expect(execute).toHaveBeenCalledWith(
-        { workDir: 'C:/works/demo', chapterRelPath: 'manuscript/卷一/第1章.md' },
+        // 4.3 起带 budget（冷读预算闸接线，对齐 domain DEFAULT_SLICE_BUDGET）
+        { workDir: 'C:/works/demo', chapterRelPath: 'manuscript/卷一/第1章.md', budget: 30_000 },
         expect.objectContaining({ toolCallId: 'review-ledger-slice' }),
       );
 
@@ -360,5 +361,35 @@ describe('persistFindings 超时与随请求取消', () => {
     await p;
     expect(observed!.aborted).toBe(true);
     expect(written()).toBeNull(); // 断连后不再写响应
+  });
+});
+
+describe('冷读预算闸接线（4.3）', () => {
+  beforeEach(() => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('ledger_slice 收到 budget=30000；注入构成随响应回传（可见性）', async () => {
+    const execute = vi.fn(async () => ({ slice: 'SLICE-TEXT', ledgerSliceChars: 1234, ledgerSliceDropped: 2, ledgerSliceComposition: { promise: 3, character: 1 } }));
+    const { baseUrl, token, close } = await startTestServer({
+      modelForTier: () => generateModel([JSON.stringify({ elements: GOOD_FINDINGS })]),
+      tools: ledgerSliceTools('SLICE-TEXT', execute as never),
+    });
+    try {
+      const res = await postReview(baseUrl, token, GOOD_BODY);
+      expect(res.status).toBe(200);
+      const arg = (execute.mock.calls as unknown[][])[0]?.[0] as { budget?: number } | undefined;
+      expect(arg?.budget).toBe(30_000);
+      const json = (await res.json()) as { ledgerSlice?: { chars: number; budget: number; dropped: number; composition: Record<string, number> } };
+      expect(json.ledgerSlice?.budget).toBe(30_000);
+      expect(json.ledgerSlice?.chars).toBe(1234);
+      expect(json.ledgerSlice?.dropped).toBe(2);
+      expect(json.ledgerSlice?.composition.character).toBe(1);
+    } finally {
+      await close();
+    }
   });
 });

@@ -10,6 +10,7 @@ import { devPage } from './dev.js';
 import { corsHeadersFor, HttpError, readJsonBody, toPublicErrorMessage, writeJson, writeJson413 } from './http.js';
 import { handleReviewRequest } from './review.js';
 import { handleScanRequest } from './scan.js';
+import { handleScanCharacterRequest } from './scan-character.js';
 import { handleContinueRequest, type ContinueDeps } from './continue.js';
 import { handleRewriteRequest, type RewriteDeps } from './rewrite.js';
 import { generateChapterSummary, type SummaryDeps } from './summary.js';
@@ -257,6 +258,16 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
     const body = await readJsonBody(req);
     await handleScanRequest(body, {
       modelForTier: deps.chat.modelForTier,
+      tools: deps.chat.tools,
+      ...(deps.chat.toolsAvailable ? { toolsAvailable: deps.chat.toolsAvailable } : {}),
+    }, req, res);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/v1/scan/character') {
+    // 角色维确定性补账（4.3 角色卡批；零 LLM）：character_prefilter 预筛 → 超域疑似/写法变体映射提案 → 入收件箱。
+    const body = await readJsonBody(req);
+    await handleScanCharacterRequest(body, {
       tools: deps.chat.tools,
       ...(deps.chat.toolsAvailable ? { toolsAvailable: deps.chat.toolsAvailable } : {}),
     }, req, res);
