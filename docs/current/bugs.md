@@ -8,10 +8,20 @@
 
 ## P2（活跃挂账）
 
-- [块4评审] 冷读预算闸未接线：`ledgerSlice` budget 参数 core 侧零调用方——30k 闸+composition 注入构成在真实冷读路径不生效（规范 05「实测生存条件」半成品）（`core/src/review.ts` callLedgerSlice）。→ 挂 4.3 接线+实跑验证。
-- [块4评审] UPDATE 语义=upsert 插入（targetKey 手误=造新条目）、ADD=覆盖已存（陈旧提案无提示覆盖作者手改；CAS 只防文件并发不防语义陈旧）（`domain/src/proposal.ts`+ledger upsert）。→ 挂 4.3+ 语义决策（adopt 前目标在位/键占用校验）。
-- [块4评审] inbox_append 零形状校验：坏草稿入箱 pending，adopt 时裸 TypeError 永不可裁决；targetKey 缺失时幂等键变 `ADD:undefined` 吞后续同型草稿（`domain/src/server.ts` z.record 直透）。→ 挂 4.3（入口加最小形状校验）。
-- [块4评审] append 去重整提案 skip：多 op 提案与在箱重叠 1 键→其余新候选静默丢（与预筛自立「不静默丢弃」规约相悖）（`domain/src/inbox.ts`）。→ 挂 4.3（op 级部分入箱或重叠明细）。
+- [4.3评审] review 冷读预算 30000 双事实源：core 硬编码（`core/src/review.ts` LEDGER_SLICE_BUDGET）vs domain DEFAULT_SLICE_BUDGET，MCP 边界无法 import 对齐，domain 调低缺省时 core 显式值胜出=冷读闸被静默放宽——挂 drift 检查账（domain 改缺省必须同步 core，或 4.5 前加一致性探测）。
+- [4.3评审] 注入配额重分（character 0.15/promise 0.4→0.35）零行为级钉扎：混合大账本下角色卡被挤光无报警（现有用例断言预算级对配额不敏感）——随 4.4/4.5 真账本注入实测补钉。
+- [4.3评审] samePersonVariants 全稿批量量级偏重（每 token×全词典编辑距离，亿级基本操作/300 章）+ 中文边界现状（全半角不折叠/繁简异形需显式登记，已有文档性测试钉住现状）——词典制落地时一并（候选：names 长度桶预筛+词典外提）。
+- [4.3评审] 工具注册契约枚举测试仍缺（46 工具零「注册数=描述账」机器闸，registerTool 误删/改名全套件仍绿）——系统性弱点的本批实例，随 lint/format/CI 统一评估批一并（现状.md 弱点节已登记方向）。
+
+## 已核销（4.3 角色卡批，未随版；随版移 archive 批史件）
+
+核销 commit：domain=d735890、core=a7d67bc、shell=0a67126、promptfoo=1aec43a、评审修复=451716a；验证=check 0 错 + test 1117 绿（domain 443 / core 263 / shell 411，含三路子代理评审修复回归钉 12 条）。
+
+- [块4评审] ✅ 冷读预算闸未接线 → review callLedgerSlice 传 budget=30000+注入构成随响应 ledgerSlice 回传（a7d67bc，测试钉 budget 入参与透传）。
+- [块4评审] ✅ UPDATE/ADD 语义偏移 → adopt 前语义预检（UPDATE 目标在位/ADD 键空闲，character 维同检；不符转人工提案留 pending）（d735890+451716a）。
+- [块4评审] ✅ inbox_append 零形状校验 → ops 最小 zod 形状（action/targetKey/op/rationale 必带，evidence 章必有），坏草稿入口拒收（d735890）。
+- [块4评审] ✅ append 整提案 skip 静默丢 → op 级部分入箱+skippedKeys 重叠明细（d735890+451716a）。
+- [块4评审] ✅ promptfoo 4.2 薄切片用例缺位 → 补账登记路由用例（1aec43a）；/v1/scan 链路断言归属修订=core 单测+真人小段承担（promptfoo 为 chat 侧口径）。
 
 ## 已核销（4.2.1 修复批，未随版；随版移 archive 批史件）
 
@@ -34,8 +44,6 @@
 - [块4评审] ✅ layered-pipeline l3 续跑契约破坏：已完成章返 'done' 不计失败连击；实跑验证 done=120/120 重跑跳过 120 章零调用（df8e87f）。
 
 ## P3（遗留备查）
-
-- [块4评审] promptfoo 4.2 薄切片用例缺位：reference/05「断言先行」条款写明随 4.2 落地，实际 promptfooconfig.yaml 仍是 0012 时代四用例，无扫描→裁决链路用例；补用例或修订条款归属，随 4.3 一并处理。
 
 - [块1遗留] `shell/src/lib/candidates.svelte.test.ts` 是 CRLF/LF 混合行尾文件（历史遗留；编辑时注意保持所在区域一致，git 的 LF→CRLF 提示是既有状态非新引入）。
 - [块1遗留] 回收站里无时间戳的垃圾文件（非 delete_chapter/delete_volume 产物）list_trash 列得出但无 originalPath，一键找回不可用——restore_trash 对这类条目报「无法从文件名还原原路径，请手动处理」，壳侧前置提示手动处理；设计取舍，列此备查。
