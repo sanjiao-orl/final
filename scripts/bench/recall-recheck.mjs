@@ -9,6 +9,9 @@
 // 对照实验（裸子串）结论「召回被抽取不稳定性噪声主导不可判」在此升级或维持，判据预登记：
 //   分层臂选区内召回率 ≥ 基线臂同章召回率 − 10pp 且基线臂率 ≥ 25% → 选区内召回相当（结构性覆盖为主）
 //   否则 → 维持不可判/损失超标。
+//   （4.2.1 修复注记：「同章」此前未按字面实现——基线误用 30 章全集合分母与选区内 10 章比较；
+//     0905 实测复算受限口径 −3.1pp 判据仍过，v0.2.13 的 0018 终裁幸存；本版起判据按同章受限口径计算，
+//     并落盘 per-fact 判定（recall-recheck-judgments.jsonl）保可复算。）
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -101,12 +104,11 @@ function measure(workDir, spot, selectedSet) {
     promise: { total: 0, hit: 0 },
     knowledge: { total: 0, hit: 0 },
     overall: { total: 0, hit: 0 },
-  };
-  const layered = {
     selected: { total: 0, hit: 0 },
     unselected: { total: 0, hit: 0 },
   };
   const viaCount = { 'chapter-anchor': 0, interval: 0, 'fact-core': 0 };
+  const rows = []; // per-fact 判定（可复现性：事后可重算任意受限口径）
   for (const row of spot) {
     const order = row.order;
     const isSel = selectedSet.has(order);
@@ -115,15 +117,16 @@ function measure(workDir, spot, selectedSet) {
       if (m.hit === null) continue; // character 维不可比
       out[fact.kind].total++;
       out.overall.total++;
-      if (isSel) layered.selected.total++;
-      else layered.unselected.total++;
+      if (isSel) out.selected.total++;
+      else out.unselected.total++;
       if (m.hit) {
         out[fact.kind].hit++;
         out.overall.hit++;
         viaCount[m.via] = (viaCount[m.via] ?? 0) + 1;
-        if (isSel) layered.selected.hit++;
-        else layered.unselected.hit++;
+        if (isSel) out.selected.hit++;
+        else out.unselected.hit++;
       }
+      rows.push({ order, chapter: row.chapter, kind: fact.kind, name: fact.name ?? fact.detail ?? '', hit: !!m.hit, via: m.hit ? m.via : null });
     }
   }
   const rate = (x) => (x.total ? Math.round((x.hit / x.total) * 1000) / 10 : null);
@@ -134,7 +137,9 @@ function measure(workDir, spot, selectedSet) {
       knowledge: { ...out.knowledge, rate: rate(out.knowledge) },
     },
     overall: { ...out.overall, rate: rate(out.overall) },
-    ...(workDir === LAYER_WORK ? { coverageSplit: { selected: { ...layered.selected, rate: rate(layered.selected) }, unselected: { ...layered.unselected, rate: rate(layered.unselected) } }, via: viaCount } : {}),
+    coverageSplit: { selected: { ...out.selected, rate: rate(out.selected) }, unselected: { ...out.unselected, rate: rate(out.unselected) } },
+    via: viaCount,
+    rows,
   };
 }
 
@@ -147,10 +152,11 @@ const selectedSet = new Set(selected);
 const baseline = measure(BASE_WORK, spot, selectedSet);
 const layered = measure(LAYER_WORK, spot, selectedSet);
 
-// 判据（预登记于对照实验工作件，三分）：相对门限=分层选区内 ≥ 基线 −10pp；绝对前置=基线 ≥25%。
-// 相对过+绝对过 → 选区内召回相当；相对过+绝对不过 → 部分升级（相对相当但绝对水位受抽取稳定性限制）；
-// 相对不过 → 损失超标。
-const b = baseline.overall.rate;
+// 判据（预登记于对照实验工作件，三分）：相对门限=分层选区内 ≥ 基线「同章」−10pp；绝对前置=基线同章 ≥25%。
+// 「同章」=基线分母 restricted 到分层臂同一批已选抽查章（4.2.1 修复：修复前基线误用 30 章全集合分母）。
+// 相对过+绝对过 → 选区内召回相当；相对过+绝对不过 → 部分升级；相对不过 → 损失超标。
+const bAll = baseline.overall.rate;
+const b = baseline.coverageSplit.selected.rate;
 const ls = layered.coverageSplit.selected.rate;
 const diff = b !== null && ls !== null ? Math.round((ls - b) * 10) / 10 : null;
 const relativePass = b !== null && ls !== null && ls >= b - 10;
@@ -160,23 +166,35 @@ const verdict =
   b === null || ls === null
     ? '不可判（样本不足）'
     : relativePass && absolutePass
-      ? `选区内召回相当（分层选区内 ${ls}% vs 基线 ${b}%，差 ${diff}pp ≥ −10pp 门限，且基线 ≥25%）——对照实验「噪声主导不可判」升级为「选区内相当，损失主要来自覆盖率（结构性）」`
+      ? `选区内召回相当（分层选区内 ${ls}% vs 基线同章 ${b}%，差 ${diff}pp ≥ −10pp 门限，且基线同章 ≥25%）——对照实验「噪声主导不可判」升级为「选区内相当，损失主要来自覆盖率（结构性）」`
       : relativePass
-        ? `部分升级：相对相当（分层选区内 ${ls}% vs 基线 ${b}%，差 ${diff}pp 在 −10pp 门限内），但绝对水位 ${b}% 未达 25% 前置——两臂同章独立抽取的一致性地板仍受抽取不稳定性限制；另区间投影使分层臂未选区命中 ${unselectedRate}%（裸子串口径曾为 0），0017 区间语义的覆盖价值首次可测`
-        : `维持损失超标（分层选区内 ${ls}% vs 基线 ${b}%，差 ${diff}pp，未达 −10pp 门限）`;
+        ? `部分升级：相对相当（分层选区内 ${ls}% vs 基线同章 ${b}%，差 ${diff}pp 在 −10pp 门限内），但绝对水位 ${b}% 未达 25% 前置——两臂同章独立抽取的一致性地板仍受抽取不稳定性限制；另区间投影使分层臂未选区命中 ${unselectedRate}%（裸子串口径曾为 0），0017 区间语义的覆盖价值首次可测`
+        : `维持损失超标（分层选区内 ${ls}% vs 基线同章 ${b}%，差 ${diff}pp，未达 −10pp 门限）`;
 
 const oldRun = { baselineRate: 7.6, layeredRate: 2.6, method: '裸子串（全账本 hay 包含，跨章巧合污染）' };
+const caveats = [
+  '两臂模型标识未记录于历史产物：基线臂 0830 跑（无 repair 时代）、分层臂 0904 跑（deepseek-v4-flash）、地面真值与分层臂同模型同提示——疑似跨模型偏置+自一致性偏置，方向相反幅度未知（块4评审 #27）',
+  'knowledge 维匹配走事实核心 6 字包含、无区间/章锚约束——未选区命中含跨章无锚巧合成分，「区间投影」归因偏宽（块4评审 #25）',
+  '词典制（别名归一）4.3 才落，当前为轻量归一+公共子串≥4 的临时口径（度量下界）',
+];
 const out = {
   generatedAt: new Date().toISOString(),
   method: '4.1 索引层锚级对账（queryByName 倒排 + 区间生效 + 章锚 + 轻量归一；词典制 4.3 前限定记档）',
+  criterion: '判据口径=同章受限（基线分母 restricted 到分层臂同一批已选抽查章）；修复前误用 30 章全集合分母，当时 −4.9pp 为跨集合比较（受限复算 −3.1pp，判据仍过，0018 终裁幸存）',
   spotChapters: spot.length,
   selectedChapters: selected.length,
   baseline,
   layered,
   oldRun,
+  caveats,
   verdict,
 };
 const outPath = path.join(ROOT, '.bench', 'reports', 'recall-recheck-对照补测.json');
 fs.writeFileSync(outPath, JSON.stringify(out, null, 1), 'utf8');
-console.log(JSON.stringify({ baseline: baseline.overall, layered: layered.overall, layeredCoverageSplit: layered.coverageSplit, verdict }, null, 1));
+// per-fact 判定落盘（块4评审 #23：修复前不可事后重算受限口径）
+const rowsPath = path.join(ROOT, '.bench', 'state', 'layered', 'recall-recheck-judgments.jsonl');
+const lines = [...baseline.rows.map((r) => JSON.stringify({ arm: 'baseline', ...r })), ...layered.rows.map((r) => JSON.stringify({ arm: 'layered', ...r }))];
+fs.writeFileSync(rowsPath, lines.join('\n') + '\n', 'utf8');
+console.log(JSON.stringify({ baseline: baseline.overall, baselineSameChapters: baseline.coverageSplit.selected, layered: layered.overall, layeredCoverageSplit: layered.coverageSplit, verdict }, null, 1));
 console.log(`报告：${outPath}`);
+console.log(`逐条判定：${rowsPath}`);

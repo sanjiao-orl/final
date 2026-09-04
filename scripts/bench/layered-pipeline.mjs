@@ -300,7 +300,8 @@ const EXTRACT_SYSTEM =
 async function extractChapter(model, workDir, ch, progressName) {
   const progress = loadState(progressName, { doneOrders: [] });
   const doneSet = new Set(progress.doneOrders);
-  if (doneSet.has(ch.order)) return false;
+  // 已完成≠失败（修复前两者同返 false，被计入失败连击：已完成态重跑必抛「连续 5 章失败」，续跑契约被破坏）
+  if (doneSet.has(ch.order)) return 'done';
   try {
     const obj = await genJSON({
       model,
@@ -352,12 +353,15 @@ async function cmdL3() {
   const chapters = selected.map((o) => baseChapters[o - 1]);
   let n = 0;
   let failStreak = 0;
+  let doneSkipped = 0;
   for (const ch of chapters) {
-    const ok = await extractChapter(model, LAYER_WORK, ch, 'l3-progress.json');
-    if (ok) { failStreak = 0; n++; if (n % 10 === 0) { console.error(`[l3] ${n}/${chapters.length}`); printUsage('l3'); } }
+    const r = await extractChapter(model, LAYER_WORK, ch, 'l3-progress.json');
+    if (r === 'done') { doneSkipped++; continue; } // 续跑：已完成章跳过且不计失败
+    if (r) { failStreak = 0; n++; if (n % 10 === 0) { console.error(`[l3] ${n}/${chapters.length}`); printUsage('l3'); } }
     else { failStreak++; if (failStreak >= 5) throw new Error('l3 连续 5 章失败，阻塞即停'); }
   }
   printUsage('l3 完成');
+  if (doneSkipped > 0) console.log(`[l3] 续跑跳过已完成 ${doneSkipped} 章`);
   console.log(`[l3] 精读完成：${chapters.length} 章入选（覆盖率台账：其余 ${SCOPE - chapters.length} 章=粗扫态）`);
 }
 
@@ -535,7 +539,8 @@ async function cmdCompare() {
   console.log(`报告：${outPath}`);
 }
 
-const USAGE_STAGE = process.argv[process.argv.indexOf('--stage') + 1];
+// --stage 缺席时不得取 argv[0]（node.exe 路径曾因此写进 usage.json 当垃圾键）
+const USAGE_STAGE = process.argv.includes('--stage') ? process.argv[process.argv.indexOf('--stage') + 1] : undefined;
 function snapUsage(stage) {
   const u = loadState('usage.json', {});
   u[stage] = { calls: usage.calls, input: usage.input, output: usage.output };
