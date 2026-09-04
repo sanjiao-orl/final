@@ -50,9 +50,12 @@ import {
   readStyle,
   upsertLedger,
   writeMeta,
+  chapterOrderForWork,
   type IssueFinding,
   type LedgerOp,
 } from './ledger.js';
+import { promisePrefilter } from './promise-prefilter.js';
+import { inboxAdopt, inboxDiscard, inboxList } from './inbox.js';
 import { readSkillBody, schemeSetActive } from './prompts.js';
 import { reconcileLedger } from './reconcile.js';
 import { pacingDiagnostics, readChapterSummaries, writeChapterSummary } from './summaries.js';
@@ -412,6 +415,82 @@ server.registerTool(
     },
   },
   async ({ workDir, chapterRelPath, ledgerPath }) => jsonResult(ledgerChapterSlice(workDir, chapterRelPath, ledgerPath)),
+);
+
+// 4.2 薄切片裁决回路（承诺·伏笔窄域）：预筛 + 收件箱三件（契约只加法）
+server.registerTool(
+  'promise_prefilter',
+  {
+    title: '承诺伏笔确定性预筛',
+    description:
+      '零 LLM 确定性预筛（承诺·伏笔窄域）：正文嫌疑句式（承诺/约定/欠偿类谓词）× 账本已登记承诺对照，返回每章嫌疑清单（行号/触发句/命中谓词/关联的已登记承诺 id）；命中但无账本关联的标「未登记候选」（超域规约：显式存在，不静默丢弃）。预筛只产候选不产提案——LLM 发现与提案生成在 core 扫描管线，裁决在收件箱。chapterRelPaths 缺省=全部章序。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      chapterRelPaths: z.array(z.string()).optional().describe('可选：限定预筛章（manuscript/ 内 .md）；缺省=全部章序'),
+      ledgerPath: z.string().optional().describe('可选：账本文件相对 workDir 路径，必须是 .novel/ 根目录正下的 .md'),
+    },
+  },
+  async ({ workDir, chapterRelPaths, ledgerPath }) => {
+    const { ledger } = readLedger(workDir, ledgerPath);
+    const chapterOrder = chapterOrderForWork(workDir);
+    return jsonResult(promisePrefilter(workDir, { chapterRelPaths, ledger, chapterOrder }));
+  },
+);
+
+server.registerTool(
+  'inbox_list',
+  {
+    title: '裁决收件箱列表',
+    description:
+      '统一裁决收件箱（reference/05：写入提案与预警=反向提案同箱同状态机）条目列表：id/origin/status/ops 摘由/裁决记录/回读验证。inboxPath 白名单=.novel/ 根下 .md，默认 .novel/inbox.md。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      inboxPath: z.string().optional().describe('可选：收件箱路径，必须是 .novel/ 根目录正下的 .md，默认 .novel/inbox.md'),
+    },
+  },
+  async ({ workDir, inboxPath }) => {
+    const entries = inboxList(workDir, inboxPath ?? undefined);
+    return jsonResult({
+      count: entries.length,
+      pending: entries.filter((e) => e.proposal.status === 'pending').length,
+      entries: entries.map((e) => ({
+        id: e.proposal.id,
+        origin: e.proposal.origin,
+        status: e.proposal.status,
+        createdAt: e.proposal.createdAt,
+        ops: e.proposal.ops.map((o) => ({ action: o.action, targetKey: o.targetKey, rationale: o.rationale })),
+        resolution: e.proposal.resolution ?? null,
+        verify: e.verify ?? null,
+      })),
+    });
+  },
+);
+
+server.registerTool(
+  'inbox_decide',
+  {
+    title: '裁决收件箱裁决',
+    description:
+      '对收件箱提案做作者裁决：decision=adopt（权限面复核→经 upsert_ledger 落账→回读验证目标条目在位/消失（修复过闸）→块置 adopted+验证结论）或 discard（必带理由枚举：误报/有意延后/已知情报/其他；有意延后可带 reanchorVolume 作卷锚重报依据）。返回裁决结果与验证消息。',
+    inputSchema: {
+      workDir: z.string().describe('作品文件夹的绝对路径'),
+      proposalId: z.string().describe('提案 id（inbox_list 返回）'),
+      decision: z.enum(['adopt', 'discard']).describe('裁决：采纳（落账+回读验证）或驳回'),
+      dismissReason: z.enum(['误报', '有意延后', '已知情报', '其他']).optional().describe('驳回必填理由枚举'),
+      dismissNote: z.string().optional().describe('驳回备注'),
+      reanchorVolume: z.string().optional().describe('有意延后时的新预计卷（卷锚重报依据）'),
+      inboxPath: z.string().optional().describe('可选：收件箱路径，必须是 .novel/ 根目录正下的 .md'),
+    },
+  },
+  async ({ workDir, proposalId, decision, dismissReason, dismissNote, reanchorVolume, inboxPath }) => {
+    if (decision === 'adopt') {
+      return jsonResult(inboxAdopt(workDir, proposalId, inboxPath ?? undefined));
+    }
+    if (!dismissReason) {
+      return jsonResult({ isError: true, message: '驳回必带理由枚举（dismissReason）：误报/有意延后/已知情报/其他' });
+    }
+    return jsonResult(inboxDiscard(workDir, proposalId, { reason: dismissReason, ...(dismissNote ? { note: dismissNote } : {}), ...(reanchorVolume ? { reanchorVolume } : {}) }, inboxPath ?? undefined));
+  },
 );
 
 // 批三-3：书级元数据写入（不写账本、不写 manuscript 正文）
