@@ -6,6 +6,7 @@
   import { TRASH_DIR } from '../lib/paths.js';
   import { candidates } from '../lib/candidates.svelte.js';
   import { inbox } from '../lib/inbox.svelte.js';
+  import { characters } from '../lib/characters.svelte.js';
   import { settings, APPROVAL_MODES, APPROVAL_MODE_LABELS, APPROVAL_MODE_DESCS, type ApprovalMode } from '../lib/settings.svelte.js';
   import { dialog } from '../lib/dialog.svelte.js';
   import { review } from '../lib/review.svelte.js';
@@ -348,7 +349,7 @@
     {@html iconSvg('drawer', 15)}
     暂存{#if candidates.pendingCount > 0}<i class="tb-badge">{candidates.pendingCount}</i>{/if}
   </button>
-  <button class="tb-btn" class:on={inbox.tabOpen} onclick={() => { candidates.stagingTab = false; inbox.openTab(); }} title="裁决收件箱：补账扫描的承诺伏笔提案待裁决（作者裁决后才落账）">
+  <button class="tb-btn" class:on={inbox.tabOpen} onclick={() => { candidates.stagingTab = false; characters.tabOpen = false; inbox.openTab(); }} title="裁决收件箱：补账扫描的承诺伏笔提案待裁决（作者裁决后才落账）">
     {@html iconSvg('drawer', 15)}
     收件箱{#if inbox.pendingCount > 0}<i class="tb-badge">{inbox.pendingCount}</i>{/if}
   </button>

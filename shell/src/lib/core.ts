@@ -360,6 +360,15 @@ export class CoreClient {
     return this.request(`${API_PREFIX}/sessions${q}`);
   }
 
+  /** 角色维确定性补账（4.3，零 LLM）：预筛→超域疑似/写法变体提案入收件箱；同步返回覆盖读数。 */
+  scanCharacters(workDir: string, maxCandidates?: number): Promise<{ scannedChapters: number; knownMentions: number; unknownCandidates: number; variantSuspects: number; inbox: { added: string[]; skipped: string[] } }> {
+    return this.request(`${API_PREFIX}/scan/character`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workDir, ...(maxCandidates ? { maxCandidates } : {}) }),
+    });
+  }
+
   sessionMessages(id: string): Promise<{ sessionId: string; messages: StoredMessage[] }> {
     return this.request(`${API_PREFIX}/sessions/${encodeURIComponent(id)}`);
   }

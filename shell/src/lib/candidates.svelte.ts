@@ -7,6 +7,7 @@ import type { Candidate } from './types.js';
 import { snapshot } from './snapshot.svelte.js';
 import { scheme } from './scheme.svelte.js';
 import { inbox } from './inbox.svelte.js';
+import { characters } from './characters.svelte.js';
 import { work } from './work.svelte.js';
 import { ISSUE_LOG_DEFAULT } from './paths.js';
 
@@ -82,6 +83,7 @@ export class CandidatesStore {
     this.overviewOpen = false; // 左栏暂存与全览互斥
     this.stagingTab = true;
     inbox.tabOpen = false; // 左栏暂存与收件箱互斥（单一出口，勿在调用点手工配对）
+    characters.tabOpen = false; // 与角色面板互斥（4.3）
     const first = this.items[0];
     this.viewingId = first?.id ?? null;
     void this.load();

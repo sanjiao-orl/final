@@ -8,6 +8,7 @@
   import { chat } from './lib/chat.svelte.js';
   import { candidates } from './lib/candidates.svelte.js';
   import { inbox } from './lib/inbox.svelte.js';
+  import { characters } from './lib/characters.svelte.js';
   import { quality } from './lib/quality.svelte.js';
   import { settings } from './lib/settings.svelte.js';
   import { snapshot } from './lib/snapshot.svelte.js';
@@ -25,6 +26,7 @@
   import CandidateView from './components/staging/CandidateView.svelte';
   import StagingOverview from './components/staging/StagingOverview.svelte';
   import InboxList from './components/inbox/InboxList.svelte';
+  import CharacterList from './components/characters/CharacterList.svelte';
   import AiRail from './components/ai/AiRail.svelte';
   import AiPanel from './components/ai/AiPanel.svelte';
   import ApprovalCard from './components/approval/ApprovalCard.svelte';
@@ -68,6 +70,7 @@
     await chat.setScope(''); // 默认无归属讨论
     await candidates.load();
     void inbox.load(); // 收件箱徽章冷启动即有数；失败不挡 boot（load 内部已接错误红条）
+    void characters.load(); // 角色卡面板数据（4.3）；失败不挡 boot
     await scheme.load(); // 角色与方案（决策 0010）；失败静默降级为空态，不挡 boot/换书
   }
 
@@ -178,12 +181,13 @@
     <div class="main">
       <aside class="left" data-ai-zone>
         <div class="staging-tabs">
-          <button class:active={!candidates.stagingTab && !inbox.tabOpen} onclick={() => { candidates.stagingTab = false; inbox.tabOpen = false; }}>目录</button>
-          <button class:active={candidates.stagingTab} onclick={() => { candidates.openStaging(); inbox.tabOpen = false; }}>暂存 {candidates.pendingCount}</button>
-          <button class:active={inbox.tabOpen} onclick={() => { candidates.stagingTab = false; inbox.openTab(); }}>收件箱 {inbox.pendingCount}</button>
+          <button class:active={!candidates.stagingTab && !inbox.tabOpen && !characters.tabOpen} onclick={() => { candidates.stagingTab = false; inbox.tabOpen = false; characters.tabOpen = false; }}>目录</button>
+          <button class:active={candidates.stagingTab} onclick={() => { candidates.openStaging(); inbox.tabOpen = false; characters.tabOpen = false; }}>暂存 {candidates.pendingCount}</button>
+          <button class:active={inbox.tabOpen} onclick={() => { candidates.stagingTab = false; characters.tabOpen = false; inbox.openTab(); }}>收件箱 {inbox.pendingCount}</button>
+          <button class:active={characters.tabOpen} onclick={() => { candidates.stagingTab = false; inbox.tabOpen = false; characters.openTab(); }}>角色 {characters.personCount}</button>
         </div>
         <div class="left-tree">
-          {#if inbox.tabOpen}<InboxList />{:else if candidates.stagingTab}<StagingList />{:else}<TreeView />{/if}
+          {#if inbox.tabOpen}<InboxList />{:else if characters.tabOpen}<CharacterList />{:else if candidates.stagingTab}<StagingList />{:else}<TreeView />{/if}
         </div>
         <NotesArea />
       </aside>
