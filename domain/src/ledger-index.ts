@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { ChapterRef, CharacterEntry, KnowledgeEntry, Ledger, PropEntry, PromiseEntry } from './ledger.js'; // 仅类型——防运行时环（ledger.ts 预算闸反向引用本模块）
 import { assertWorkDir, toPosix } from './fsutil.js';
+import { normalizeName } from './character-norm.js'; // 运行时依赖无环（character-norm 对 ledger 仅 import type）
 import { intervalActiveAt, ledgerToFacts, type FactEnvelope, type FactInterval } from './envelope.js';
 
 /** 名字候选：主名+别名（别名归一 4.3 落地前，倒排键=条目内出现过的名字字段）。 */
@@ -44,9 +45,9 @@ const QUOTA: Record<FactEnvelope['type'], number> = { promise: 0.35, prop: 0.2, 
 /** 字符数预算（0905 裁决口径：切片 ≤3 万字符；JSON.stringify 计）。 */
 export const DEFAULT_SLICE_BUDGET = 30_000;
 
-/** 名字字段提取（倒排键来源；全小写规范化去空白）。 */
+/** 名字字段提取（倒排键来源；归一口径复用 character-norm 的 normalizeName——与预筛/引用解析同一套，防「·」类分叉）。 */
 function namesOf(f: FactEnvelope): string[] {
-  const norm = (s: string) => s.replace(/\s+/g, '').toLowerCase();
+  const norm = normalizeName;
   const out: string[] = [];
   if (f.type === 'prop') {
     const p = f.payload as PropEntry;
@@ -99,9 +100,9 @@ function renderFact(f: FactEnvelope): string {
     return `[知情] ${k.character}｜知:${recent.map((x) => x.fact.slice(0, 30)).join('；')}`;
   }
   if (f.type === 'character') {
-    // 4.3 角色卡：静态档+最近动态状态（区间生效过滤后随卡注入）
+    // 4.3 角色卡：静态档+最近动态状态（按 since 章序取尾 3——登记顺序≠生效顺序）
     const c = f.payload as CharacterEntry;
-    const states = (c.states ?? []).slice(-3).map((s) => `${s.field}=${s.value}`).join('；');
+    const states = [...(c.states ?? [])].sort((a, b) => a.since.localeCompare(b.since)).slice(-3).map((s) => `${s.field}=${s.value}`).join('；');
     return `[角色] ${c.name}${c.kind && c.kind !== 'character' ? `(${c.kind})` : ''}${c.role ? `｜${c.role}` : ''}${c.faction ? `｜营:${c.faction}` : ''}${c.aliases?.length ? `｜别名:${c.aliases.join('/')}` : ''}${states ? `｜态:${states}` : ''}`;
   }
   // clock

@@ -1498,3 +1498,51 @@ describe('角色卡（4.3 角色维）', () => {
     expect(d.some((f) => f.code === 'character-ref-unresolved')).toBe(true);
   });
 });
+
+describe('4.3 评审修复回归', () => {
+  it('动态层保护：不带 states 的 character upsert 保留既有 states；带 states 整体替换', () => {
+    const withStates = applyOps(emptyLedger(), [{ op: 'character', entry: { name: '克莱恩', states: [{ field: '位置', value: '廷根', since: 'manuscript/第1章.md' }] } }]);
+    const staticOnly = applyOps(withStates, [{ op: 'character', entry: { name: '克莱恩', role: '值夜者' } }]);
+    expect(staticOnly.characters?.[0]!.role).toBe('值夜者');
+    expect(staticOnly.characters?.[0]!.states?.[0]!.value).toBe('廷根');
+    const rewritten = applyOps(staticOnly, [{ op: 'character', entry: { name: '克莱恩', states: [{ field: '位置', value: '贝克兰德', since: 'manuscript/第10章.md' }] } }]);
+    expect(rewritten.characters?.[0]!.states?.length).toBe(1);
+    expect(rewritten.characters?.[0]!.states?.[0]!.value).toBe('贝克兰德');
+  });
+
+  it('动态层直写拦截：assertNoDirectStateWrite 拒带 states 的 character op', async () => {
+    const { assertNoDirectStateWrite } = await import('../src/ledger.js');
+    expect(() => assertNoDirectStateWrite([{ op: 'character', entry: { name: 'X', states: [{ field: '位置', value: 'y', since: 'manuscript/第1章.md' }] } }])).toThrow(/裁决回路/);
+    expect(() => assertNoDirectStateWrite([{ op: 'character', entry: { name: 'X' } }])).not.toThrow();
+    expect(() => assertNoDirectStateWrite([{ op: 'promise', entry: { id: 'P-1', name: 'n', arc: 'planted', setups: [], payoffs: [] } }])).not.toThrow();
+  });
+
+  it('states 残缺项容错：parse 丢弃 field/value/since 缺失项（防回写垃圾）', () => {
+    const yaml = '---\ncharacters:\n  - name: 克莱恩\n    states:\n      - field: \"\"\n        value: \"\"\n        since: \"\"\n      - field: 位置\n        value: 廷根\n        since: manuscript/第1章.md\n---\n# Reader Ledger\n';
+    const parsed = parseLedger(yaml);
+    expect(parsed.characters?.[0]!.states?.length).toBe(1);
+  });
+
+  it('旧账本近似 byte 级零 diff：非角色 op 写入后文件不出现 characters 键', () => {
+    const work = makeWorkDir();
+    writeTree(work, { 'manuscript/第1章.md': '---\ntitle: 1\n---\n正文。' });
+    writeLedger(work, { ...emptyLedger(), promises: [{ id: 'P-1', name: '诺言', arc: 'planted', setups: [{ chapter: 'manuscript/第1章.md', quote: 'q' }], payoffs: [] }] });
+    const before = readLedger(work).ledger;
+    upsertLedger(work, [{ op: 'prop', entry: { name: '铜哨', custody: [{ chapter: 'manuscript/第1章.md' }] } }]);
+    const after = readLedger(work).ledger;
+    expect(JSON.stringify(after)).not.toContain('"characters":[]');
+    expect(after.promises.length).toBe(1);
+    expect(before.promises.length).toBe(1);
+  });
+
+  it('character-state-order 非相邻重复也报（ch3,ch5,ch3）', () => {
+    const bad = applyOps(emptyLedger(), [
+      { op: 'character', entry: { name: '老尼尔', states: [
+        { field: '位置', value: 'A', since: 'manuscript/第3章.md' },
+        { field: '位置', value: 'B', since: 'manuscript/第5章.md' },
+        { field: '位置', value: 'C', since: 'manuscript/第3章.md' },
+      ] } },
+    ]);
+    expect(ledgerDiagnostics(bad).some((f) => f.code === 'character-state-order')).toBe(true);
+  });
+});

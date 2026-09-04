@@ -12,7 +12,7 @@ function postScanCharacter(baseUrl: string, token: string, body: unknown): Promi
   });
 }
 
-function charTools(prefilterResult: unknown, appendExecute = vi.fn(async () => ({ added: ['PR-1', 'PR-2', 'PR-3'], skipped: [] }))): { tools: ToolSet; appendExecute: ReturnType<typeof vi.fn> } {
+function charTools(prefilterResult: unknown, appendExecute = vi.fn(async () => ({ added: ['PR-1', 'PR-2', 'PR-3'], skipped: [], outcomes: [{ id: 'PR-1', added: true }, { id: 'PR-2', added: true }, { id: 'PR-3', added: true }] }))): { tools: ToolSet; appendExecute: ReturnType<typeof vi.fn> } {
   const tools: Record<string, unknown> = {
     character_prefilter: { description: '角色预筛', execute: vi.fn(async () => prefilterResult) },
     inbox_append: { description: '提案入箱', execute: appendExecute },
@@ -41,7 +41,7 @@ describe('POST /v1/scan/character 角色维确定性补账', () => {
     try {
       const res = await postScanCharacter(baseUrl, token, { workDir: 'C:/works/demo' });
       expect(res.status).toBe(200);
-      const json = (await res.json()) as { scannedChapters: number; unknownCandidates: number; variantSuspects: number; inbox: { added: string[] } };
+      const json = (await res.json()) as { scannedChapters: number; unknownCandidates: number; variantSuspects: number; inbox: { added: string[] }; detail: Array<{ proposalId: string }> };
       expect(json.scannedChapters).toBe(5);
       expect(json.unknownCandidates).toBe(2);
       expect(json.variantSuspects).toBe(1);
@@ -51,7 +51,10 @@ describe('POST /v1/scan/character 角色维确定性补账', () => {
       expect(arg.drafts[0]!.ops[0]!.action).toBe('ADD');
       expect(arg.drafts[0]!.ops[0]!.op.entry.name).toBe('齐夏');
       expect(arg.drafts[2]!.ops[0]!.action).toBe('NOOP');
-      expect(arg.drafts[2]!.ops[0]!.targetKey).toBe('克莱恩');
+      // 抑制键粒度=targetKey=具体变体（likely 名作键会让一次误报吞掉同名未来所有新变体）
+      expect(arg.drafts[2]!.ops[0]!.targetKey).toBe('克菜恩');
+      // detail 按 outcomes 同序回填真实提案 id（与 scan.ts 同纪律）
+      expect(json.detail).toEqual([{ proposalId: 'PR-1' }, { proposalId: 'PR-2' }, { proposalId: 'PR-3' }]);
     } finally {
       await close();
     }

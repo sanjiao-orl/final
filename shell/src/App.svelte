@@ -184,7 +184,7 @@
           <button class:active={!candidates.stagingTab && !inbox.tabOpen && !characters.tabOpen} onclick={() => { candidates.stagingTab = false; inbox.tabOpen = false; characters.tabOpen = false; }}>目录</button>
           <button class:active={candidates.stagingTab} onclick={() => { candidates.openStaging(); inbox.tabOpen = false; characters.tabOpen = false; }}>暂存 {candidates.pendingCount}</button>
           <button class:active={inbox.tabOpen} onclick={() => { candidates.stagingTab = false; characters.tabOpen = false; inbox.openTab(); }}>收件箱 {inbox.pendingCount}</button>
-          <button class:active={characters.tabOpen} onclick={() => { candidates.stagingTab = false; inbox.tabOpen = false; characters.openTab(); }}>角色 {characters.personCount}</button>
+          <button class:active={characters.tabOpen} onclick={() => { candidates.stagingTab = false; inbox.tabOpen = false; characters.openTab(); }}>角色 {characters.count}</button>
         </div>
         <div class="left-tree">
           {#if inbox.tabOpen}<InboxList />{:else if characters.tabOpen}<CharacterList />{:else if candidates.stagingTab}<StagingList />{:else}<TreeView />{/if}

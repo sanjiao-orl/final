@@ -202,6 +202,7 @@ export class CandidatesStore {
     this.generating = { chapter, original, instruction: instruction.trim(), text: '' };
     this.stagingTab = true; // 左栏实时展示生成状态
     inbox.tabOpen = false; // 收起收件箱 tab，AI 实时流可见（互斥单一出口）
+    characters.tabOpen = false; // 收起角色 tab（4.3 第四 tab 同一口径）
     const ac = new AbortController();
     this.generateAbort = ac;
     try {

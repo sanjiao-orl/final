@@ -48,6 +48,7 @@ import {
   issueSetStatus,
   ledgerChapterSlice,
   ledgerSlice,
+  assertNoDirectStateWrite,
   readLedger,
   readStyle,
   upsertLedger,
@@ -358,14 +359,17 @@ server.registerTool(
   {
     title: '更新四维账本',
     description:
-      '把一组操作应用到账本并原子写回（覆盖前旧账本自动快照进 .novel/history/；账本损坏时拒绝写入；写前复核账本未被其他进程改动，被改动则抛错不覆盖）。ops 元素按 op 区分：clock/prop/promise/knowledge（传 entry，按 chapters/name/id/character 键 upsert）、doNotReexplain/tripwire（传 item 去重追加）、protect（传 item 去重追加，可带 reason）、remove（按各维自然键删除：dimension 传 clock/prop/promise/knowledge/doNotReexplain/protect/tripwire，clock 再传 chapters 数组、prop 传 name、promise 传 id、knowledge 传 character、三张登记表传 item 文本精确匹配；找不到目标静默 no-op，幂等）。entry 结构：clock 需 chapters 非空字符串数组（可带 thread/storyDay/season/absoluteDate/notes）；prop 需 name + custody 数组（元素 {chapter, holder?}）；knowledge 需 character + knows 数组（元素可为字符串（纯事实）或 {fact, since?, refs?}，since=得知章 relPath 时间轴，refs=回指伏笔 id；可带 doesNotKnow/visibility/knownBy）；promise 需 id + name + setups 数组 + payoffs 数组（元素 {chapter, line?, quote?}），可带 due/note/heat/expectedVolume（预计回收卷）/links（{props?, characters?} 关联道具角色），arc 枚举 planted 埋设（缺省可不传）/pending 待回收/resolved 已回收/failed 断线。章引用（clock.chapters / prop.custody[].chapter / promise.setups[].chapter / promise.payoffs[].chapter）必须用 canonical `manuscript/卷/第N章.md` relPath（正斜杠），否则 overdue-promise 的章序匹配会失效。ledgerPath 必须是 .novel/ 根目录正下的 .md（不含子目录）。返回更新后账本与写结果。',
+      '把一组操作应用到账本并原子写回（覆盖前旧账本自动快照进 .novel/history/；账本损坏时拒绝写入；写前复核账本未被其他进程改动，被改动则抛错不覆盖）。ops 元素按 op 区分：clock/prop/promise/knowledge（传 entry，按 chapters/name/id/character 键 upsert）、doNotReexplain/tripwire（传 item 去重追加）、protect（传 item 去重追加，可带 reason）、character（4.3 角色卡：传 entry{name,...}，按 name 键 upsert；带 states 时整体替换动态层）、remove（按各维自然键删除：dimension 传 clock/prop/promise/knowledge/character/doNotReexplain/protect/tripwire，clock 再传 chapters 数组、prop 传 name、promise 传 id、knowledge 传 character、三张登记表传 item 文本精确匹配；找不到目标静默 no-op，幂等）。entry 结构：clock 需 chapters 非空字符串数组（可带 thread/storyDay/season/absoluteDate/notes）；prop 需 name + custody 数组（元素 {chapter, holder?}）；knowledge 需 character + knows 数组（元素可为字符串（纯事实）或 {fact, since?, refs?}，since=得知章 relPath 时间轴，refs=回指伏笔 id；可带 doesNotKnow/visibility/knownBy）；promise 需 id + name + setups 数组 + payoffs 数组（元素 {chapter, line?, quote?}），可带 due/note/heat/expectedVolume（预计回收卷）/links（{props?, characters?} 关联道具角色），arc 枚举 planted 埋设（缺省可不传）/pending 待回收/resolved 已回收/failed 断线。章引用（clock.chapters / prop.custody[].chapter / promise.setups[].chapter / promise.payoffs[].chapter）必须用 canonical `manuscript/卷/第N章.md` relPath（正斜杠），否则 overdue-promise 的章序匹配会失效。边界：character op 携带 states 时拒绝直写——位置/生死/境界等动态层走裁决回路（提案经收件箱作者裁决后落账）。ledgerPath 必须是 .novel/ 根目录正下的 .md（不含子目录）。返回更新后账本与写结果。',
     inputSchema: {
       workDir: z.string().describe('作品文件夹的绝对路径'),
       ops: z.array(z.record(z.string(), z.unknown())).describe('账本操作数组，每项须含字符串 op 字段'),
       ledgerPath: z.string().optional().describe('可选：账本文件相对 workDir 路径，必须是 .novel/ 根目录正下的 .md（不含子目录），默认 .novel/ledger.md'),
     },
   },
-  async ({ workDir, ops, ledgerPath }) => jsonResult(upsertLedger(workDir, ops as unknown as LedgerOp[], ledgerPath)),
+  async ({ workDir, ops, ledgerPath }) => {
+    assertNoDirectStateWrite(ops as unknown as LedgerOp[]);
+    return jsonResult(upsertLedger(workDir, ops as unknown as LedgerOp[], ledgerPath));
+  },
 );
 
 server.registerTool(
@@ -450,7 +454,7 @@ server.registerTool(
   {
     title: '登记/更新角色卡（静态层直写）',
     description:
-      '把角色卡静态层直写进账本 characters 表（name 键 upsert，走 upsert_ledger 的 CAS/快照管线）：name/aliases/kind（character|faction|location|lore，缺省 character）/role/faction/description/relations。设定登记（境界名/功法名/势力/地名）复用同模式。边界：拒收 states——位置/生死/境界修为等动态状态是区间原生事实，永远走裁决回路（提案经收件箱作者裁决），不做「当前值」直写。返回 {ledger, path, bytes}。',
+      '把角色卡静态层直写进账本 characters 表（name 键 upsert，走 upsert_ledger 的 CAS/快照管线）：name/aliases/kind（character|faction|location|lore，缺省 character）/role/faction/description/relations。设定登记（境界名/功法名/势力/地名）复用同模式。边界：states 字段被忽略（未传的动态字段自动保留既有值）——位置/生死/境界修为等动态状态是区间原生事实，只能经裁决回路写入（提案经收件箱作者裁决落账；ledger_upsert 直写带 states 会被拒绝），不做「当前值」直写。返回 {ledger, path, bytes}。',
     inputSchema: {
       workDir: z.string().describe('作品文件夹的绝对路径'),
       entry: z
@@ -526,6 +530,10 @@ server.registerTool(
   },
   async ({ workDir, chapterRelPaths, minCount, ledgerPath }) => {
     const { ledger } = readLedger(workDir, ledgerPath);
+    if ((ledger.characters ?? []).length === 0) {
+      // 角色维未启用：不跑正文挖掘（否则超域疑似=全量高频功能词噪音），与 character_refs 的 enabled 闸同口径
+      return jsonResult({ enabled: false, scanned: 0, mentions: [], unknownCandidates: [], variantSuspects: [] });
+    }
     const chapterOrder = chapterOrderForWork(workDir);
     return jsonResult(characterPrefilter(workDir, { chapterRelPaths, ledger, chapterOrder, minCount }));
   },

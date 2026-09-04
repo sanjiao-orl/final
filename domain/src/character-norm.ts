@@ -12,7 +12,12 @@ const HONORIFIC_SUFFIXES = ['先生', '女士', '小姐', '夫人', '老爷', '�
 /** 中文称谓前缀（老/小/阿 + 名：老尼尔→尼尔，命中别名谱或本名）。 */
 const HONORIFIC_PREFIXES = ['老', '小', '阿'];
 /** 同形词排除表：归一化结果落在这里=不是人名引用（防称谓剥离后的普通词/泛称误配；书级可扩充——词表数据化挂缓做）。 */
-const EXCLUDE_TABLE = new Set(['今日', '明日', '大人', '老爷', '天地', '天下', '长老', '大师', '父子', '姐妹', '兄弟', '二人', '三人']);
+const EXCLUDE_TABLE = new Set(['今日', '今天', '明日', '明天', '大人', '老爷', '天地', '天下', '长老', '大师', '父子', '姐妹', '兄弟', '二人', '三人', '他们', '自己', '我们', '什么', '这个', '那个']);
+
+/** 同形词排除表判定（导出供预筛超域候选过滤——功能词不入「超域疑似」队列）。 */
+export function isExcludedName(norm: string): boolean {
+  return EXCLUDE_TABLE.has(norm);
+}
 
 /** 名字归一：去空白/间隔点、小写。登记名保持原样入库，归一只发生在匹配形态层。 */
 export function normalizeName(s: string): string {
@@ -36,20 +41,28 @@ export function nameVariants(raw: string): string[] {
   return [...out].filter((x) => x.length >= 2 && !EXCLUDE_TABLE.has(x));
 }
 
-/** 词典精确匹配：名字/别名 → 命中条目（含称谓形态；同键先到先得=主名优先于别名）。 */
+/** 词典精确匹配：名字/别名 → 命中条目。构典两遍（先精确键后派生变体）——变体不得抢占他卡精确主名
+ * （如「老约翰」的派生键「约翰」不得吞掉后登记的精确卡「约翰」）；同档先到先得（主名优先于别名）。 */
 export function matchName(
   name: string,
   entries: CharacterEntry[],
 ): { entry: CharacterEntry; via: 'name' | 'alias'; matched: string } | null {
   if (entries.length === 0) return null;
-  const dict = new Map<string, { entry: CharacterEntry; via: 'name' | 'alias' }>();
+  const dict = new Map<string, { entry: CharacterEntry; via: 'name' | 'alias'; exact: boolean }>();
+  const put = (k: string, v: { entry: CharacterEntry; via: 'name' | 'alias'; exact: boolean }): void => {
+    const prev = dict.get(k);
+    if (!prev || (!prev.exact && v.exact)) dict.set(k, v);
+  };
   for (const e of entries) {
     const n = normalizeName(e.name);
-    if (n && !dict.has(n)) dict.set(n, { entry: e, via: 'name' });
+    if (n) put(n, { entry: e, via: 'name', exact: true });
     for (const a of e.aliases ?? []) {
       const an = normalizeName(a);
-      if (an && !dict.has(an)) dict.set(an, { entry: e, via: 'alias' });
+      if (an) put(an, { entry: e, via: 'alias', exact: true });
     }
+  }
+  for (const e of entries) {
+    for (const v of nameVariants(e.name)) put(v, { entry: e, via: 'name', exact: false });
   }
   for (const v of nameVariants(name)) {
     const hit = dict.get(v);

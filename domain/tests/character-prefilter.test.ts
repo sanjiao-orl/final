@@ -48,3 +48,20 @@ describe('characterPrefilter（workDir）', () => {
     expect(() => characterPrefilter(work, { chapterRelPaths: ['.novel/ledger.md'], ledger: { ...emptyLedger(), characters: DICT }, chapterOrder: [] })).toThrow(/manuscript/);
   });
 });
+
+describe('4.3 评审修复回归', () => {
+  it('跨章聚合：每章 1 次共 3 次的配角过聚合门槛（修复前逐章先行滤掉永不入选）', () => {
+    const work = makeWorkDir();
+    writeTree(work, {
+      'manuscript/第1章.md': '---\ntitle: 1\n---\n齐夏出场。',
+      'manuscript/第2章.md': '---\ntitle: 2\n---\n齐夏说话。',
+      'manuscript/第3章.md': '---\ntitle: 3\n---\n齐夏离开。',
+    });
+    const r = characterPrefilter(work, { ledger: { ...emptyLedger(), characters: DICT }, chapterOrder: [
+      { relPath: 'manuscript/第1章.md', title: '1' },
+      { relPath: 'manuscript/第2章.md', title: '2' },
+      { relPath: 'manuscript/第3章.md', title: '3' },
+    ] });
+    expect(r.unknownCandidates.find((c) => c.name === '齐夏')?.count).toBeGreaterThanOrEqual(3);
+  });
+});

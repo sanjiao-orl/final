@@ -235,6 +235,18 @@ function assertCharacterRow(entry: CharacterEntry): void {
 }
 
 /**
+ * 动态层直写拦截（4.3 角色维：states 只能经裁决回路落账）。ledger_upsert 直写工具闸用——
+ * 收件箱 adopt 走 inboxAdopt 直调 upsertLedger，不经此闸（提案已获作者裁决）。
+ */
+export function assertNoDirectStateWrite(ops: LedgerOp[]): void {
+  for (const op of ops) {
+    if (op.op === 'character' && op.entry.states !== undefined && op.entry.states.length > 0) {
+      throw new Error('动态层 states 不可直写：位置/生死/境界等状态走裁决回路（提案经收件箱作者裁决后落账）');
+    }
+  }
+}
+
+/**
  * applyOps：把一组操作应用到账本（纯函数，返回新对象）。
  * - clock：按 chapters 键 upsert（同名章节跨度替换，否则追加）；
  * - prop/promise/knowledge：按 name/id/character 键 upsert；
@@ -300,8 +312,13 @@ export function applyOps(ledger: Ledger, ops: LedgerOp[]): Ledger {
           assertCharacterRow(entry);
           const list = out.characters ?? [];
           const i = list.findIndex((c) => c.name === entry.name);
-          if (i >= 0) list[i] = entry;
-          else list.push(entry);
+          if (i >= 0) {
+            // 动态层保护：entry 未带 states 时保留既有 states（静态字段更新不得抹掉裁决回路的动态历史）；
+            // 带 states = 裁决回路显式写动态层，整体替换
+            list[i] = entry.states !== undefined ? entry : { ...entry, ...(list[i]!.states !== undefined ? { states: list[i]!.states } : {}) };
+          } else {
+            list.push(entry);
+          }
           out.characters = list;
           break;
         }
@@ -945,15 +962,17 @@ function normalizeLedger(raw: unknown): Ledger {
     if (description !== undefined) entry.description = description;
     const relations = str(o.relations);
     if (relations !== undefined) entry.relations = relations;
-    const states = arr(o.states).map((s): CharacterState => {
-      const so = (s ?? {}) as Record<string, unknown>;
-      const st: CharacterState = { field: str(so.field) ?? '', value: str(so.value) ?? '', since: str(so.since) ?? '' };
-      const line = num(so.line);
-      if (line !== undefined) st.line = line;
-      const quote = str(so.quote);
-      if (quote !== undefined) st.quote = quote;
-      return st;
-    });
+    const states = arr(o.states)
+      .map((s): CharacterState => {
+        const so = (s ?? {}) as Record<string, unknown>;
+        const st: CharacterState = { field: str(so.field) ?? '', value: str(so.value) ?? '', since: str(so.since) ?? '' };
+        const line = num(so.line);
+        if (line !== undefined) st.line = line;
+        const quote = str(so.quote);
+        if (quote !== undefined) st.quote = quote;
+        return st;
+      })
+      .filter((s) => s.field !== '' && s.value !== '' && s.since !== ''); // 残缺项丢弃（对齐 knowledgeFacts 容错口径，防回写垃圾）
     if (states.length > 0) entry.states = states;
     return entry;
     });
@@ -1527,13 +1546,16 @@ export function ledgerDiagnostics(ledger: Ledger, chapterOrder: ChapterRef[] = [
         groups.set(s.field, list);
       }
       for (const [field, list] of groups) {
-        for (let i = 1; i < list.length; i++) {
-          if (list[i]!.since === list[i - 1]!.since) {
+        // 同字段组内 since 重复（不限相邻）=生效序不定
+        const seen = new Map<string, number>();
+        for (const s of list) seen.set(s.since, (seen.get(s.since) ?? 0) + 1);
+        for (const [since, n] of seen) {
+          if (n > 1) {
             findings.push({
               code: 'character-state-order',
               severity: 'MINOR',
               category: 'CANON',
-              message: `角色「${c.name}」状态「${field}」同章多条（since=${list[i]!.since}）：生效序不定，请合并或区分章`,
+              message: `角色「${c.name}」状态「${field}」同章 ${n} 条（since=${since}）：生效序不定，请合并或区分章`,
             });
           }
         }

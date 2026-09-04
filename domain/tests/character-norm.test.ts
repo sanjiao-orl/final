@@ -60,3 +60,23 @@ describe('人名字段可解析引用（可选解析，未解析不报错只入�
     expect(r.unresolved.map((u) => u.name).sort()).toEqual(['神秘人', '陌生人']);
   });
 });
+
+describe('4.3 评审修复回归', () => {
+  it('matchName 两遍构典：派生变体不抢占他卡精确主名（老约翰 vs 约翰）', () => {
+    const dict: CharacterEntry[] = [{ name: '老约翰' }, { name: '约翰' }];
+    expect(matchName('约翰', dict)?.entry.name).toBe('约翰');
+    expect(matchName('老约翰', dict)?.entry.name).toBe('老约翰');
+  });
+
+  it('isExcludedName：功能词不入超域候选（排除表导出）', async () => {
+    const { isExcludedName } = await import('../src/character-norm.js');
+    expect(isExcludedName('今天')).toBe(true);
+    expect(isExcludedName('克莱恩')).toBe(false);
+  });
+
+  it('文档性记档：全角拉丁不折叠、繁体需显式登记（现状口径钉扎）', () => {
+    expect(normalizeName('ＫＬＡＩＮ')).toBe('ｋｌａｉｎ'); // 全角不转半角——现状如此，词典制 4.3+ 再校准
+    const dict: CharacterEntry[] = [{ name: '克莱恩' }];
+    expect(matchName('克萊恩', dict)).toBeNull(); // 繁体异形不命中——需显式登记别名
+  });
+});

@@ -24,7 +24,6 @@ describe('CharactersStore', () => {
     store.init(clientOf({ callTool: vi.fn().mockResolvedValue({ count: 1, characters: cards }) }));
     await store.load();
     expect(store.count).toBe(1);
-    expect(store.personCount).toBe(1);
     expect(store.entries[0]!.states?.[0]!.value).toBe('贝克兰德');
   });
 

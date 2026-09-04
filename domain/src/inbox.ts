@@ -155,13 +155,21 @@ export function inboxAppend(
       .filter((e) => e.proposal.status === 'discarded' && e.proposal.resolution?.dismiss?.reason === '误报')
       .flatMap((e) => e.proposal.ops.map(keyOf)),
   );
+  // 已观察键（4.3）：全 NOOP 观察提案被采纳=作者已阅，不再重报（否则观察提案无稳定终态，收件箱被同批变体反复灌）
+  const observedKeys = new Set(
+    entries
+      .filter((e) => e.proposal.status === 'adopted' && e.proposal.ops.length > 0 && e.proposal.ops.every((o) => o.action === 'NOOP'))
+      .flatMap((e) => e.proposal.ops.map(keyOf)),
+  );
   const added: string[] = [];
   const skipped: string[] = [];
   const outcomes: Array<{ id: string; added: boolean; skippedKeys?: string[] }> = [];
   for (const p of proposals) {
     // op 级去重（4.2.1 挂账承接）：重叠键剔除、新候选不整提案静默丢；全重叠才整条 skip
-    const fresh = p.ops.filter((o) => !pendingKeys.has(keyOf(o)) && !suppressedKeys.has(keyOf(o)));
-    const dupKeys = p.ops.filter((o) => pendingKeys.has(keyOf(o)) || suppressedKeys.has(keyOf(o))).map(keyOf);
+    const fresh = p.ops.filter((o) => !pendingKeys.has(keyOf(o)) && !suppressedKeys.has(keyOf(o)) && !observedKeys.has(keyOf(o)));
+    const dupKeys = p.ops
+      .filter((o) => pendingKeys.has(keyOf(o)) || suppressedKeys.has(keyOf(o)) || observedKeys.has(keyOf(o)))
+      .map(keyOf);
     if (fresh.length === 0) {
       skipped.push(p.id);
       outcomes.push({ id: p.id, added: false, ...(dupKeys.length > 0 ? { skippedKeys: dupKeys } : {}) });
@@ -202,6 +210,7 @@ export function verifyTargets(ledger: Ledger, proposal: Proposal): { ok: boolean
     if (op.op === 'doNotReexplain') return ledger.doNotReexplain.includes(op.fact);
     if (op.op === 'tripwire') return ledger.tripwires.includes(op.item);
     if (op.op === 'protect') return ledger.protect.some((p) => p.item === op.item);
+    if (op.op === 'character') return (ledger.characters ?? []).some((c) => c.name === op.entry.name);
     if (op.op === 'remove') {
       switch (op.dimension) {
         case 'promise':

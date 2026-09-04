@@ -37,8 +37,9 @@ export async function handleScanCharacterRequest(body: unknown, deps: ScanCharac
   res.on('close', onClose);
 
   try {
-    // 第一步：确定性预筛（零 LLM）
+    // 第一步：确定性预筛（零 LLM）；角色维未启用（domain enabled:false）→ 零候选自然零入箱
     const pre = (await callTool(deps, 'character_prefilter', { workDir, ...(chapterRelPaths ? { chapterRelPaths } : {}) }, abort.signal)) as {
+      enabled?: boolean;
       scanned?: number;
       mentions?: Array<{ name: string; count: number }>;
       unknownCandidates?: Array<{ name: string; count: number; firstChapter: string }>;
@@ -72,7 +73,8 @@ export async function handleScanCharacterRequest(body: unknown, deps: ScanCharac
           {
             action: 'NOOP',
             op: { op: 'character', entry: { name: v.likely } },
-            targetKey: v.likely,
+            // targetKey=具体变体（抑制键粒度=单条变体）：likely 名作键会让一次误报静默吞掉同名未来所有新变体
+            targetKey: v.variant,
             rationale: `同一人多写法嫌疑：「${v.variant}」≈「${v.likely}」（编辑距离 1，出现 ${v.count} 次）——裁决是否登记为别名`,
           },
         ],
@@ -82,10 +84,19 @@ export async function handleScanCharacterRequest(body: unknown, deps: ScanCharac
     // 第三步：入收件箱（MCP inbox_append；零草稿不调工具）
     let added: string[] = [];
     let skipped: string[] = [];
+    const detail: Array<{ proposalId: string }> = drafts.map((d) => ({ proposalId: String((d.ops[0] as { targetKey: string }).targetKey) }));
     if (drafts.length > 0) {
-      const r = (await callTool(deps, 'inbox_append', { workDir, drafts }, abort.signal)) as { added?: string[]; skipped?: string[] };
+      const r = (await callTool(deps, 'inbox_append', { workDir, drafts }, abort.signal)) as {
+        added?: string[];
+        skipped?: string[];
+        outcomes?: Array<{ id: string; added: boolean }>;
+      };
       added = r.added ?? [];
       skipped = r.skipped ?? [];
+      // outcomes 与草稿同序（domain 4.2.1+）：回填真实提案 id（与 scan.ts 同纪律）
+      r.outcomes?.forEach((o, i) => {
+        if (detail[i]) detail[i]!.proposalId = o.added ? o.id : `skipped:${detail[i]!.proposalId}`;
+      });
     }
 
     writeJson(
@@ -97,7 +108,7 @@ export async function handleScanCharacterRequest(body: unknown, deps: ScanCharac
         unknownCandidates: unknownCandidates.length,
         variantSuspects: variantSuspects.length,
         inbox: { added, skipped },
-        detail: drafts.map((d) => ({ proposalId: d.ops[0] ? String((d.ops[0] as { targetKey: string }).targetKey) : '' })),
+        detail,
       },
       req.headers.origin,
     );

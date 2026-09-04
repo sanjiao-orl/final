@@ -250,3 +250,42 @@ describe('语义预检与 op 级去重（4.2.1 挂账在 4.3 承接）', () => {
     expect(kept.ops.map((o) => o.targetKey)).toEqual(['P-003']);
   });
 });
+
+describe('4.3 评审修复回归', () => {
+  it('character 维语义预检：ADD 占用 deny、UPDATE ghost deny；adopt 后回读✅', () => {
+    const work = makeWorkDir();
+    seedLedger(work);
+    const addChar: ProposalOp = { action: 'ADD', op: { op: 'character', entry: { name: '克莱恩' } }, targetKey: '克莱恩', evidence: { chapter: CH, quote: 'q' }, rationale: 'r' };
+    const p1 = makeProposal('scan', [addChar]);
+    inboxAppend(work, [p1]);
+    const r1 = inboxAdopt(work, p1.id);
+    expect(r1.applied).toBe(true);
+    expect(r1.verify?.ok).toBe(true);
+    // 再扫同名 → ADD 键占用 deny（转人工）
+    const p2 = makeProposal('scan', [addChar]);
+    inboxAppend(work, [p2]);
+    const r2 = inboxAdopt(work, p2.id);
+    expect(r2.applied).toBe(false);
+    expect(r2.denials.join()).toContain('ADD 键已占用');
+    // UPDATE ghost deny
+    const updGhost: ProposalOp = { action: 'UPDATE', op: { op: 'character', entry: { name: '不存在' } }, targetKey: '不存在', evidence: { chapter: CH, quote: 'q' }, rationale: 'r' };
+    const p3 = makeProposal('scan', [updGhost]);
+    inboxAppend(work, [p3]);
+    const r3 = inboxAdopt(work, p3.id);
+    expect(r3.applied).toBe(false);
+    expect(r3.denials.join()).toContain('UPDATE 目标不在位');
+  });
+
+  it('已观察键：全 NOOP 观察提案 adopt 后不再重报（观察有稳定终态）', () => {
+    const work = makeWorkDir();
+    seedLedger(work);
+    const noopOp: ProposalOp = { action: 'NOOP', op: { op: 'character', entry: { name: '克莱恩' } }, targetKey: '克菜恩', rationale: '观察' };
+    const p = makeProposal('scan', [noopOp]);
+    inboxAppend(work, [p]);
+    const r = inboxAdopt(work, p.id);
+    expect(r.applied).toBe(false); // 全 NOOP 零落账
+    const again = inboxAppend(work, [makeProposal('scan', [noopOp])]);
+    expect(again.added).toEqual([]); // adopted 观察键抑制再入
+    expect(again.skipped.length).toBe(1);
+  });
+});

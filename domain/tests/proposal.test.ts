@@ -123,3 +123,19 @@ describe('md 序列化 round-trip', () => {
     expect(parseProposal(serializeProposal(p))).toEqual(p);
   });
 });
+
+describe('protect 别名写闸（4.3）', () => {
+  it('protect 项命中角色卡别名 → deny（修复前别名盲区）', () => {
+    const ledger: Ledger = { ...emptyLedger(), protect: [{ item: '世界' }] };
+    const upd: ProposalOp = {
+      action: 'UPDATE',
+      op: { op: 'character', entry: { name: '克莱恩', aliases: ['世界'] } },
+      targetKey: '克莱恩',
+      evidence: { chapter: 'manuscript/第1章.md', quote: 'q' },
+      rationale: 'r',
+    };
+    const v = validateProposal(makeProposal('scan', [upd]), ledger);
+    expect(v.ok).toBe(false);
+    expect(v.denials[0]).toContain('PROTECT');
+  });
+});

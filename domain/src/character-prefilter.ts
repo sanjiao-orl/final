@@ -9,7 +9,7 @@
 import fs from 'node:fs';
 import { frontmatterEnd } from './frontmatter.js';
 import { assertWorkDir, errText, resolveInsidePosix } from './fsutil.js';
-import { matchName, normalizeName, samePersonVariants, type VariantSuspect } from './character-norm.js';
+import { matchName, normalizeName, isExcludedName, samePersonVariants, type VariantSuspect } from './character-norm.js';
 import type { ChapterRef, CharacterEntry, Ledger } from './ledger.js';
 
 export interface NameMention {
@@ -91,6 +91,7 @@ export function prefilterCharacters(body: string, entries: CharacterEntry[], opt
   for (const cand of candidateNames(body)) {
     const norm = normalizeName(cand);
     if (norm.length < 2) continue;
+    if (isExcludedName(norm)) continue; // 功能词不入「超域疑似」队列（排除表本建来干这个，4.3 评审补接）
     if (matchName(cand, entries)) continue; // 词典命中=提及，非超域
     const prev = unknown.get(norm);
     if (prev) prev.count++;
@@ -133,7 +134,8 @@ export function characterPrefilter(workDir: string, opts?: { chapterRelPaths?: s
       throw err;
     }
     const body = content.slice(frontmatterEnd(content));
-    const part = prefilterCharacters(body, entries, { minCount: opts?.minCount ?? 3 });
+    // minCount 传 1：逐章只计数，跨章聚合后统一过门槛（修复前逐章先行过滤，跨章累积的低频配角永不入选）
+    const part = prefilterCharacters(body, entries, { minCount: 1 });
     for (const m of part.mentions) {
       const prev = mentions.get(m.name);
       if (prev) {

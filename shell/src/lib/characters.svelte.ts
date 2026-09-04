@@ -33,7 +33,6 @@ export class CharactersStore {
   /** 最近一次角色补账扫描读数。 */
   lastScan = $state<{ unknownCandidates: number; variantSuspects: number; added: number; skipped: number } | null>(null);
   count = $derived(this.entries.length);
-  personCount = $derived(this.entries.filter((c) => (c.kind ?? 'character') === 'character').length);
 
   private client!: CoreClient;
 
@@ -58,7 +57,7 @@ export class CharactersStore {
 
   /** 触发角色维确定性补账（零 LLM：超域疑似/写法变体提案入收件箱，作者裁决）。 */
   async scan(maxCandidates?: number): Promise<void> {
-    if (this.scanning || !this.client) return;
+    if (this.scanning || !this.client || !work.workDir) return;
     this.scanning = true;
     try {
       const r = await this.client.scanCharacters(work.workDir, maxCandidates);
