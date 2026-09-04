@@ -9,6 +9,7 @@ import { describeLlm, getGitCommit, getToolTimeoutSeconds } from './config.js';
 import { devPage } from './dev.js';
 import { corsHeadersFor, HttpError, readJsonBody, toPublicErrorMessage, writeJson, writeJson413 } from './http.js';
 import { handleReviewRequest } from './review.js';
+import { handleScanRequest } from './scan.js';
 import { handleContinueRequest, type ContinueDeps } from './continue.js';
 import { handleRewriteRequest, type RewriteDeps } from './rewrite.js';
 import { generateChapterSummary, type SummaryDeps } from './summary.js';
@@ -244,6 +245,17 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: ServerDeps
   if (req.method === 'POST' && pathname === '/v1/review') {
     const body = await readJsonBody(req);
     await handleReviewRequest(body, {
+      modelForTier: deps.chat.modelForTier,
+      tools: deps.chat.tools,
+      ...(deps.chat.toolsAvailable ? { toolsAvailable: deps.chat.toolsAvailable } : {}),
+    }, req, res);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/v1/scan/promise') {
+    // 补账扫描（4.2 承诺·伏笔窄域）：预筛（domain）→ LLM 判定（便宜档）→ 提案入收件箱；不在写作热路径。
+    const body = await readJsonBody(req);
+    await handleScanRequest(body, {
       modelForTier: deps.chat.modelForTier,
       tools: deps.chat.tools,
       ...(deps.chat.toolsAvailable ? { toolsAvailable: deps.chat.toolsAvailable } : {}),
