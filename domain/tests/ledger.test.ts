@@ -1024,6 +1024,30 @@ describe('ledgerSlice（审阅输入组装，禁止全量注入）', () => {
     expect(slice).toContain('### 第1章·{{章节内容}}');
     expect(slice).toContain('正文提到 {{问题日志尾部}} 与 {{章节内容}}。');
   });
+
+  it('budget 闸：传 budget 时切片走索引层（压预算+附注入构成），缺省行为零变', () => {
+    const work = makeWorkDir();
+    // 造 300 章让账本切片在全量渲染下显著超预算
+    const files: Record<string, string> = {};
+    for (let i = 1; i <= 300; i++) files[`manuscript/第${i}章.md`] = '---\ntitle: 章\n---\n正文。';
+    writeTree(work, files);
+    // 账本带大量伏笔（渲染全量很大）
+    const promises = Array.from({ length: 800 }, (_, i) => ({ id: `P-${i}`, name: `伏笔${i}`, arc: 'planted' as const, setups: [{ chapter: `manuscript/第${(i % 300) + 1}章.md` }], payoffs: [] }));
+    writeLedger(work, { ...emptyLedger(), promises });
+    // 缺省：全量渲染（行为零变——slice 含全部伏笔名，无附加字段）
+    const base = ledgerSlice(work, 'manuscript/第300章.md');
+    expect(base.slice).toContain('伏笔0');
+    expect(base).not.toHaveProperty('ledgerSliceChars');
+    // 传 budget：压进预算
+    const cut = ledgerSlice(work, 'manuscript/第300章.md', undefined, undefined, { budget: 30_000 }) as typeof base & { ledgerSliceChars: number; ledgerSliceComposition: Record<string, number> };
+    expect(cut.slice.length).toBeLessThan(base.slice.length);
+    expect(cut.ledgerSliceChars).toBeLessThanOrEqual(30_000);
+    expect(cut.ledgerSliceComposition).toBeDefined();
+    // 索引切片仍含承重伏笔（区间在 300 章生效）
+    expect(cut.slice).toContain('伏笔');
+    // 章守卫不变：非 manuscript 章照旧抛错
+    expect(() => ledgerSlice(work, '.novel/ledger.md', undefined, undefined, { budget: 1000 })).toThrow(/manuscript/);
+  });
 });
 
 describe('countBlockers', () => {

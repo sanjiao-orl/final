@@ -22,6 +22,7 @@ import { atomicWrite, assertWorkDir, collectMdFiles, errText, resolveInside, sor
 import { frontmatterEnd, parseFrontmatter } from './frontmatter.js';
 import { loadPrompt } from './prompts.js';
 import { SNAPSHOT_KEEP } from './tools.js';
+import { indexedSliceForWork } from './ledger-index.js';
 
 // ---------- 类型 ----------
 
@@ -1483,6 +1484,7 @@ export function ledgerSlice(
   chapterRelPath: string,
   ledgerPath?: string,
   issueLogPath?: string,
+  opts?: { budget?: number },
 ): { workDir: string; chapterRelPath: string; slice: string; injectedChapters: string[] } {
   const wd = assertWorkDir(workDir);
   const { ledger } = readLedger(wd, ledgerPath);
@@ -1519,6 +1521,15 @@ export function ledgerSlice(
   }
 
   const template = coldReadSliceTemplate();
+  // 4.1 冷读预算闸（reference/05 §批次结构）：opts.budget 传入时，{{账本切片}} 走索引层区间裁剪
+  // （类型配额，压进预算；composition 供注入可见性）——缺省不传则维持原全量渲染路径，行为零变。
+  let ledgerSection: string | null = null;
+  let sliceExtra: Record<string, unknown> | null = null;
+  if (opts?.budget !== undefined) {
+    const cut = indexedSliceForWork(wd, chapterPosix, ledger, chapterOrder, { budget: opts.budget });
+    ledgerSection = cut.lines.length ? cut.lines.join('\n') : '（账本在预算内无生效条目）';
+    sliceExtra = { ledgerSliceChars: cut.chars, ledgerSliceBudget: opts.budget, ledgerSliceDropped: cut.dropped, ledgerSliceComposition: cut.composition };
+  }
   // 单趟替换四个占位符（一次扫描，替换结果不再被扫描）：避免「正文/标题/日志尾部」这类用户可控文本里
   // 恰好含其它占位 token 时被后续 replaceAll 二次替换、混入审阅输入。
   const slice = template.replace(
@@ -1526,7 +1537,7 @@ export function ledgerSlice(
     (token) => {
       switch (token) {
         case '{{账本切片}}':
-          return renderLedgerMarkdown(ledger, { chapterOrder });
+          return ledgerSection ?? renderLedgerMarkdown(ledger, { chapterOrder });
         case '{{章节标题}}':
           return title;
         case '{{章节内容}}':
@@ -1537,7 +1548,7 @@ export function ledgerSlice(
     }
   );
 
-  return { workDir: wd, chapterRelPath, slice, injectedChapters: [chapterRelPath] };
+  return { workDir: wd, chapterRelPath, slice, injectedChapters: [chapterRelPath], ...(sliceExtra ? sliceExtra : {}) };
 }
 
 export interface LedgerChapterSliceResult {

@@ -11,7 +11,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { chapterOrderForWork, emptyLedger, type ChapterRef, type KnowledgeEntry, type Ledger, type PropEntry, type PromiseEntry } from './ledger.js';
+import type { ChapterRef, KnowledgeEntry, Ledger, PropEntry, PromiseEntry } from './ledger.js'; // 仅类型——防运行时环（ledger.ts 预算闸反向引用本模块）
 import { assertWorkDir, toPosix } from './fsutil.js';
 import { intervalActiveAt, ledgerToFacts, type FactEnvelope, type FactInterval } from './envelope.js';
 
@@ -145,13 +145,12 @@ export function indexedSliceFromIndex(index: LedgerIndex, order: number, budget 
   return { lines, chars, dropped, composition };
 }
 
-/** workDir 入口：构建索引 → 区间裁剪切片（不做正文读取——正文注入仍由既有 ledgerSlice 负责）。 */
-export function indexedSlice(workDir: string, chapterRelPath: string, opts?: { budget?: number; ledger?: Ledger; chapterOrder?: ChapterRef[] }): ReturnType<typeof indexedSliceFromIndex> {
+/** workDir 入口：构建索引 → 区间裁剪切片（章序表与账本由调用方传入——本模块只依赖类型不反引 ledger.ts）。 */
+export function indexedSliceForWork(workDir: string, chapterRelPath: string, ledger: Ledger, chapterOrder: ChapterRef[], opts?: { budget?: number }): ReturnType<typeof indexedSliceFromIndex> {
   const wd = assertWorkDir(workDir);
-  const orderTable = opts?.chapterOrder ?? chapterOrderForWork(wd);
-  const ledger = opts?.ledger ?? emptyLedger();
+  const orderTable = chapterOrder;
   const pos = orderTable.findIndex((c) => c.relPath === toPosix(chapterRelPath));
-  if (pos < 0) throw new Error(`indexedSlice：章不在章序表内: ${chapterRelPath}`);
+  if (pos < 0) throw new Error(`indexedSliceForWork：章不在章序表内: ${chapterRelPath}`);
   const order = Number(chapterRelPath.match(/(\d+)/)?.[1] ?? pos + 1);
   const index = buildLedgerIndex(ledger, orderTable);
   return indexedSliceFromIndex(index, order, opts?.budget);

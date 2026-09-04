@@ -391,10 +391,11 @@ server.registerTool(
       chapterRelPath: z.string().describe('当前审阅章相对 workDir 路径，必须是 manuscript/ 内的 .md，如 manuscript/卷一/第1章.md'),
       ledgerPath: z.string().optional().describe('可选：账本文件相对 workDir 路径，必须是 .novel/ 根目录正下的 .md（不含子目录）'),
       issueLogPath: z.string().optional().describe(`可选：问题日志相对 workDir 路径，必须是 .novel/ 根下或 editorial_notes/ 下的 .md（注入最后约 ${ISSUE_LOG_TAIL_LINES} 行作续读上下文）`),
+      budget: z.number().int().positive().optional().describe('可选：账本切片字符预算（4.1 冷读预算闸）。传入时账本切片走索引层按生效区间+类型配额裁剪压进预算，返回附 ledgerSliceChars/Composition 注入构成；缺省=全量账本渲染（原行为）'),
     },
   },
-  async ({ workDir, chapterRelPath, ledgerPath, issueLogPath }) =>
-    jsonResult(ledgerSlice(workDir, chapterRelPath, ledgerPath, issueLogPath)),
+  async ({ workDir, chapterRelPath, ledgerPath, issueLogPath, budget }) =>
+    jsonResult(ledgerSlice(workDir, chapterRelPath, ledgerPath, issueLogPath, budget !== undefined ? { budget } : undefined)),
 );
 
 // 批三-3：按章过滤的账本视图（只读，不注入全账本）
