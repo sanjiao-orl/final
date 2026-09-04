@@ -1,11 +1,12 @@
 /**
- * server.ts —— MCP stdio server 装配：注册三十八个工具并连接 stdio transport。
+ * server.ts —— MCP stdio server 装配：注册 42 个工具（38 基线+4.2 加法 4）并连接 stdio transport。
  * 双侧合并口径：基础工具 8 个 + WS-9 scan_quality + A 组 8 工具 + WS-17 账本 4 工具 + 0008 skill_read 1 工具 + 0009 问题日志 2 工具（issue_append/issue_set_status）+ scheme_set_active 1 工具（激活/取消激活方案指针）。
  * 批三-3 新增 2 工具：ledger_chapter_slice（按章过滤的账本视图，只读）+ write_meta（书级元数据写入，不写账本/不写正文）。
  * 批一③ 碰撞模式 新增 3 工具：decision_append（裁决留痕追加）/ decision_tail（裁决留痕尾部只读）/ chapter_set_blueprint（章蓝图模式设置），并在 frontmatter 透出 blueprint、buildChapter 透传。
  * 块1 理解层供料 新增 4 工具：ledger_reconcile（证据锚对账）/ write_chapter_summary + read_chapter_summaries（章摘要导生缓存，机检字段首写冻结）/ list_trash（回收站收口）；ledger_diagnostics 输出并入节奏诊断（pacing-flat，加法）。
  * 块1 遗留缺陷修复 新增 1 工具：restore_trash（找回回收站条目 = move-back 移回原路径，trash 副本不再存在）。
  * 块2 声口批 新增 2 工具：read_style（声口档案全文读回，摘要只是投影）+ voice_fingerprint（声口指纹确定性度量与偏离对照），现共 38 个工具。
+ * 块4.1/4.2 新增 4 工具：promise_prefilter（承诺伏笔确定性预筛）+ inbox_list / inbox_append / inbox_decide（统一裁决收件箱三件套），现共 42 个；ledger_slice 增可选 budget 入参（4.1 预算闸，缺省行为零变）。
  * 被 core 包经 MCP stdio spawn 调用；工具实现见 tools.ts / ledger.ts / reconcile.ts / summaries.ts / voice.ts。
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
