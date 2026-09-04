@@ -50,10 +50,11 @@ for (const f of getMdFiles('docs/reference')) {
   }
 }
 
-// 3. AGENTS.md 行数上限 50(防错清单,不是说明书)
+// 3. AGENTS.md 行数上限 50(防错清单,不是说明书);gitnexus:start:end 生成块豁免(机械注入,非人写内容)
 if (existsSync('AGENTS.md')) {
-  const agentsLines = readFileSync('AGENTS.md', 'utf8').split('\n').length;
-  if (agentsLines > 50) err(`AGENTS.md 当前 ${agentsLines} 行,超 50 行上限`);
+  const stripped = readFileSync('AGENTS.md', 'utf8').replace(/<!-- gitnexus:start -->[\s\S]*?<!-- gitnexus:end -->/g, '');
+  const agentsLines = stripped.split('\n').length;
+  if (agentsLines > 50) err(`AGENTS.md 当前 ${agentsLines} 行(已剔除 gitnexus 生成块),超 50 行上限`);
 }
 
 // 4. archive/ 逐件索引在位(防旧文档被误读为现行方案)
